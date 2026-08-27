@@ -110,7 +110,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.1.0";
+    public static final String VERSION = "0.1.1";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -632,7 +632,7 @@ public final class FamiliarMain {
                                                 surface above as tools to any MCP host.
               acp                               Agent Client Protocol v1 agent on stdio. Streams
                                                 tool activity and supports mid-run cancellation.
-              run --text <task> [opts]          one coding task, one JSON result on stdout, for a
+              run --text <task|@file|-> [opts]  one coding task, one JSON result on stdout, for a
                                                 host that drives a subprocess. The working
                                                 directory IS the workspace.
                 --output-format json            emit the result document (narration goes to stderr)
@@ -642,6 +642,9 @@ public final class FamiliarMain {
                                                 so a one-file task grows a test suite to satisfy them
                 --model <m> / --provider <p>    per-invocation model; provider is recorded only
                 -q                              silence narration entirely
+                --text @FILE  (or -)            read the task from a file (or stdin). Windows needs
+                                                this for a task over ~8K: cmd.exe refuses a longer
+                                                command line, so the .bat launcher never starts
                 exit codes: 0 finished · 2 ran out of turns (files[] is still real) · 1 failed
               --version                         print the version and exit — the health check
 
@@ -2232,8 +2235,11 @@ public final class FamiliarMain {
         String path = Config.get("CODEZAIKU_SARIF");
         if (path == null || path.isBlank()) return;
         try {
+            // VERSION, not a literal: the release checklist names three places to bump and this was a
+            // silent fourth. A stale version here does not look wrong — the SARIF is valid and the
+            // findings are right — it just tells whatever ingests it that an older CodeZaiku found them.
             String json = Sarif.toJson(
-                    Sarif.fromReview(findings), "CodeZaiku", "0.1.0");
+                    Sarif.fromReview(findings), "CodeZaiku", VERSION);
             Files.writeString(Path.of(path), json);
             System.out.println("review: wrote " + findings.size() + " finding(s) as SARIF to " + path);
         } catch (Exception e) {

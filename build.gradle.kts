@@ -8,7 +8,7 @@ subprojects {
     apply(plugin = "java")
 
     group = "org.codezaiku"
-    version = "0.1.0"
+    version = "0.1.1"
 
     // 21 is the FLOOR the code needs — the docs, `codezaiku doctor` and the .deb dependency all say
     // "21 or newer". Expressing that as `toolchain { languageVersion = 21 }` did not say it: a Gradle

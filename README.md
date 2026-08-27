@@ -93,23 +93,29 @@ somewhere else, `CODEZAIKU_VERSION` pins a release.
 dependency, so `apt` installs one for you:
 
 ```bash
-sudo apt install ./codezaiku_0.1.0_all.deb
+sudo apt install ./codezaiku_0.1.1_all.deb
 ```
 
 The one-liners deliberately do not install a JRE themselves: a script piped into a shell should not
 be reaching for `sudo`. They check for one, and say so if it is missing.
 
+**To upgrade, run the same command again.** The installers resolve the latest release each time and
+replace the old install rather than writing over it, so nothing stale is left behind. Your config and
+data in `~/.codezaiku` are untouched. The `.deb` upgrades in place with
+`sudo apt install ./codezaiku_<new>_all.deb` and keeps `/var/lib/codezaiku`; if you enabled
+`codezaiku.service`, the upgrade does not restart it, it tells you to when it suits you.
+
 <details>
 <summary>Other ways: tarball by hand, .deb, from source</summary>
 
 ```bash
-tar xzf codezaiku-0.1.0.tar.gz          # unpacks a ready-to-run ./codezaiku
+tar xzf codezaiku-0.1.1.tar.gz          # unpacks a ready-to-run ./codezaiku
 ./codezaiku/bin/codezaiku --version     # works immediately
 sudo mv codezaiku /opt/codezaiku
 sudo ln -s /opt/codezaiku/bin/codezaiku /usr/local/bin/codezaiku
 ```
 
-On Debian or Ubuntu, `sudo apt install ./codezaiku_0.1.0_all.deb` — it installs to `/opt/codezaiku`,
+On Debian or Ubuntu, `sudo apt install ./codezaiku_0.1.1_all.deb` — it installs to `/opt/codezaiku`,
 links `/usr/bin/codezaiku`, and lets apt pull a JRE. The systemd unit it ships is disabled; nothing
 starts on its own.
 
@@ -158,7 +164,7 @@ and why `codezaiku smoke` is the check that matters.
 ### Debian / Ubuntu
 
 ```bash
-sudo apt install ./codezaiku_0.1.0_all.deb     # build it: packaging/deb/build-deb.sh
+sudo apt install ./codezaiku_0.1.1_all.deb     # build it: packaging/deb/build-deb.sh
 ```
 
 Installs to `/opt/codezaiku` with `/usr/bin/codezaiku`. A systemd unit is included but **not
@@ -170,7 +176,7 @@ Every release asset ships with `SHA256SUMS` and a Sigstore bundle (`<asset>.sigs
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify codezaiku-0.1.0.tar.gz --repo Wyrdsekai/codezaiku
+gh attestation verify codezaiku-0.1.1.tar.gz --repo Wyrdsekai/codezaiku
 ```
 
 `gh attestation` needs **GitHub CLI 2.49 or newer**. An older `gh` reports `unknown command` with no hint why — check with `gh --version` before concluding the signature is bad.

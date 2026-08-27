@@ -34,9 +34,15 @@ Two hard requirements and one soft one.
 calls cannot drive it at all. With llama.cpp you need `--jinja` so the server applies the model's own
 chat template; without it, tool calls come back as prose and nothing works.
 
-**2. A context window of at least 8k, ideally 32k.** The loop keeps a growing conversation and compacts
-it, but small windows force compaction so often that the model loses the thread. `codezaiku doctor`
-reports the window it detects and warns below 8k.
+**2. A context window of at least 8k for interactive use, 12k to be driven by another agent, 32k if
+you have it.** The loop keeps a growing conversation and compacts it, but small windows force
+compaction so often that the model loses the thread. `codezaiku doctor` reports the window it detects
+and flags both floors.
+
+The second number is not a guess. A host dispatch carries its own task preamble on top of the pinned
+project block, and one measured at 8k refused before its first turn — 9,619 tokens into 8,192. The
+request is bounded before it is sent rather than retried, so it fails as one clean refusal naming
+both counts, not as a run that quietly degrades. Provision 16k for a backend.
 
 **3. Instruction-following on long, structured prompts** (soft). The operator prompts carry sensor
 output, logs and card content; models that drift on long inputs localize badly.

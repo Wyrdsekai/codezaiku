@@ -88,7 +88,7 @@ curl -fsSL https://codezaiku.org/install | sh
 Or unpack the tarball by hand — it runs straight out of it:
 
 ```bash
-tar xzf codezaiku-0.1.0.tar.gz && ./codezaiku/bin/codezaiku --version
+tar xzf codezaiku-0.1.1.tar.gz && ./codezaiku/bin/codezaiku --version
 ```
 
 Needs a JDK 21+ — `brew install openjdk@21`, or any Temurin build. Nothing is compiled and nothing is
@@ -194,7 +194,7 @@ By hand instead, from Git Bash:
 ```bash
 export JAVA_HOME=/c/path/to/jdk21-or-newer
 export PATH="$JAVA_HOME/bin:$PATH"
-tar xzf codezaiku-0.1.0.tar.gz && ./codezaiku/bin/codezaiku --version
+tar xzf codezaiku-0.1.1.tar.gz && ./codezaiku/bin/codezaiku --version
 ```
 
 Verified on Windows 11 from a clean unpack. Use the extensionless `codezaiku`, not `codezaiku.bat`:
@@ -205,6 +205,22 @@ What was verified natively: `--version`, `doctor`, the test oracle, the full `ru
 document on stdout, `taskId` echoed, files written, `files[]` correct and excluding pre-existing
 work), ACP (protocol v1, sessions, error codes, uncorrupted stdout), MCP, and `secure` — **17 checks,
 no failures**, plus the one skip the platform makes unavoidable (below).
+
+### Long tasks: pass a file, not an argument
+
+Windows caps a command line at 8,191 characters, and `codezaiku.bat` runs through cmd.exe, so a long
+`--text` never reaches CodeZaiku — the launcher dies with `The command line is too long` and exit `1`
+before anything of ours runs. Anything driving `run` with a real task preamble will hit this.
+
+Use the file or stdin form, which works identically on every platform:
+
+```powershell
+codezaiku run --text @C:\Users\you\task.md --output-format json --no-session -q
+```
+
+`--text -` reads the task from stdin instead. Both are the same `@file` convention `code`, `fix`,
+`research` and `decompose` already take for their goals. Linux and macOS have limits in the megabytes
+and will not show you this ceiling.
 
 ### Which shell runs your commands
 

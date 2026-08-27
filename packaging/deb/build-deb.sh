@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-VERSION="${CODEZAIKU_VERSION:-$(cat "$REPO_ROOT/VERSION" 2>/dev/null || echo 0.1.0)}"
+VERSION="${CODEZAIKU_VERSION:-$(cat "$REPO_ROOT/VERSION" 2>/dev/null || echo 0.1.1)}"
 PKG="codezaiku_${VERSION}_all"
 DEB_ROOT="$REPO_ROOT/build/deb/$PKG"
 OUT_DIR="$REPO_ROOT/build/deb"
@@ -111,7 +111,22 @@ cat > "$DEB_ROOT/DEBIAN/postinst" << 'EOF'
 #!/bin/sh
 set -e
 mkdir -p /var/lib/codezaiku
-if [ "$1" = configure ]; then
+# An UPGRADE ($2 is the old version) swaps the jars under any running service. A JVM loads classes
+# lazily, so a process started against the old jars can fail on the first class it has not touched
+# yet, minutes later and far from the cause. We do NOT restart it: this operator can change live
+# systems, and taking one down mid-remediation to install a patch release is exactly the kind of
+# unasked-for action the rest of the design refuses. Say it plainly and let the admin choose.
+if [ "$1" = configure ] && [ -n "$2" ] && systemctl is-active --quiet codezaiku.service 2>/dev/null; then
+  cat <<'MSG'
+
+codezaiku.service is RUNNING and still has the previous version's jars open.
+Restart it when it is safe to do so:
+
+  sudo systemctl restart codezaiku
+
+MSG
+fi
+if [ "$1" = configure ] && [ -z "$2" ]; then
   cat <<'MSG'
 
 CodeZaiku installed.

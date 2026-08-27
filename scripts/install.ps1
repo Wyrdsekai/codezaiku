@@ -21,7 +21,13 @@ $base = $env:CODEZAIKU_DOWNLOAD_BASE          # test hook; empty means GitHub
 $prefix = if ($env:CODEZAIKU_PREFIX) { $env:CODEZAIKU_PREFIX }
           else { Join-Path $env:LOCALAPPDATA 'Programs' }
 
-function Die($m) { Write-Error "codezaiku: $m"; exit 1 }
+# NOT Write-Error. That renders a full PowerShell error record -- 'Die : codezaiku: java not
+# found', then 'At line:28 char:19', a source excerpt with a squiggle, and a CategoryInfo block.
+# For an installer it is the first thing a new user ever sees from us, and it reads as the script
+# crashing rather than as the one-line prerequisite check it is. Measured on Windows 11 against the
+# published 0.1.0 script. The shell installer's `die` has always printed one line to stderr; this
+# is the odd one out.
+function Die($m) { [Console]::Error.WriteLine("codezaiku: $m"); exit 1 }
 
 # A JRE is the one thing not bundled. Fail before downloading 23MB nobody can run.
 $java = Get-Command java -ErrorAction SilentlyContinue

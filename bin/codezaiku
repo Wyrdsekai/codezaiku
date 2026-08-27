@@ -13,6 +13,18 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The caller's directory is ARGUMENT DATA, not just where we happened to be standing: `run` treats
+# the working directory AS the workspace, and every relative path a user types — `code ./repo`,
+# `--text @task.md` — resolves against it. So we stand in REPO_ROOT for the build below, which needs
+# ./gradlew and core/src, and step back before exec.
+#
+# Without the step back, `bin/codezaiku run` from any other directory silently used THIS checkout as
+# the workspace, and a real drive would have had the model edit CodeZaiku instead of the project.
+# Measured, not reasoned: `workspacePath` in the result document came back as this checkout rather
+# than the directory the command was run from. It never reached a release — a release ships gradle's
+# start script, which does not cd — so this is dev-launcher only.
+CALLER_PWD="$PWD"
 cd "$REPO_ROOT"
 
 CP_CACHE="$REPO_ROOT/.codezaiku-cp"
@@ -52,4 +64,6 @@ if needs_build; then
   [[ -s "$CP_CACHE" ]] || die "classpath came back empty"
 fi
 
-exec java $JAVA_OPTS -cp "$(cat "$CP_CACHE")" org.codezaiku.FamiliarMain "$@"
+CP="$(cat "$CP_CACHE")"
+cd "$CALLER_PWD"
+exec java $JAVA_OPTS -cp "$CP" org.codezaiku.FamiliarMain "$@"

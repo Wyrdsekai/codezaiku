@@ -44,6 +44,13 @@ class SarifTest {
         assertEquals("CodeZaiku", d.at("/runs/0/tool/driver/name").asText());
     }
 
+    /** The version went out as a hardcoded "0.1.0" until 0.1.1 — valid SARIF, wrong tool version. */
+    @Test void reportsTheToolVersionItWasGiven() {
+        JsonNode d = parse(Sarif.toJson(Sarif.fromReview(List.of(review("high", "a.py", 1, 1))),
+                "CodeZaiku", org.codezaiku.FamiliarMain.VERSION));
+        assertEquals(org.codezaiku.FamiliarMain.VERSION, d.at("/runs/0/tool/driver/version").asText());
+    }
+
     /** Consumers REJECT a run whose result references a ruleId not declared in driver.rules. */
     @Test void everyRuleIdUsedIsDeclaredExactlyOnce() {
         var findings = List.of(review("high", "a.py", 1, 1), review("low", "b.py", 2, 2));

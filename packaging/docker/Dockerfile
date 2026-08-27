@@ -23,10 +23,12 @@ COPY gradle ./gradle
 COPY core/build.gradle.kts ./core/
 RUN ./gradlew --no-daemon -q :core:dependencies >/dev/null 2>&1 || true
 
-COPY core ./core
-COPY ops-knowledge ./ops-knowledge
-COPY knowledge-packs ./knowledge-packs
-COPY docs/public/README.md docs/public/LICENSE ./docs/public/
+# The whole context (see .dockerignore), NOT a list of paths. The list named
+# `docs/public/README.md`, which exists in the private tree and NOT in the published one where
+# the export promotes those files to the root — so `docker build` failed outright on the only tree
+# an OSS user has, on a path the README and PLATFORMS.md both tell people to run. Copying the
+# context cannot be wrong for one layout and right for the other.
+COPY . .
 RUN ./gradlew --no-daemon -q :core:installDist
 
 

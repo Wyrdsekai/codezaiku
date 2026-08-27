@@ -40,7 +40,12 @@ tasks.test {
     // arm chain). Gradle cannot see that from the classpath, so a doc-only edit left the task
     // UP-TO-DATE and replayed a stale pass — the tests looked green against a README they had never
     // read. Declaring the inputs is what makes those assertions mean anything.
-    inputs.files(fileTree(rootDir.resolve("docs/public")) { include("*.md") })
+    // BOTH layouts, for the same reason as `distributions` below: these docs are under docs/public/
+    // here and at the root of the exported tree. Naming only one means the guard is silently inert
+    // in the other — which is the tree the export's own test run uses, so the staleness this exists
+    // to catch would go uncaught exactly where nobody is watching.
+    inputs.files(fileTree(rootDir.resolve("docs/public")) { include("*.md") },
+                 fileTree(rootDir) { include("*.md") })
         .withPropertyName("publicDocs")
         .withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.files(fileTree(rootDir.resolve(".github")), fileTree(rootDir.resolve("packaging")),
@@ -73,13 +78,23 @@ application {
 // The knowledge library ships as DATA beside the code, not inside the jar: cards are content that is
 // edited, linted and contributed to. They must travel with the distribution or an install silently has
 // no fix cards and no knowledge packs (org.codezaiku.Install resolves them relative to the dist root).
+/** The first of these that exists — see the note in `distributions` below. */
+fun docFile(name: String): File =
+    listOf(rootProject.file(name), rootProject.file("docs/public/$name")).firstOrNull { it.isFile }
+        ?: error("neither $name nor docs/public/$name exists — the distribution would ship without it")
+
 distributions {
     main {
         contents {
             from(rootProject.file("ops-knowledge")) { into("ops-knowledge") }
             from(rootProject.file("knowledge-packs")) { into("knowledge-packs") }
-            from(rootProject.file("docs/public/README.md")) { into("") }
-            from(rootProject.file("docs/public/LICENSE")) { into("") }
+            // README and LICENSE sit under docs/public/ in the private tree and at the ROOT of the
+            // exported one, because the export promotes the landing-page docs. Gradle SILENTLY skips
+            // a `from()` whose path does not exist, so the public build produced a tarball with no
+            // LICENSE in it and nothing complained — 0.1.0 shipped that way. Take whichever layout
+            // this tree has; packaging/deb/build-deb.sh carries the same helper for the same reason.
+            from(docFile("README.md")) { into("") }
+            from(docFile("LICENSE")) { into("") }
         }
     }
 }

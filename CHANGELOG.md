@@ -3,6 +3,21 @@
 Notable changes. This project follows [semantic versioning](https://semver.org/) loosely: while at
 0.x, minor versions may change behaviour.
 
+## 0.1.1 — fixes
+
+- **`run --text` accepts `@<file>` and `-`.** On Windows every argument crosses cmd.exe, which
+  refuses a command line over 8,191 characters, so a dispatch carrying a real task never started.
+  The file and stdin forms work on every platform, and match the `@file` form `code`, `fix` and
+  `research` already take. An unreadable `@file` is an error, not a literal task.
+- **`doctor` reports a second context-window floor.** 8k passes the required check and still cannot
+  complete a run driven by another agent; 12k is the floor for `run`, MCP and ACP.
+- **`install.ps1` prints one line when a prerequisite is missing**, not a PowerShell error record.
+- **`bin/codezaiku` runs in the directory you called it from.** From a source checkout, `run` used
+  the checkout as the workspace instead of your project. The packaged launcher was never affected.
+- **The tarball contains `LICENSE` and `README.md` again.** The 0.1.0 tarball shipped without them.
+- **`docker build -f packaging/docker/Dockerfile .` works from a clone.** It referenced a path that
+  only exists in the private tree, so it failed for everyone else.
+
 ## 0.1.0 — first public release
 
 The initial open-source release. CodeZaiku has been developed and measured privately; this is the

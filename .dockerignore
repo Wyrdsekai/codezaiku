@@ -1,0 +1,15 @@
+# Keep the build context to what `:core:installDist` actually needs. Without this the context is
+# every checkout artefact including build/ (100M+), and `COPY . .` below would be untenable.
+.git
+.gradle
+build
+core/build
+*/build
+.codezaiku-cp
+.codeplane-cp
+
+# Not part of any build: brand sources, the website payload, benchmark corpora, the archive.
+imgs
+site
+archive
+bench

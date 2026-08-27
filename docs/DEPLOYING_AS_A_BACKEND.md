@@ -30,7 +30,7 @@ installs to `/opt/codezaiku` with `/usr/bin/codezaiku`.
 Verify the binary is reachable and answers, without touching a model or the network:
 
 ```bash
-codezaiku --version                 # -> codezaiku 0.1.0, exit 0, ~50ms
+codezaiku --version                 # -> codezaiku 0.1.1, exit 0, ~50ms
 ```
 
 **This is the health check.** If your host probes backends before activating them, probe this.
@@ -102,7 +102,7 @@ You should get a single JSON document on stdout and exit 0.
 ## 4. Surface A — CLI subprocess
 
 ```
-codezaiku run --text <TASK> --output-format json --no-session -q \
+codezaiku run --text <TASK|@FILE|-> --output-format json --no-session -q \
               [--provider <p>] [--model <m>] [--task-id <id>] [--max-turns <n>]
 ```
 
@@ -110,8 +110,42 @@ codezaiku run --text <TASK> --output-format json --no-session -q \
   process's CWD. All paths in the result are relative to it.
 - **stdout carries exactly one JSON document.** Narration goes to stderr, so you can log it for humans
   without a parser ever seeing it. `-q` silences it entirely.
-- **Exit codes:** `0` completed, `1` did not, `2` malformed command line, `143` SIGTERMed.
+- **Exit codes:** `0` completed, `1` did not, `2` malformed command line *or* out of turns, `143`
+  SIGTERMed. The two `2`s are told apart by stdout: a run that ran emits its document, a rejected
+  command line emits nothing and says why on stderr.
 - **Unknown flags are ignored**, so a newer caller passing an unrecognised flag will not fail a run.
+
+### Pass the task as a file, not as an argument
+
+`--text` takes one of three forms, and for a real host preamble only the last two work everywhere:
+
+| form | meaning |
+|---|---|
+| `--text "<task>"` | the literal task |
+| `--text @<path>` | read the task from that file |
+| `--text -` | read the task from stdin |
+
+**On Windows, `@file` or stdin is mandatory for anything sizeable.** The Windows launcher is
+`codezaiku.bat`, so every argument crosses cmd.exe, which refuses a command line over 8,191
+characters. A host preamble is often larger than that on its own, in which case the dispatch dies
+with `The command line is too long` and exit `1` before CodeZaiku starts — nothing in the result
+document, because there is no process to write one. Linux and macOS have far higher limits and will
+not show you this.
+
+```bash
+# portable: works identically on Linux, macOS and Windows, at any task size
+codezaiku run --text @/tmp/task-4f2a.md --output-format json --no-session -q
+printf '%s' "$TASK" | codezaiku run --text - --output-format json --no-session -q
+```
+
+Two details worth having:
+
+- **Put the task file outside the workspace.** Anything inside it is a file the model can read,
+  and a stray instruction file is one more thing to explain away in the diff.
+- **An unreadable `@file` is fatal — exit `2`, nothing on stdout.** It does not fall back to treating
+  the literal `@C:\...\task.md` as the task, which would spend a full budget and hand you a
+  confident document for a task nobody asked for. A task that genuinely starts with `@` is written
+  `@@`.
 
 ### The result document
 

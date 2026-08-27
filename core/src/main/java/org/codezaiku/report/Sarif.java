@@ -75,7 +75,7 @@ public final class Sarif {
         ObjectNode run = root.putArray("runs").addObject();
         ObjectNode driver = run.putObject("tool").putObject("driver");
         driver.put("name", toolName);
-        driver.put("version", version == null ? "0.1.0" : version);
+        driver.put("version", version == null ? "unknown" : version);   // never a stale literal
         driver.put("informationUri", "https://github.com/Wyrdsekai/codezaiku");
 
         // Every ruleId a result references must be declared once in driver.rules, or consumers

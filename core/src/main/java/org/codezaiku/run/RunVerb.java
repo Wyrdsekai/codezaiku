@@ -10,8 +10,11 @@ import org.codezaiku.verify.ProjectTests;
 
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -23,7 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>The shape is set by the calling contract rather than by our other verbs:
  *
  * <pre>
- *   codezaiku run --text &lt;TASK&gt; --output-format json --no-session -q [--provider p] [--model m]
+ *   codezaiku run --text &lt;TASK|@FILE|-&gt; --output-format json --no-session -q [--provider p] [--model m]
  * </pre>
  *
  * <p>Three properties the caller depends on, each of which needed deliberate work:
@@ -210,9 +213,10 @@ public final class RunVerb {
 
         static Args parse(String[] argv) {
             Args a = new Args();
+            String rawText = null;
             for (int i = 0; i < argv.length; i++) {
                 switch (argv[i]) {
-                    case "--text", "-t" -> a.text = need(argv, ++i, "--text");
+                    case "--text", "-t" -> rawText = need(argv, ++i, "--text");
                     case "--task-id" -> a.taskId = need(argv, ++i, "--task-id");
                     case "--provider" -> a.provider = need(argv, ++i, "--provider");
                     case "--model" -> a.model = need(argv, ++i, "--model");
@@ -225,16 +229,60 @@ public final class RunVerb {
                     // Accepted and ignored: we hold no session state, so there is nothing to disable.
                     case "--no-session" -> { }
                     default -> {
-                        if (a.text == null && !argv[i].startsWith("-")) a.text = argv[i];
+                        if (rawText == null && !argv[i].startsWith("-")) rawText = argv[i];
                         // Anything else is an extra flag from a newer caller; ignoring it is kinder
                         // than failing a run over a flag that does not change what we do.
                     }
                 }
             }
-            if (a.text == null || a.text.isBlank()) {
-                throw new IllegalArgumentException("--text <TASK> is required");
+            if (rawText == null || rawText.isBlank()) {
+                throw new IllegalArgumentException("--text <TASK|@FILE|-> is required");
+            }
+            a.text = resolveText(rawText);
+            if (a.text.isBlank()) {
+                throw new IllegalArgumentException("--text " + rawText + ": the task is empty");
             }
             return a;
+        }
+
+        /**
+         * The task, with the {@code @file} convention the rest of the surface already uses for goals,
+         * plus {@code -} for stdin.
+         *
+         * <p>This exists for a hard platform ceiling, not for convenience. On Windows the launcher is
+         * {@code bin\codezaiku.bat}, so every argument crosses cmd.exe, which refuses a command line
+         * over 8,191 characters. A host's task preamble is bigger than that on its own, so <em>every</em>
+         * real dispatch died with "The command line is too long" before this process started — reported
+         * from a real Windows 11 run against the 0.1.0 tarball. {@code @file} and {@code -} lift the
+         * ceiling entirely, and on POSIX they are simply the same spelling as {@code code}, {@code fix},
+         * {@code research} and {@code decompose}.
+         *
+         * <p>An unreadable {@code @file} is FATAL here, unlike the interactive verbs, which warn and fall
+         * back to the literal. A person can read that warning; a host cannot, and the fallback would hand
+         * the model the string {@code @C:\...\task.md} as its entire task — a run that spends a full
+         * budget and returns a confident document for a task nobody asked for. Failing the command line
+         * is the only outcome the caller can tell apart from a real run.
+         *
+         * <p>{@code @@} escapes a task whose first character is genuinely an at-sign.
+         */
+        static String resolveText(String raw) {
+            if (raw.equals("-")) {
+                try {
+                    return new String(System.in.readAllBytes(), StandardCharsets.UTF_8);
+                } catch (IOException e) {
+                    throw new IllegalArgumentException("--text - : could not read the task from stdin: " + e);
+                }
+            }
+            if (raw.startsWith("@@")) return raw.substring(1);
+            if (raw.startsWith("@")) {
+                try {
+                    return Files.readString(Path.of(raw.substring(1)), StandardCharsets.UTF_8);
+                } catch (IOException | InvalidPathException e) {
+                    throw new IllegalArgumentException(
+                            "--text " + raw + ": could not read the task file: " + e);
+                }
+            }
+            return raw;
         }
 
         private static String need(String[] argv, int i, String flag) {

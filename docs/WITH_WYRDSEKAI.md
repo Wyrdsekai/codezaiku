@@ -23,6 +23,12 @@ wrong:
 
 - **The workspace is the subprocess working directory.** There is no `--workspace` flag. Wyrdsekai
   sets the CWD; CodeZaiku treats it as the project.
+- **Pass the task as `--text @<file>`, not as a literal, on Windows.** There the launcher is
+  `codezaiku.bat`, so arguments cross cmd.exe and a command line over 8,191 characters is refused —
+  a host preamble is usually larger than that alone, and the dispatch dies with `The command line is
+  too long` before CodeZaiku starts, so no result document explains it. `--text -` reads stdin
+  instead. Both work identically on Linux and macOS, so a host can use one form everywhere. Keep the
+  task file outside the workspace: anything inside it is a file the model can read.
 - **Model routing travels only in the environment** — `CODEZAIKU_DRIVE` (an OpenAI-compatible
   endpoint, as a base URL), `CODEZAIKU_MODEL`, and `CODEZAIKU_API_KEY` if the endpoint is a hosted one.
   Environment beats any config file on the box, so the host stays in control of which model runs, and

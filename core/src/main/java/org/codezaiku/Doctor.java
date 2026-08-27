@@ -82,6 +82,17 @@ final class Doctor {
             checks.add(new Check("model context window", true, ctx >= 8192,
                     ctx > 0 ? ctx + " tokens" : "could not determine",
                     "8k is the practical floor; 32k is comfortable. Restart the server with a larger --ctx-size"));
+            // A SECOND, softer floor, because 8k passes the check above and still cannot complete a
+            // single backend run. A host dispatch carries its own task preamble on top of our pinned
+            // project block: one measured at 8k refused before its first turn — 9,619 tokens into
+            // 8,192. Reporting only "ok, 8192 tokens" there is a green light for a configuration that
+            // provably does not work, which is the exact shape of instrument this project keeps
+            // getting wrong. Optional rather than required: 8k does answer a small interactive task,
+            // and failing that user would be its own kind of wrong.
+            checks.add(new Check("context window for a host dispatch", false, ctx >= 12288,
+                    ctx > 0 ? ctx + " tokens" : "could not determine",
+                    "a host's task preamble sits on top of the pinned project block — 8k refuses "
+                    + "before the first turn. 12k is the floor for `run`/MCP/ACP, 16k comfortable"));
         }
 
         // ── optional, per surface ───────────────────────────────────────────
