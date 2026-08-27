@@ -80,6 +80,8 @@ sha256sum -c SHA256SUMS --ignore-missing
 gh attestation verify codezaiku-X.Y.Z.tar.gz --repo Wyrdsekai/codezaiku
 ```
 
+`gh attestation` needs **GitHub CLI 2.49 or newer**. An older `gh` reports `unknown command` with no hint why — check with `gh --version` before concluding the signature is bad.
+
 Be precise about what that proves. The signature is an **authenticity** statement — the release
 workflow, running at that tag, blessed those exact bytes — and deliberately not SLSA build provenance,
 because the bytes are built and validated on real hardware before publication rather than by the

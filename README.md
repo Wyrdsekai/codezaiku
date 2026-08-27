@@ -173,6 +173,8 @@ sha256sum -c SHA256SUMS --ignore-missing
 gh attestation verify codezaiku-0.1.0.tar.gz --repo Wyrdsekai/codezaiku
 ```
 
+`gh attestation` needs **GitHub CLI 2.49 or newer**. An older `gh` reports `unknown command` with no hint why — check with `gh --version` before concluding the signature is bad.
+
 The signature says the release workflow, running at that tag, blessed those exact bytes. It is an
 authenticity statement, **not** build provenance — the artifacts are built and validated on real
 hardware rather than in CI, because an artifact nobody ran is not one worth shipping. Release assets
