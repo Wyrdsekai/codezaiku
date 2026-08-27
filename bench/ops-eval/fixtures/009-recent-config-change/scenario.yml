@@ -1,0 +1,21 @@
+id: 009-recent-config-change
+title: App 500s "can't reach the database" — but is the database really down?
+category: web-service
+scenario_difficulty: hard
+
+incident: >
+  Our app on port 8080 started returning HTTP 500 a few minutes ago. Its log says it cannot connect to the
+  database. The on-call is about to declare the database down. Investigate read-only and determine the REAL
+  root cause before we page the DBA.
+
+adversarial_signals:
+  - the app's own error ("cannot connect to database 127.0.0.1:5433") makes "the database is down" the
+    obvious conclusion — but the database is actually healthy and listening on 5432
+  - the only thing that changed on this box recently is the app's config file
+
+image: 009-recent-config-change
+setup: setup.sh
+
+# Resolved when the app serves 200 again (requires fixing the config port back to 5432 — restarting the
+# DB or the app alone will not do it).
+resolved_check: "curl -sf -o /dev/null --connect-timeout 3 http://127.0.0.1:8080/"

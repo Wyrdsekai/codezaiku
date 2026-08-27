@@ -1,0 +1,9 @@
+{"fault": "stop-postgres", "true": "postgres", "model": "postgres", "det": "postgres", "model_ok": true, "det_ok": true}
+{"fault": "stop-redis", "true": "redis", "model": "redis", "det": "redis", "model_ok": true, "det_ok": true}
+{"fault": "stop-rabbitmq", "true": "rabbitmq", "model": "rabbitmq", "det": "rabbitmq", "model_ok": true, "det_ok": true}
+{"fault": "stop-qdrant", "true": "qdrant", "model": "qdrant", "det": "qdrant", "model_ok": true, "det_ok": true}
+{"fault": "stop-opensearch", "true": "opensearch", "model": "opensearch", "det": "opensearch", "model_ok": true, "det_ok": true}
+{"fault": "stop-neo4j", "true": "neo4j", "model": "neo4j", "det": "neo4j", "model_ok": true, "det_ok": true}
+{"fault": "stop-localstack", "true": "localstack", "model": "localstack", "det": "localstack", "model_ok": true, "det_ok": true}
+{"fault": "stop-ollama", "true": "ollama", "model": "ollama", "det": "ollama", "model_ok": true, "det_ok": true}
+{"fault": "opensearch-writeblock", "true": "opensearch", "model": "opensearch", "det": "opensearch", "model_ok": true, "det_ok": true}

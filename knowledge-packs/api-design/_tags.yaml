@@ -1,0 +1,11 @@
+# Directory-level frontmatter defaults for knowledge-packs retrieval filtering.
+# Applied by DocIndexer to every pack in this directory unless the pack
+# declares its own frontmatter (which wins).
+#
+# applies_to: tokens that make a pack eligible for a task whose detected
+#             projectType / archetype / language matches any of them.
+# domain:     coarse category for UI grouping and observability.
+# tags:       fine-grained concept tokens for ranking boosts.
+applies_to: [web, api, rest, graphql, backend, server, http]
+domain: api
+tags: [api, rest, graphql, openapi, versioning, pagination, hypermedia]

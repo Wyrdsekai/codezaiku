@@ -1,0 +1,34 @@
+{
+  "name": "rust-monitor",
+  "archetype": "cli",
+  "_note": "Non-HTTP (ratatui TUI). Acceptance: cargo build succeeds, cargo test passes, and the binary runs briefly and exits cleanly. The 'runs' step launches the real TUI under a pty (script) with a timeout; staying alive to the timeout (exit 124) with no panic = it started cleanly.",
+  "steps": [
+    {
+      "id": "build",
+      "cmd": "cargo build 2>&1",
+      "timeoutSec": 420,
+      "expectExit": 0,
+      "notContains": "error["
+    },
+    {
+      "id": "test",
+      "cmd": "cargo test 2>&1",
+      "timeoutSec": 300,
+      "expectExit": 0
+    },
+    {
+      "id": "runs",
+      "_note": "Interactive TUI: it MUST stay alive until killed → timeout returns 124. expectExit is [124] ONLY (NOT 0) — a program that prints values and self-exits returns 0 and is a hollow print-and-exit, not a running TUI (caught a real false-green 2026-06-06). The header carries the gate-derived truths: hostname + kernel are EXACT, format-stable values any monitor must show. CAVEAT (residual, judge-read): these are also obtainable by shelling out to `hostname`/`uname -r`, so derived+alive proves 'a persistent app that surfaces these values' — it does NOT by itself prove a real multi-panel ratatui TUI. Per-panel realness (CPU/mem/disk/net/process) is judge-read from the code + the spec-required substantive tests; screen-scraping a one-tab-at-a-time TUI would false-reject correct apps over formatting.",
+      "cmd": "timeout 6 script -qec 'cargo run' /dev/null",
+      "timeoutSec": 30,
+      "expectExit": [
+        124
+      ],
+      "notContains": "panicked",
+      "containsDerivedAll": [
+        "hostname",
+        "uname -r"
+      ]
+    }
+  ]
+}

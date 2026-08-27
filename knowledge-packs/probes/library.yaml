@@ -1,0 +1,20 @@
+name: library-probes
+archetype: library
+notes: |
+  Library projects (jar / wheel / crate / package) have no runnable
+  binary and no HTTP surface. Runtime behavior verification is structurally
+  unavailable. Stick to static-analysis: grep the public API surface,
+  inspect package metadata, list exported symbols.
+  Behavior claims about a library should be downgraded to UNCERTAIN; the
+  judge oracle (source-pattern grep) is the load-bearing layer here.
+do_probe:
+  - 'find <PROJECT_ROOT>/src -name "*.<ext>" | head -20'
+  - 'grep -rn "pub fn <name>\\|public <type> <name>\\|def <name>" <PROJECT_ROOT>/src | head'
+  - 'cat <PROJECT_ROOT>/Cargo.toml | grep -A2 "\\[lib\\]"'
+  - 'cat <PROJECT_ROOT>/setup.py 2>/dev/null || cat <PROJECT_ROOT>/pyproject.toml'
+  - 'jar tf <PROJECT_ROOT>/target/*.jar 2>/dev/null | head'
+dont_probe:
+  - 'curl <PROJECT_ROOT>'
+  - '<BIN> --help  # no binary'
+  - '<BIN> 2>&1  # no binary'
+  - 'kill <PID>'

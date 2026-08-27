@@ -1,0 +1,88 @@
+# Scala — metadata-only. Scala projects typically use sbt (covered separately)
+# or Gradle/Maven; scalac itself is installable but most setups use sbt.
+name: scala
+version: "3.5+"
+triggers: ["scala", "scala/play", "akka", "pekko"]
+source_extensions: [".scala", ".sc"]
+config_files: ["build.sbt", "build.sc", "project/build.properties",
+               "project/plugins.sbt", ".scalafmt.conf", ".gitignore"]
+install_command: "if [ -f build.sbt ]; then sbt update 2>&1 | tail -5; fi"
+build_command: "if [ -f build.sbt ]; then sbt compile 2>&1 | tail -30; elif [ -f build.sc ]; then mill __.compile 2>&1 | tail -30; fi"
+test_command: "if [ -f build.sbt ]; then sbt test 2>&1 | tail -30; fi"
+run_command: "sbt run"
+# Syntax gate — sbt compile is project-level.
+syntax_check_project: "if [ -f build.sbt ]; then sbt compile 2>&1 | tail -40; elif [ -f build.sc ]; then mill __.compile 2>&1 | tail -40; fi"
+
+skeleton_fill_supported: true  # strict compiler enforces cross-file correctness
+
+# Runtime smoke — Scala: Play, Akka-HTTP, Pekko-HTTP, or plain JVM app.
+# Phase A + Phase C MVPs (PLAN_QE_AGENTS.md). Play default port 9000,
+# docker-compose often maps to 8090.
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (Scala) ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    PORT="${APP_PORT:-8090}"
+    for i in $(seq 1 90); do   # JVM warm takes longer
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:${PORT}/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP after ${i}s"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:${PORT}/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    ROOT_HTML=$(curl -sS http://localhost:${PORT}/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, likely empty"
+      fi
+    fi
+    for sub in /api /health /status /api/health; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:${PORT}${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  else
+    # Non-web JVM: compile-only check
+    if [ -f build.sbt ]; then sbt compile 2>&1 | tail -15 || exit 2; fi
+    echo "NO_COMPOSE — Scala compile OK (no runtime launch)"
+  fi
+
+structural_check: |
+  if [ ! -f build.sbt ]; then echo 'SMOKE_OK no build.sbt'; exit 0; fi
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  last=$(tail -c 200 build.sbt 2>/dev/null)
+  if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+    echo "ENVELOPE_LEAK — build.sbt ends with a leaked tool-call envelope tail. Rewrite build.sbt and stop at the natural end-of-content."
+    exit 4
+  fi
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' build.sbt 2>/dev/null; then
+    echo 'BUILD_SBT_CORRUPT — build.sbt starts with Java-style `package X;` syntax (semicolon-terminated). sbt build files are Scala DSL — package declarations look different in Scala (no trailing semicolon, optional curly brace). Rewrite build.sbt as proper sbt DSL.'
+    exit 4
+  fi
+  if ! grep -qE '(name|version|scalaVersion|libraryDependencies)[[:space:]]*:=' build.sbt 2>/dev/null; then
+    echo 'BUILD_SBT_THIN — build.sbt contains no sbt assignment operators (`:=`). Every sbt build file needs at least name := "..." and scalaVersion := "...". Rewrite build.sbt with proper sbt DSL.'
+    exit 4
+  fi
+  echo 'SMOKE_OK build.sbt parses'
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "Scala 3.5"
+  dockerfile_base_builder: "sbtscala/scala-sbt:eclipse-temurin-21.0.4_7_1.10.2_3.5.0"
+  dockerfile_base_runtime: "eclipse-temurin:21-jre"
+  web_framework: "Pekko HTTP or Play"
+  web_framework_version: "Pekko 1.1+ / Play 3.0+"
+  cli_framework: "scopt"
+  notes: "Prefer Apache Pekko over Akka (Akka 2.7+ is non-open-source BSL). sbt is the standard build tool; mill is an alternative. Match JDK version in Docker image to sbt scala-sbt tag."

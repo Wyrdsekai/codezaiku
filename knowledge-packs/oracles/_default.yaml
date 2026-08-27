@@ -1,0 +1,71 @@
+# Verification ensemble — default per-claim-type oracle weights.
+#
+# Applies when no per-category file under this directory overrides the
+# specific (category, claim_type) cell. Per-category files (see e.g.
+# CRUD_BACKEND.yaml, GAME.yaml) only need to list the cells they want to
+# change; everything else falls through to this file.
+#
+# How weights are used
+# --------------------
+# For each claim, the ensemble asks every applicable oracle for a
+# verdict. WeightedAggregator combines them: each oracle's PASS/FAIL
+# vote is weighted by `weights[claim_type][oracle]` × the oracle's
+# self-reported confidence. Score = passWeight / (passWeight + failWeight).
+# `thresholds.pass` and `thresholds.fail` define the PASS / UNCERTAIN
+# / FAIL bands.
+#
+# Asymmetric soundness — concrete falsifications (RuntimeEvidence with
+# isConcreteFailure=true) hard-veto the claim and bypass weights entirely.
+# Weights govern the soft-signal vote.
+#
+# Tuning guidance
+# ---------------
+# - BEHAVIOR / ROBUSTNESS: dynamic and adversarial layers see actual
+#   request/response — they should outweigh judge (which can fabricate
+#   PASS verdicts on behavior claims it cannot run).
+# - CODE_QUALITY / CODE_STYLE: judge reads source patterns; that's its
+#   sweet spot. Mechanical (grep/AST) is the secondary check.
+# - SYMBOL_PRESENCE / COMPILE / TEST_PASS: mechanical layer is
+#   authoritative — language tooling produces ground truth.
+# - ANTI_STUB / ALGORITHM_CHOICE: adversarial probes catch stubs that
+#   pass status-code-only probes; judge corroborates from source.
+
+weights:
+  COMPILE:
+    mechanical: 1.0
+  TEST_PASS:
+    mechanical: 1.0
+  SYMBOL_PRESENCE:
+    mechanical: 1.0
+    judge: 0.6
+  BEHAVIOR:
+    dynamic: 0.85
+    adversarial: 0.5
+    judge: 0.2
+  ROBUSTNESS:
+    adversarial: 0.85
+    dynamic: 0.5
+    judge: 0.3
+  ANTI_STUB:
+    adversarial: 0.7
+    judge: 0.6
+    dynamic: 0.3
+  ALGORITHM_CHOICE:
+    adversarial: 0.7
+    dynamic: 0.6
+    judge: 0.5
+  CODE_QUALITY:
+    judge: 0.85
+    mechanical: 0.5
+  CODE_STYLE:
+    judge: 0.7
+    mechanical: 0.4
+  UNKNOWN:
+    dynamic: 0.4
+    adversarial: 0.4
+    judge: 0.3
+    mechanical: 0.5
+
+thresholds:
+  pass: 0.55
+  fail: 0.35

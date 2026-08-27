@@ -1,0 +1,33 @@
+# Ground truth: the port is already bound → the app can't bind → "address already in use". The Python
+# traceback in the log is a red herring; blaming the application code is the wrong diagnosis.
+
+root_cause_category: port_conflict
+category_aliases:
+  - port_in_use
+  - address_in_use
+  - port_already_bound
+  - port_bind_failure
+
+required_keywords:
+  - 8080
+
+required_keyword_groups:
+  - [port, bind, address, listen]
+  - ["already in use", "in use", conflict, bound, occupied, "eaddrinuse"]
+
+forbidden_keywords:
+  - traceback
+  - valueerror
+  - code bug
+  - application bug
+  - widget
+
+forbidden_category:
+  - application_error
+  - code_bug
+  - app_exception
+
+required_evidence_sources:
+  - "ss"
+
+max_investigation_loops: 25

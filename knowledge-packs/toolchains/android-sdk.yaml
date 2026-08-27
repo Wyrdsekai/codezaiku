@@ -1,0 +1,52 @@
+# Android SDK / cmdline-tools — installable on demand by ToolchainInstaller.
+# Provides: sdkmanager, platform-tools, build-tools, platforms;android-34.
+# Used by Android-native (Kotlin/Java) and KMP projects.
+name: android-sdk
+version: "13.0+"  # cmdline-tools 13.0 (latest stable as of 2026-04)
+triggers: ["android", "kotlin-android", "kotlin-multiplatform", "kmp"]
+source_extensions: [".kt", ".java", ".xml"]
+config_files: ["AndroidManifest.xml", "build.gradle", "build.gradle.kts",
+               "settings.gradle", "settings.gradle.kts", "gradle.properties",
+               "local.properties", "proguard-rules.pro"]
+
+# Detection markers — these signal an Android project even if mixed with
+# plain Java/Kotlin (KMP).
+project_markers:
+  - "AndroidManifest.xml"
+  - "src/main/AndroidManifest.xml"
+  - "app/src/main/AndroidManifest.xml"
+  - "id 'com.android.application'"
+  - 'id("com.android.application")'
+
+# Install — ToolchainInstaller fetches cmdline-tools, accepts licenses,
+# installs SDK platform 34 + build-tools 34.0.0 + platform-tools.
+# Total disk: ~1.5GB. Idempotent — re-runs are no-ops if already installed.
+install_url: "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+install_command: |
+  set -e
+  : "${ANDROID_SDK_ROOT:=$HOME/.android-sdk}"
+  : "${ANDROID_HOME:=$ANDROID_SDK_ROOT}"
+  if [ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+    mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+    curl -fsSL "$INSTALL_URL" -o /tmp/cmdline-tools.zip
+    cd "$ANDROID_SDK_ROOT/cmdline-tools" && unzip -q /tmp/cmdline-tools.zip
+    mv cmdline-tools latest
+  fi
+  yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+  "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+    "platform-tools" "platforms;android-34" "build-tools;34.0.0" >/dev/null
+
+build_command: "./gradlew assembleDebug --no-daemon --console=plain 2>&1 | tail -80"
+test_command: "./gradlew testDebugUnitTest --no-daemon --console=plain 2>&1 | tail -80"
+run_command: "./gradlew installDebug --no-daemon  # requires connected device or emulator"
+
+# Compile gate — runs gradle compileDebugKotlin (KMP) or compileDebugJavaWithJavac (native).
+syntax_check_project: "./gradlew compileDebugSources --no-daemon --console=plain 2>&1 | tail -80"
+
+skeleton_fill_supported: true
+
+# No runtime smoke — Android needs an emulator/device. Defer to integration
+# environment. Compile + unit-test pass is the gate.
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).

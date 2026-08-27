@@ -1,0 +1,16 @@
+id: 003-dependency-down-cpu-herring
+title: App returns 500s — database unreachable
+category: web-service
+scenario_difficulty: medium
+
+incident: >
+  Our app on port 8080 is up but every request returns HTTP 500. The box also shows high CPU and someone
+  suspects the app is overloaded. Investigate read-only and find the REAL reason requests are failing.
+
+adversarial_signals:
+  - a CPU-pegging busy-loop process (high CPU, suggests "overload")
+
+image: 003-dependency-down-cpu-herring
+setup: setup.sh
+
+resolved_check: "curl -sf -o /dev/null --connect-timeout 3 http://127.0.0.1:8080"

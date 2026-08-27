@@ -1,0 +1,88 @@
+name: Bug report
+description: Something behaved differently from what the docs say it does
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        CodeZaiku drives a **local model** against **your** stack, so the same command can behave
+        very differently on two machines. The fields below are the ones that usually decide whether
+        a report is reproducible — the model and the authority ceiling most of all.
+
+        **Please do not paste secrets.** Evidence is redacted on the way into prompts and audit
+        logs, but a log you paste here by hand is not.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected instead
+      description: The exact command, and the output — trimmed is fine, invented is not.
+      placeholder: |
+        $ codezaiku fix mystack propose
+        ...
+    validations: { required: true }
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `codezaiku --version`.
+    validations: { required: true }
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Operations (fix / watch / triage / investigate / serve)
+        - Coding (code / decompose / run)
+        - Review
+        - Research
+        - Security (secure)
+        - Integration (mcp / acp)
+        - Install, doctor, or configuration
+        - Something else
+    validations: { required: true }
+
+  - type: input
+    id: model
+    attributes:
+      label: Model and server
+      description: >
+        Which model, served by what (llama.cpp, Ollama, vLLM, a hosted endpoint). The single most
+        common cause of "it did something strange" is the model, so this field decides most reports.
+      placeholder: "qwen3-coder-30b via llama.cpp on :8210"
+    validations: { required: true }
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and JDK
+      placeholder: "Ubuntu 24.04, Temurin 21 — or macOS 15 / Windows 11 / WSL2"
+    validations: { required: true }
+
+  - type: dropdown
+    id: ceiling
+    attributes:
+      label: Authority ceiling (operations only)
+      description: The `ceiling` argument, or CODEZAIKU_OPS_AUTHORITY. Leave as N/A for other surfaces.
+      options: [N/A, observe, localize, propose, guarded, unattended]
+      default: 0
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: codezaiku doctor
+      description: >
+        Output of `codezaiku doctor`. It names what is missing and how to fix it, and rules out a
+        large class of environment problems before anyone else has to guess.
+      render: text
+
+  - type: textarea
+    id: reproducibility
+    attributes:
+      label: How often does it happen?
+      description: >
+        A local model is not deterministic. "1 of 1 runs" and "5 of 5 runs" are very different
+        reports, and knowing which one this is saves everybody a round trip.
+      placeholder: "3 of 5 runs"

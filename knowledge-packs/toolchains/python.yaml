@@ -1,0 +1,213 @@
+# Python — metadata-only. CodeZaiku assumes Python 3 is available on the host
+# (Ubuntu ships with it). This YAML exists so the scanner knows what counts as
+# a Python source file vs config. No download/install.
+name: python
+version: "3.12+"
+triggers: ["python", "python/fastapi", "python/flask", "python/django"]
+source_extensions: [".py", ".pyx", ".pyi"]
+max_file_size: 50000
+# __init__.py and __main__.py are often just imports/dispatch; don't fill them.
+config_files: ["requirements.txt", "pyproject.toml", "setup.py", "setup.cfg",
+               "Pipfile", "Pipfile.lock", "poetry.lock", "uv.lock",
+               "tox.ini", "pytest.ini", ".python-version",
+               "__init__.py", "__main__.py", ".gitignore"]
+install_command: "if [ -f requirements.txt ]; then pip install -q -r requirements.txt; elif [ -f pyproject.toml ]; then pip install -q -e .; fi"
+build_command: "python3 -m py_compile $(find . -name '*.py' -not -path '*/\\.*' | head -50) 2>&1 | tail -20"
+test_command: "if [ -f pytest.ini ] || [ -d tests ] || [ -f pyproject.toml ]; then pytest -q 2>&1 | tail -30; fi"
+run_command: "python3 -m src.main || python3 app.py || python3 main.py"
+# Syntax gates — run to verify writes parse before promotion.
+syntax_check_file: "python3 -m py_compile {file} 2>&1"
+syntax_check_project: "python3 -m py_compile $(find . -name '*.py' -not -path '*/\\.*') 2>&1 | tail -30"
+# cp-check config — py_compile is silent on success and writes a clean
+# `SyntaxError: ...` on failure, so no banner stripping needed.
+# Demonstrates the "clean languages cost nothing" claim of the cp-check
+# design: the YAML block is minimal but the model still sees the same
+# `cp-check <file>` interface as for noisy languages.
+clean_check_file:
+  command: 'python3 -m py_compile "{file}" 2>&1'
+  on_empty: "python syntax-check: OK"
+  timeout_secs: 15
+# Required files — written by the scaffolding pass if missing.
+required_files:
+  - path: pyproject.toml
+    template: |
+      [project]
+      name = "{{project_name}}"
+      version = "0.1.0"
+      description = "{{description}}"
+      requires-python = ">=3.10"
+      dependencies = []
+
+      [build-system]
+      requires = ["setuptools>=64"]
+      build-backend = "setuptools.build_meta"
+
+skeleton_fill_supported: false  # parse-only / no cross-file compile check
+
+# Per-file linter hook — ruff check. Installed by ruff.yaml toolchain
+# (uv-managed venv under ~/.codezaiku/tools/ruff-venv, mirrors gdtoolkit's
+# pattern). ruff catches undefined names, unused imports, missing imports,
+# and syntax errors in ~10-50ms per file — the class of bugs seen in
+# zone-1dea682b's dashboard.py (datetime.utcnow() with no import). Select
+# E (pycodestyle errors) + F (pyflakes) for semantic issues without style
+# noise. --output-format=concise keeps output compact for LLM consumption.
+lint_command_file: "ruff check --select=E,F --quiet --output-format=concise {file} 2>&1 | head -20"
+
+# Runtime smoke — actually launch the app and verify it responds. See
+# PLAN_E2E_VALIDATION.md. Inline bash, runs from /prior-output/{target}/.
+# Sequence:
+#   1. Verify deps install (dry-run — catches non-existent packages)
+#   2. Bring up via docker-compose if one exists, else plain python
+#   3. Wait up to 30s for port 8090 to answer
+#   4. curl the index and one /api/* endpoint
+#   5. UNIT TESTS (Phase A MVP of PLAN_QE_AGENTS.md unit lane): run pytest
+#      against tests/ if present. Best-effort — logs results but doesn't
+#      fail the smoke gate on unit failures (they surface as signal for
+#      the coder's next pass / spec-coverage review, not as a hard block).
+#   6. UI RENDER (Phase C MVP): curl root + common sub-paths and count
+#      HTML structural elements to catch "server responds 200 but page
+#      is blank" — upgrade path is full Playwright in the e2e lane.
+#   7. Tear down cleanly in trap so cancels don't leave orphans
+smoke_command: |
+  set -e
+  echo "=== DEP DRY-RUN ==="
+  if [ -f requirements.txt ]; then
+    python3 -m pip install --dry-run -q -r requirements.txt 2>&1 | tail -5 || { echo "DEP_FAIL"; exit 2; }
+  fi
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    for i in $(seq 1 30); do
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:8090/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:8090/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    # Root render check — count structural elements + presence of headings.
+    # A blank dashboard (server up but UI missing) would show ~0 elements.
+    ROOT_HTML=$(curl -sS http://localhost:8090/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, dashboard likely empty"
+      fi
+    fi
+    # Probe a couple of common sub-paths to catch "only root works"
+    for sub in /health /api /api/health /api/emails /api/bills /dashboard; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:8090${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  else
+    echo "NO_COMPOSE — skipping container smoke"
+    exit 0
+  fi
+
+# Lightweight structural check — runs inline in the coder gate chain.
+# When the project declares a web framework (fastapi/flask/django/uvicorn/
+# gunicorn) in its dep manifest, verify a conventional entry-point file
+# exists. Non-web Python projects pass through with SMOKE_OK.
+# Catches "Dockerfile says uvicorn app.main:app but app/main.py is missing."
+# Post-compile outcome check (audit 2026-05-11): verifies the project's
+# main module imports without error. Python has no compile step, but
+# the equivalent vacuous-pass is "files exist but services/__init__.py
+# imports submodules that don't exist" (Run #38 email-intel-py pattern).
+# Probes with a non-executing import to catch this.
+compile_artifact_check: |
+  ENTRY=''
+  for cand in app/main.py app/__init__.py main.py app.py wsgi.py asgi.py; do
+    [ -f "$cand" ] && ENTRY="$cand" && break
+  done
+  if [ -z "$ENTRY" ]; then
+    echo "ARTIFACT_OK no entry point declared"; exit 0
+  fi
+  MOD=$(echo "$ENTRY" | sed -e 's|/|.|g' -e 's|\.py$||' -e 's|\.__init__$||')
+  err=$(python3 -c "import importlib; importlib.import_module('$MOD')" 2>&1)
+  if [ $? -eq 0 ]; then
+    echo "ARTIFACT_OK import $MOD succeeded"; exit 0
+  fi
+  echo "IMPORT_FAIL — entry module '$MOD' (file $ENTRY) failed to import. This catches the case where the source files exist but their import dependencies are broken (e.g., services/__init__.py imports submodules that don't exist). Fix the import chain:"
+  echo "$err" | tail -30
+  exit 1
+
+structural_check: |
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  # Also covers __init__.py at the project root because Qwen3-Coder's
+  # `__all__ = [` truncation lands at the end of those files.
+  for f in pyproject.toml requirements.txt requirements-dev.txt setup.py setup.cfg __init__.py; do
+    if [ -f "$f" ]; then
+      last=$(tail -c 200 "$f" 2>/dev/null)
+      if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+        echo "ENVELOPE_LEAK — $f ends with a leaked tool-call envelope tail (e.g. ])}, \")], </tool_call>). Rewrite $f and stop at the natural end-of-content."
+        exit 4
+      fi
+    fi
+  done
+  # Catch manifest files containing non-Python/non-TOML content (e.g.
+  # leaked Java source, tool-call envelope tails). The Python manifests
+  # have light structural constraints — `requirements.txt` is line-based
+  # name==version, `pyproject.toml` is TOML with [project] / [tool.*]
+  # sections, `setup.py` is Python — so a Java `package com.x;` line at
+  # the top of any of them is unambiguous corruption.
+  for f in requirements.txt pyproject.toml setup.py; do
+    if [ -f "$f" ] && grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' "$f" 2>/dev/null; then
+      echo "MANIFEST_CORRUPT — $f starts with a Java 'package ...' line, which is not valid for a Python manifest. Rewrite $f as proper Python/TOML."
+      exit 4
+    fi
+  done
+  # pyproject.toml must contain a TOML section header — empty / malformed
+  # files cause every downstream tool (pip, poetry, hatch) to fail with
+  # confusing errors that don't name the real problem.
+  if [ -f pyproject.toml ] && ! grep -qE '^\[[a-zA-Z]' pyproject.toml 2>/dev/null; then
+    echo 'PYPROJECT_TOML_THIN — pyproject.toml has no TOML section headers ([project], [tool.poetry], [tool.hatch], [build-system], ...). Rewrite with at least a [project] section.'
+    exit 4
+  fi
+  WEB=0
+  for f in requirements.txt pyproject.toml setup.py; do
+    if [ -f "$f" ] && grep -qiE '\b(fastapi|flask|starlette|django|uvicorn|gunicorn)\b' "$f" 2>/dev/null; then
+      WEB=1; break
+    fi
+  done
+  if [ "$WEB" != "1" ]; then echo 'SMOKE_OK non-web python'; exit 0; fi
+  FOUND=''
+  for c in app/main.py app/__init__.py main.py app.py wsgi.py asgi.py manage.py; do
+    if [ -f "$c" ]; then FOUND="$c"; break; fi
+  done
+  if [ -z "$FOUND" ]; then
+    echo 'NO_ENTRY_POINT — the project declares a web framework (fastapi/flask/django/uvicorn/gunicorn) but no entry-point file exists. Conventional locations searched: app/main.py, app/__init__.py, main.py, app.py, wsgi.py, asgi.py, manage.py. Write the entry-point at one of these paths (or update Dockerfile/compose to match an existing file).'
+    exit 2
+  fi
+  echo "SMOKE_OK entry=$FOUND"
+
+# Framework recommendations — house versions to override LLM training-data defaults.
+# Injected into the coder prompt for greenfield Python projects. Update last_audited
+# when revising versions. See PLAN_QE_AGENTS.md and AgentRegistry prompt assembly.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "3.13"
+  dockerfile_base_builder: "python:3.13-slim"
+  dockerfile_base_runtime: "python:3.13-slim"
+  web_framework: "FastAPI"
+  web_framework_version: "0.115+"
+  cli_framework: "typer or click"
+  notes: "Serve FastAPI via uvicorn (e.g. uvicorn app.main:app --host 0.0.0.0 --port 8000). Do NOT set FLASK_APP or FLASK_ENV env vars for non-Flask apps — they are no-ops and indicate a framework contradiction."
+
+# Cut D — spec-anchoring forbidden patterns. Same shape as gradle.yaml:
+# physical enforcement of "no hardcoded category dictionaries when the spec
+# asks for auto-discovery." zone-d6255656 bill_extractor.py had the exact
+# anti-pattern below.
+forbidden_patterns:
+  - regex: '^[A-Z_]*(CATEGOR(Y|IES)|KEYWORD|CLASSES?)[_A-Z]*\s*=\s*\{[\s\n]*"[A-Za-z_]+"[\s\n]*:[\s\n]*\['
+    reason: "Hardcoded category-keyword dictionary detected. If the spec asks for auto-discovery (TF-IDF, clustering, learning), this is a violation — categories must emerge from the data, not be enumerated as a Python dict."
+    suggestion: "Use sklearn.feature_extraction.text.TfidfVectorizer + sklearn.cluster.KMeans (or similar) — categories come out of the trained model, not a static dict. If the spec asks for fixed categories instead, this rule doesn't apply — but verify against the spec text."
+

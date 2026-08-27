@@ -1,0 +1,89 @@
+# Ruby — metadata-only. Rely on system Ruby or rbenv/rvm on the host.
+name: ruby
+version: "3.3+"
+triggers: ["ruby", "ruby/rails", "ruby/sinatra"]
+source_extensions: [".rb", ".rake", ".erb"]
+max_file_size: 50000
+config_files: ["Gemfile", "Gemfile.lock", ".ruby-version", "Rakefile",
+               "config.ru", ".gitignore"]
+install_command: "if [ -f Gemfile ]; then bundle install --quiet 2>&1 | tail -5; fi"
+build_command: "ruby -c $(find . -name '*.rb' -not -path '*/vendor/*' | head -20) 2>&1 | grep -v 'Syntax OK' | tail -20"
+test_command: "if [ -f Rakefile ]; then bundle exec rake test 2>&1 | tail -30; elif [ -d test ] || [ -d spec ]; then bundle exec rspec 2>&1 | tail -30; fi"
+run_command: "if [ -f config.ru ]; then rackup; else ruby main.rb; fi"
+# Syntax gates — ruby -c parses without executing.
+syntax_check_file: "ruby -c {file} 2>&1"
+syntax_check_project: "ruby -c $(find . -name '*.rb' -not -path '*/vendor/*' | head -30) 2>&1 | tail -30"
+
+skeleton_fill_supported: false  # parse-only / no cross-file compile check
+
+# Runtime smoke — Ruby: Rails, Sinatra, or plain Rack.
+# Phase A + Phase C MVPs (PLAN_QE_AGENTS.md). Rails default port 3000,
+# docker-compose often maps to 8090.
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (Ruby) ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    PORT="${APP_PORT:-8090}"
+    for i in $(seq 1 45); do
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:${PORT}/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP after ${i}s"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:${PORT}/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    ROOT_HTML=$(curl -sS http://localhost:${PORT}/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, likely empty"
+      fi
+    fi
+    for sub in /api /health /up /api/health /users; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:${PORT}${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  else
+    # Non-web Ruby: syntax check only
+    ruby -c $(find . -name '*.rb' -not -path '*/vendor/*' | head -20) 2>&1 | grep -v 'Syntax OK' | tail -15 || true
+    echo "NO_COMPOSE — Ruby syntax check only (no runtime launch)"
+  fi
+
+structural_check: |
+  if [ ! -f Gemfile ]; then echo 'SMOKE_OK no Gemfile'; exit 0; fi
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  last=$(tail -c 200 Gemfile 2>/dev/null)
+  if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+    echo "ENVELOPE_LEAK — Gemfile ends with a leaked tool-call envelope tail. Rewrite Gemfile and stop at the natural end-of-content."
+    exit 4
+  fi
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' Gemfile 2>/dev/null; then
+    echo 'GEMFILE_CORRUPT — Gemfile starts with Java/C-style package syntax, not Ruby DSL. Rewrite Gemfile as a Ruby Bundler file (source URL + gem declarations).'
+    exit 4
+  fi
+  if ! grep -qE '^[[:space:]]*(source|gem|gemspec|group|ruby)[[:space:]]+' Gemfile 2>/dev/null; then
+    echo 'GEMFILE_THIN — Gemfile contains no Ruby Bundler DSL directives (source, gem, gemspec, group, ruby). Rewrite with at least: source "https://rubygems.org"\\ngem "rails"'
+    exit 4
+  fi
+  echo 'SMOKE_OK Gemfile parses'
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "Ruby 3.3"
+  dockerfile_base_builder: "ruby:3.3-slim"
+  dockerfile_base_runtime: "ruby:3.3-slim"
+  web_framework: "Rails"
+  web_framework_version: "8.x"
+  cli_framework: "Thor"
+  notes: "Rails 8 requires Ruby 3.2+; recommend 3.3 LTS line. Commit Gemfile.lock for applications (do NOT gitignore). Use Kamal for self-hosted deploys."

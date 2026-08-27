@@ -1,0 +1,36 @@
+# Ground truth: the ROOT (3 hops below the 502) is the cache's invalid config. 502 / app-down / cache-down
+# are intermediate symptoms; concluding any of them as the root is the failure this scenario tests.
+
+root_cause_category: bad_config
+category_aliases:
+  - config_error
+  - invalid_config
+  - configuration_error
+  - cache_config
+  - bad_cache_config
+
+required_keywords:
+  - config
+
+required_keyword_groups:
+  - [invalid, "bad config", directive, syntax, malformed, "config error", parse]
+  - [cache, "cache.conf", "6379"]
+
+# The shallower stopping points — concluding any of these as the ROOT is the miss.
+forbidden_category:
+  - bad_gateway
+  - http_502
+  - "502"
+  - service_down
+  - app_down
+  - upstream_down
+  - upstream_unavailable
+  - dependency_down
+  - cache_down
+
+forbidden_keywords: []
+
+required_evidence_sources:
+  - "cache.conf"
+
+max_investigation_loops: 25

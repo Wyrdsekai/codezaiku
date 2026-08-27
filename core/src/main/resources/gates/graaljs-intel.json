@@ -1,0 +1,11 @@
+{
+  "name": "graaljs-intel",
+  "archetype": "http-service",
+  "_note": "PROVISIONAL. graaljs-intel is the full Node/Express email-intel app (ingestion, threading, classification, bills, predictions, dashboard) — a from-scratch, project-memory-scale build. Its JSON API paths are not pinned by the spec; refine these claims against the real endpoints when the fixture is actually attempted. Minimal claim for now: the service boots (CommonJS, single src/server.js entry) and serves the dashboard.",
+  "boot": "PORT={port} node src/server.js",
+  "readinessPath": "/",
+  "bootTimeoutSec": 90,
+  "claims": [
+    { "id": "dashboard", "method": "GET", "path": "/", "expectStatus": 200 }
+  ]
+}

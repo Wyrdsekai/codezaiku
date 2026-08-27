@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# CodeZaiku launcher.
+#
+# Hides the JVM/classpath plumbing and builds on first use, so the documented
+# commands in the README are the commands you actually type:
+#
+#   bin/codezaiku help
+#   bin/codezaiku fix myproject guarded
+#   bin/codezaiku research "what changed in X" depth
+#
+# The classpath is cached in .codezaiku-cp and rebuilt whenever a source file is
+# newer than the cache, so an edit-run cycle needs no manual gradle step.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+CP_CACHE="$REPO_ROOT/.codezaiku-cp"
+GRADLE="./gradlew"
+JAVA_OPTS="${CODEZAIKU_JAVA_OPTS:---add-opens java.base/java.lang=ALL-UNNAMED}"
+
+die() { echo "codezaiku: $*" >&2; exit 1; }
+
+command -v java >/dev/null 2>&1 || die "java not found — CodeZaiku needs a JDK 21+ on PATH"
+
+# Rebuild when any source/resource is newer than the cached classpath, when the cache is
+# missing, or when the cache no longer points anywhere real. `find -newer` is cheap next to
+# a gradle invocation.
+#
+# That last check is not paranoia. The cache holds ABSOLUTE paths, so renaming or moving the
+# checkout invalidates every entry — while a move PRESERVES mtimes, so all three timestamp
+# checks still pass. The launcher would then exec java against a classpath of directories
+# that no longer exist and die with ClassNotFoundException, on every invocation, forever:
+# nothing it looks at ever changes again, so it never decides to rebuild. Verifying that the
+# first entry still exists and still lives under this checkout costs one stat.
+needs_build() {
+  [[ ! -s "$CP_CACHE" ]] && return 0
+  local first
+  first="$(cut -d: -f1 < "$CP_CACHE")"
+  [[ -z "$first" || ! -e "$first" ]] && return 0
+  [[ "$first" != "$REPO_ROOT"/* ]] && return 0
+  [[ -n "$(find core/src -newer "$CP_CACHE" -type f -print -quit 2>/dev/null)" ]] && return 0
+  [[ core/build.gradle.kts -nt "$CP_CACHE" ]] && return 0
+  return 1
+}
+
+if needs_build; then
+  echo "codezaiku: building…" >&2
+  "$GRADLE" -q :core:classes --console=plain >&2 || die "build failed"
+  "$GRADLE" -q :core:printCp --no-daemon --console=plain 2>/dev/null | tail -1 > "$CP_CACHE" \
+    || die "could not resolve the classpath"
+  [[ -s "$CP_CACHE" ]] || die "classpath came back empty"
+fi
+
+exec java $JAVA_OPTS -cp "$(cat "$CP_CACHE")" org.codezaiku.FamiliarMain "$@"

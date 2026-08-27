@@ -1,0 +1,21 @@
+# Ground truth: nothing is wrong. The correct conclusion is "healthy" — inventing any fault is a false
+# positive and FAILS (category won't match the healthy aliases).
+
+root_cause_category: healthy
+category_aliases:
+  - no_fault
+  - no_issue
+  - nominal
+  - ok
+  - healthy_system
+  - no_problem
+  - false_alarm
+  - all_healthy
+  - no_root_cause
+
+required_keywords: []
+required_keyword_groups: []
+forbidden_keywords: []
+forbidden_category: []
+required_evidence_sources: []
+max_investigation_loops: 40

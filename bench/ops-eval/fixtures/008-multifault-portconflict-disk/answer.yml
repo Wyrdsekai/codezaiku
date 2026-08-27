@@ -1,0 +1,31 @@
+# Ground truth: the app is down because a rogue process holds :8080 (port_conflict). The ~92% disk is a
+# real concurrent issue but NOT the cause of the outage — blaming disk_full for the app being down is a
+# misattribution. Naming the disk as a SECONDARY finding is fine; concluding it as the root is the miss.
+
+root_cause_category: port_conflict
+category_aliases:
+  - port_in_use
+  - address_in_use
+  - port_already_bound
+  - port_bind_failure
+
+required_keywords:
+  - 8080
+
+required_keyword_groups:
+  - [port, bind, address, listen]
+  - ["already in use", "in use", conflict, bound, occupied, "eaddrinuse", rogue]
+
+# Concluding the disk as the ROOT cause of the outage is the failure this scenario tests.
+forbidden_category:
+  - disk_full
+  - disk_space
+  - no_space
+  - out_of_space
+
+forbidden_keywords: []
+
+required_evidence_sources:
+  - "ss"
+
+max_investigation_loops: 25

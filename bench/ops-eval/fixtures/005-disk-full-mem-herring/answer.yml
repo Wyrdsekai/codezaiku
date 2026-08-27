@@ -1,0 +1,37 @@
+# Ground truth: the app's data filesystem (/var/lib/appdata) is full → writes fail with ENOSPC → 500s.
+# The ~300MB RAM hog is a red herring; blaming a memory leak / RAM is the wrong diagnosis.
+
+root_cause_category: disk_full
+category_aliases:
+  - disk_space
+  - no_space
+  - filesystem_full
+  - out_of_space
+  - enospc
+  - no_space_left
+  - full_disk
+
+required_keywords:
+  - disk          # matches "disk"; "space" also required via the group below
+
+required_keyword_groups:
+  - [full, "no space", "100%", enospc, "out of space", "no space left", exhausted]
+  - [disk, filesystem, appdata, volume, mount, "/var/lib"]
+
+forbidden_keywords:
+  - memory leak
+  - ram
+  - out of memory
+  - oom
+  - memory exhaustion
+
+forbidden_category:
+  - memory_leak
+  - oom
+  - out_of_memory
+  - high_memory
+
+required_evidence_sources:
+  - "df"
+
+max_investigation_loops: 25

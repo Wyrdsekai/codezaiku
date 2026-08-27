@@ -1,0 +1,11 @@
+# Casing is load-bearing in the owner segment of the urls below. The attestation identity a release
+# is verified against is case-sensitive, so a mis-cased owner does not merely 404 — it makes
+# `gh attestation verify` reject a genuine artifact. Copy it exactly as written.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Wyrdsekai/codezaiku/security/advisories/new
+    about: Please report privately rather than in a public issue — see SECURITY.md.
+  - name: Measured limitations and known-weak areas
+    url: https://github.com/Wyrdsekai/codezaiku/blob/main/docs/LIMITATIONS.md
+    about: Where CodeZaiku is weak, with the numbers. Worth checking before filing a bug.

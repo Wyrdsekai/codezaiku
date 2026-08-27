@@ -1,0 +1,5 @@
+{"fault": "postgres-readonly", "k": 1, "tier": "9b", "detected": true, "localized": true, "card": "postgres-readonly.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "postgres-readonly", "k": 2, "tier": "9b", "detected": true, "localized": true, "card": "postgres-readonly.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "postgres-readonly", "k": 3, "tier": "9b", "detected": true, "localized": true, "card": "postgres-readonly.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "postgres-readonly", "k": 4, "tier": "9b", "detected": true, "localized": true, "card": "postgres-readonly.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "postgres-readonly", "k": 5, "tier": "9b", "detected": true, "localized": true, "card": "postgres-readonly.md", "fixed": true, "harm": false, "harm_svcs": []}

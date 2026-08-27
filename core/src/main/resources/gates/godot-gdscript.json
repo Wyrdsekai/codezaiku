@@ -1,0 +1,21 @@
+{
+  "name": "godot-gdscript",
+  "archetype": "cli",
+  "_note": "Godot 4 project (GDScript) — NON-HTTP, verified headless through the same CLI/process engine, with no game-engine-specific support in the harness. 'loads' imports the project headless so every .gd is parsed; 'tests' runs the GUT suite. Requires godot on PATH and the GUT addon at addons/gut/. The engine itself is verified: a trivial Godot project certifies PASS, and a GDScript parse error surfaces SCRIPT ERROR cause-first.",
+  "steps": [
+    {
+      "id": "loads",
+      "cmd": "godot --headless --import 2>&1",
+      "timeoutSec": 120,
+      "expectExit": 0,
+      "notContains": "SCRIPT ERROR"
+    },
+    {
+      "id": "tests",
+      "cmd": "godot --headless -s addons/gut/gut_cmdln.gd -gexit 2>&1",
+      "timeoutSec": 180,
+      "expectExit": 0,
+      "notContains": "Failed"
+    }
+  ]
+}

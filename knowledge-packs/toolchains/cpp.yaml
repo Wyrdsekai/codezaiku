@@ -1,0 +1,111 @@
+# C / C++ — metadata-only. System gcc/g++ on Ubuntu is sufficient for
+# most CodeZaiku boards. CMake/Ninja handled separately when needed.
+name: cpp
+version: "system"
+triggers: ["cpp", "c++", "c", "cpp/unreal", "cpp/qt"]
+source_extensions: [".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".hxx", ".inl"]
+config_files: ["CMakeLists.txt", "Makefile", "meson.build", "conanfile.txt",
+               "conanfile.py", ".gitignore", "compile_commands.json"]
+install_command: "if [ -f conanfile.txt ] || [ -f conanfile.py ]; then conan install . --build=missing 2>&1 | tail -5; fi"
+build_command: "if [ -f CMakeLists.txt ]; then (mkdir -p build && cd build && cmake .. -Wno-dev 2>&1 | tail -10 && make 2>&1 | tail -30); elif [ -f Makefile ]; then make 2>&1 | tail -30; elif [ -f meson.build ]; then (meson setup build && meson compile -C build) 2>&1 | tail -30; fi"
+test_command: "if [ -f CMakeLists.txt ] && [ -d build ]; then (cd build && ctest --output-on-failure 2>&1 | tail -30); fi"
+run_command: "./build/main || ./a.out"
+# Syntax gates — gcc -fsyntax-only parses without codegen. Project-level uses build.
+syntax_check_file: "g++ -fsyntax-only -std=c++20 {file} 2>&1"
+syntax_check_project: "if [ -f CMakeLists.txt ]; then (mkdir -p build && cd build && cmake .. -Wno-dev > /dev/null 2>&1 && make 2>&1 | tail -30); elif [ -f Makefile ]; then make -n 2>&1 | tail -30; fi"
+
+skeleton_fill_supported: true  # strict compiler enforces cross-file correctness
+
+# Runtime smoke — C/C++: typically a CLI binary or a library with a test
+# harness. No web smoke lane — web C++ is rare and too framework-specific
+# for a universal default. Phase A MVP (PLAN_QE_AGENTS.md) — unit via
+# ctest + binary smoke via --help.
+smoke_command: |
+  set -e
+  echo "=== UNIT TESTS ==="
+  if [ -f CMakeLists.txt ]; then
+    (mkdir -p build && cd build && cmake .. -Wno-dev > /dev/null 2>&1 && make 2>&1 | tail -15) || exit 2
+    if [ -d build ]; then
+      (cd build && ctest --output-on-failure 2>&1 | tail -30) || echo "UNIT_TESTS_FAILED (non-blocking)"
+    fi
+  elif [ -f Makefile ]; then
+    make 2>&1 | tail -15 || exit 2
+    if grep -qE '^test:' Makefile 2>/dev/null; then
+      make test 2>&1 | tail -30 || echo "UNIT_TESTS_FAILED (non-blocking)"
+    else
+      echo "NO_TEST_TARGET — Makefile has no 'test' target"
+    fi
+  else
+    echo "NO_BUILD_SYSTEM — skipping unit lane"
+  fi
+  echo "=== SMOKE (C/C++) ==="
+  # Locate the built binary: CMake puts it in build/ typically
+  BIN=""
+  if [ -d build ]; then
+    BIN=$(find build -maxdepth 2 -type f -executable -not -name "*.so" -not -name "*.a" -not -name "cmake_*" 2>/dev/null | head -1)
+  fi
+  if [ -z "$BIN" ] && [ -f a.out ]; then BIN="./a.out"; fi
+  if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+    echo "=== BINARY: $BIN ==="
+    "$BIN" --help 2>&1 | head -20 || true
+    "$BIN" --version 2>&1 | head -3 || true
+  else
+    echo "NO_BINARY — build produced no executable"
+    exit 2
+  fi
+
+structural_check: |
+  if [ -f CMakeLists.txt ]; then
+    # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+    last=$(tail -c 200 CMakeLists.txt 2>/dev/null)
+    if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+      echo "ENVELOPE_LEAK — CMakeLists.txt ends with a leaked tool-call envelope tail. Rewrite CMakeLists.txt and stop at the natural end-of-content."
+      exit 4
+    fi
+    # Java-misnamed-as-CMakeLists.txt — see gradle.yaml's BUILD_GRADLE_CORRUPT.
+    # CMake uses `project(name)`; Java's `package x.y;` is unambiguous
+    # corruption.
+    if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' CMakeLists.txt 2>/dev/null; then
+      echo "CMAKELISTS_IS_JAVA — CMakeLists.txt starts with a Java 'package x.y;' line. This is not a CMake build file. Rewrite CMakeLists.txt starting with: cmake_minimum_required(VERSION 3.28)\\nproject(myapp CXX)\\nset(CMAKE_CXX_STANDARD 20)."
+      exit 4
+    fi
+    if ! grep -qiE 'cmake_minimum_required[[:space:]]*\(|project[[:space:]]*\(' CMakeLists.txt 2>/dev/null; then
+      echo 'CMAKELISTS_CORRUPT — CMakeLists.txt contains neither cmake_minimum_required() nor project(). Every CMake build file needs at minimum: cmake_minimum_required(VERSION 3.28) and project(<name>). Rewrite CMakeLists.txt.'
+      exit 4
+    fi
+    echo 'SMOKE_OK CMakeLists.txt parses'
+    exit 0
+  fi
+  if [ -f Makefile ] || [ -f makefile ]; then
+    MF=$([ -f Makefile ] && echo Makefile || echo makefile)
+    # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+    last=$(tail -c 200 "$MF" 2>/dev/null)
+    if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+      echo "ENVELOPE_LEAK — $MF ends with a leaked tool-call envelope tail. Rewrite $MF and stop at the natural end-of-content."
+      exit 4
+    fi
+    # Java-misnamed-as-Makefile — see gradle.yaml's BUILD_GRADLE_CORRUPT.
+    # Makefile uses `target: deps`; Java's `package x.y;` is unambiguous
+    # corruption.
+    if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' "$MF" 2>/dev/null; then
+      echo "MAKEFILE_IS_JAVA — $MF starts with a Java 'package x.y;' line. This is not a Makefile. Rewrite $MF with at least one rule (e.g. all: \\n\\t\\$(CC) main.c -o main)."
+      exit 4
+    fi
+    if ! grep -qE '^[A-Za-z_][A-Za-z0-9_-]*:' "$MF" 2>/dev/null; then
+      echo "MAKEFILE_CORRUPT — $MF has no rule targets (`<name>:`). A C/C++ Makefile needs at least one target (e.g. `all:`, `build:`). Rewrite $MF."
+      exit 4
+    fi
+    echo "SMOKE_OK $MF parses"
+    exit 0
+  fi
+  echo 'SMOKE_OK no CMakeLists.txt or Makefile'
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "C++20"
+  dockerfile_base_builder: "gcc:14-bookworm"
+  dockerfile_base_runtime: "debian:bookworm-slim"
+  web_framework: "Crow or Drogon"
+  cli_framework: "CLI11"
+  notes: "Use CMake 3.28+ with Ninja. Prefer FetchContent or Conan for dependencies. Target C++20 features (concepts, ranges) only when compiler version supports them."

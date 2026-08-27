@@ -1,0 +1,200 @@
+# Godot 4 headless toolchain — installed into ~/.codezaiku/tools/
+# when a board's detected language matches any of the triggers below.
+# Binary ends up at ~/.codezaiku/tools/bin/godot, accessible inside bwrap
+# sandboxes via /opt/cp-tools/bin/ on PATH.
+# Latest stable as of 2026-04-17. Update as new releases ship.
+name: godot
+version: "4.6.2-stable"
+triggers: ["gdscript", "godot", "godot4"]
+# Per-file fill scanner picks up these extensions as "source" files.
+source_extensions: [".gd", ".tscn", ".tres"]
+# Size cap — GDScript source files rarely exceed 30KB in practice.
+# Catches runaway repetition loops (observed: 178KB with 868 _check_check functions).
+max_file_size: 30000
+# These files are already complete after the skeleton pass; the scanner skips
+# them (they're not individually fillable).
+config_files: ["project.godot", "addons.toml", "export_presets.cfg", ".gitignore"]
+url: "https://github.com/godotengine/godot/releases/download/4.6.2-stable/Godot_v4.6.2-stable_linux.x86_64.zip"
+archive_format: zip
+install_dir: "godot-4.6.2"
+# After extraction, the zip contains Godot_v4.6.2-stable_linux.x86_64.
+# Rename it to a stable name so the symlink target is predictable.
+rename:
+  from: "Godot_v4.6.2-stable_linux.x86_64"
+  to: "godot"
+# Symlink to create under ~/.codezaiku/tools/bin/
+symlink: "godot"
+# Test command to verify the install worked. Runs after install; non-zero exit = fail.
+validation: "godot --headless --version"
+# Project-level commands (used by tester, devops, README generation).
+# All run in the project target dir. No install step (Godot doesn't have a package manager).
+build_command: "godot --headless --import . 2>&1 | tail -30"
+test_command: "godot --headless --import . 2>&1 | tail -30"
+run_command: "godot --editor ."
+# Syntax gates — GDScript has no standalone per-file linter; --import parses
+# all .gd and .tscn project-wide and reports errors with res:// paths.
+syntax_check_project: "godot --headless --quit --import . 2>&1 | tail -30"
+# cp-check config (read by scripts/cp-check/generate-configs.py at install
+# time). Why: `godot --headless --check-only` prints ~60 lines of engine
+# banner + GL/audio/Fontconfig/etc. before any diagnostic. Models that
+# truncate with `| head -20` always miss the actual error and re-run with
+# different filters (zone-b9981b03 2026-04-28 logged 7+ such retries in
+# under 2 minutes). The strip rule keeps output from the first error
+# marker onward, so one invocation gives a definitive answer.
+clean_check_file:
+  command: 'godot --headless --check-only "{file}" 2>&1'
+  strip_until_first_match:
+    - "SCRIPT ERROR"
+    - "Parse Error"
+    - "ERROR:"
+    - "FAILED at"
+    - "Cannot open"
+    - "Unexpected token"
+  strip_lines_matching:
+    - "^Fontconfig"
+    - "^Godot Engine v"
+    - "^TextServer:"
+    - "^WARNING: "
+    - "^OpenGL "
+    - "^Vulkan "
+  banner_lines: 60
+  on_empty: "godot syntax-check: OK"
+  timeout_secs: 30
+# Required files — written by the scaffolding pass if missing.
+# Placeholders: {{project_name}} (from target dir), {{main_scene}} (default Main.tscn).
+required_files:
+  - path: project.godot
+    template: |
+      ; Engine configuration file.
+      config_version=5
+
+      [application]
+      config/name="{{project_name}}"
+      run/main_scene="res://scenes/{{main_scene}}"
+      config/features=PackedStringArray("4.6", "GL Compatibility")
+
+      [autoload]
+      ; Autoloads are declared here; e.g. GameState="*res://GameState.gd"
+
+      [display]
+      window/size/viewport_width=1280
+      window/size/viewport_height=720
+
+      [rendering]
+      renderer/rendering_method="gl_compatibility"
+      renderer/rendering_method.mobile="gl_compatibility"
+
+skeleton_fill_supported: false  # parse-only / no cross-file compile check
+
+# Per-file linter — gdparse (from gdtoolkit). Fast per-file GDScript parse,
+# catches syntax errors, undefined identifiers, indent issues. .tscn and
+# .tres are inspected by Godot at --import time, not per-file lintable.
+# `case` filters so only .gd files invoke gdparse.
+lint_command_file: "case '{file}' in *.gd) gdparse {file} 2>&1 | head -20 ;; *) echo OK ;; esac"
+
+# Runtime smoke — make godot actually import the project and load the main
+# scene. Catches: missing main_scene, unresolvable res:// paths, scripts
+# that fail to attach, signal wiring errors, @onready references to nodes
+# that don't exist. The existing build_command does --import but doesn't
+# specifically verify main_scene; this does.
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside any docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (Godot) ==="
+  # 1. project.godot must declare main_scene
+  if ! grep -q "^run/main_scene=" project.godot 2>/dev/null; then
+    echo "NO_MAIN_SCENE — project.godot missing run/main_scene=res://..."
+    exit 2
+  fi
+  MAIN=$(grep "^run/main_scene=" project.godot | cut -d'"' -f2)
+  echo "main_scene: $MAIN"
+  # 2. That scene file must actually exist on disk
+  MAIN_PATH="${MAIN#res://}"
+  if [ ! -f "$MAIN_PATH" ]; then
+    echo "MAIN_SCENE_MISSING — $MAIN_PATH not found"
+    exit 2
+  fi
+  # 3. godot --headless --import parses all scripts + scenes project-wide.
+  #    Capture stderr for SCRIPT ERROR / ERROR: lines.
+  OUT=$(godot --headless --import . --quit-after 30 2>&1)
+  echo "$OUT" | tail -30
+  if echo "$OUT" | grep -qE "SCRIPT ERROR|Failed to load|Parse Error|ERROR: Cannot"; then
+    echo "GODOT_IMPORT_FAILED"
+    exit 3
+  fi
+  echo "SMOKE_OK — project imports and main_scene resolves"
+
+# Lightweight structural integrity check — runs inline in the coder gate
+# chain (no docker, no Godot binary, no network). project.godot must declare
+# run/main_scene AND that .tscn file must exist on disk. Catches the
+# zone-9cd708e1 2026-05-10 failure (declared main_scene, zero .tscn files).
+# Post-compile outcome check (audit 2026-05-11): verifies the Godot project
+# can parse without runtime errors. structural_check ensures the main_scene
+# path resolves; THIS goes further — does godot --headless --check-only
+# succeed against the parser? Catches undefined-signal patterns that pass
+# static parse but fail at scene-load.
+compile_artifact_check: |
+  if ! command -v godot >/dev/null 2>&1; then
+    echo "ARTIFACT_OK godot binary not available — skipping"; exit 0
+  fi
+  if [ ! -f project.godot ]; then
+    echo "ARTIFACT_OK no project.godot"; exit 0
+  fi
+  out=$(godot --headless --check-only --path . --quit 2>&1 | tail -20)
+  ec=$?
+  if [ $ec -eq 0 ] && ! echo "$out" | grep -qE "(error|ERROR|SCRIPT ERROR)"; then
+    echo "ARTIFACT_OK godot --check-only passed"; exit 0
+  fi
+  echo "PARSE_FAIL — godot --headless --check-only reported errors. Common causes: undefined signals (emit signal X but no 'signal X' declaration), missing autoload references (script accesses a global that's not registered in project.godot autoloads), node paths that don't resolve."
+  echo "$out"
+  exit 1
+
+structural_check: |
+  # Trailing tool-call envelope-leak check — zone-c7d09026 hit this:
+  # project.godot ended with `])}` appended after a valid config_version=
+  # line, so structural_check used to pass (front matter looked fine) but
+  # godot itself refused to load the file. Pure tail inspection.
+  if [ -f project.godot ]; then
+    last=$(tail -c 200 project.godot 2>/dev/null)
+    if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+      echo "ENVELOPE_LEAK — project.godot ends with a leaked tool-call envelope tail (e.g. ])}, \")], </tool_call>). The model emitted valid Godot config then appended a JSON/XML envelope literal. Rewrite project.godot and stop at the natural end-of-content (no envelope suffix)."
+      exit 4
+    fi
+  fi
+  # Java-misnamed-as-project.godot — see gradle.yaml's BUILD_GRADLE_CORRUPT
+  # for the canonical bug shape. Semicolon-terminated `package x.y;` is
+  # unambiguous Java; Godot config never uses that syntax.
+  if [ -f project.godot ] && grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' project.godot 2>/dev/null; then
+    echo "PROJECT_GODOT_IS_JAVA — project.godot starts with a Java 'package x.y;' line. This is not a Godot config file. Rewrite project.godot as proper Godot 4 syntax (config_version=5 header + [application] section)."
+    exit 4
+  fi
+  # Catch project.godot containing non-Godot content (e.g. leaked source
+  # code, JSON, tool-call envelope tails). A valid Godot 4 project.godot
+  # has either `config_version=` near the top or starts with a [section]
+  # header within the first 50 lines. If neither, the file is corrupt and
+  # downstream checks (NO_MAIN_SCENE, MAIN_SCENE_MISSING) would misreport.
+  if [ -f project.godot ] && ! head -50 project.godot 2>/dev/null | grep -qE '^[[:space:]]*config_version[[:space:]]*=|^[[:space:]]*\[[a-z_]+\]'; then
+    echo 'PROJECT_GODOT_CORRUPT — project.godot contains no recognizable Godot config sections ([application], [rendering], [autoload], etc.) or top-level config_version= line. Rewrite project.godot as a valid Godot 4 project file (config_version=5 header + [application] section with config/name and run/main_scene).'
+    exit 4
+  fi
+  if ! grep -q '^run/main_scene=' project.godot 2>/dev/null; then
+    echo 'NO_MAIN_SCENE — project.godot has no run/main_scene= line; the game has no entry point and cannot launch'
+    exit 2
+  fi
+  MAIN=$(grep '^run/main_scene=' project.godot | cut -d'"' -f2)
+  MAIN_PATH="${MAIN#res://}"
+  if [ ! -f "$MAIN_PATH" ]; then
+    echo "MAIN_SCENE_MISSING — project.godot declares main_scene=$MAIN but the file '$MAIN_PATH' does not exist. Write the scene file (.tscn) at that path, or update project.godot to point at an existing scene"
+    exit 3
+  fi
+  echo "SMOKE_OK main_scene=$MAIN_PATH"
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "Godot 4.6 (GDScript)"
+  dockerfile_base_builder: ""
+  dockerfile_base_runtime: ""
+  web_framework: ""
+  notes: "project.godot REQUIRES Godot 4 syntax: run/main_scene=res://scenes/X.tscn (WITH the 'run/' prefix) and config_version=5. The Godot 3 'main_scene=...' (no prefix) will fail smoke gate NO_MAIN_SCENE. Signal declarations use 'signal foo(arg: Type)' with typed args. Use @onready var x = $NodePath for node refs. All paths are res://; no forward-slash cwd tricks."
+

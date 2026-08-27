@@ -1,0 +1,36 @@
+# Ground truth: a RECENT CONFIG CHANGE set db_port=5433 in /etc/shopapp/app.conf; the database is healthy
+# on 5432. The failure this tests: concluding "the database is down" (it is NOT) instead of finding the
+# misconfigured port introduced by the recent edit.
+
+root_cause_category: bad_config
+category_aliases:
+  - config_error
+  - config_change
+  - misconfiguration
+  - wrong_port
+  - wrong_port_config
+  - invalid_config
+  - configuration_error
+  - recent_config_change
+
+required_keywords:
+  - 5433
+
+required_keyword_groups:
+  - [config, "app.conf", db_port, misconfigur, "wrong port", changed, edit]
+  - ["5432", correct, healthy, listening, running]   # must recognize the DB is actually fine on 5432
+
+# The database is UP — blaming it is the misdiagnosis this scenario is built to catch.
+forbidden_category:
+  - dependency_down
+  - database_down
+  - db_down
+  - postgres_down
+  - service_down
+
+forbidden_keywords: []
+
+required_evidence_sources:
+  - "app.conf"
+
+max_investigation_loops: 25

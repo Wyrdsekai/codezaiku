@@ -1,0 +1,15 @@
+# Directory-level frontmatter for knowledge-packs retrieval filtering.
+# Applied by DocIndexer to every pack in this dir unless the .md declares
+# its own frontmatter. applies_to = eligibility tokens for retrieval filter.
+# See PLAN_KNOWLEDGE_ACQUISITION.md for the full schema.
+# Topic-specific only. Previous tags `[web, backend, mobile, any]` matched
+# every web framework's domain-token expansion (FastAPI/Django/Flask all
+# add `web`+`backend` to their RAG filter), so feature-flag content bled
+# into projects that don't use feature flags at all (e.g. zone-da15b0ea
+# email-intel got "Are there tests for BOTH the flag-on and flag-off code
+# paths?"). Same overload pattern as storage-patterns/backend (fixed
+# 2026-04-27). Keep tags topic-specific so retrieval is driven by the
+# spec's text mentioning feature flags, not by being a web project.
+applies_to: [feature-flags, rollout, kill-switch, ab-testing, experiments]
+domain: infra
+tags: [feature-flags, rollout, kill-switch, targeting]

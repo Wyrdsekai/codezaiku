@@ -1,0 +1,14 @@
+# Directory-level frontmatter for knowledge-packs retrieval filtering.
+# Applied by DocIndexer to every pack in this dir unless the .md declares
+# its own frontmatter. applies_to = eligibility tokens for retrieval filter.
+# See PLAN_KNOWLEDGE_ACQUISITION.md for the full schema.
+# 'backend' was historically listed but matches every web framework's
+# domain-token expansion (FastAPI/Django/Flask all add `backend` to their
+# RAG filter), so enterprise-pattern content (Spring, .NET, eventsourcing,
+# CQRS, sagas) bled into Python/FastAPI builds. Same overload pattern as
+# storage-patterns/backend and feature-flags/web (fixed 2026-04-27). Keep
+# applies_to scoped to actual enterprise stacks; Java/Spring/.NET projects
+# match by their own language/framework tokens directly.
+applies_to: [enterprise, java, spring, dotnet, microservices]
+domain: enterprise
+tags: [enterprise, eventsourcing, cqrs, saga, ddd, service-mesh]

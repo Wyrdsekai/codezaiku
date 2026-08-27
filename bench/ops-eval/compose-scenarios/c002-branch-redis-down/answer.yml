@@ -1,0 +1,35 @@
+# Ground truth: of the backend's three dependencies (postgres, redis, rabbitmq), REDIS is down. The test
+# is branch localization — the RCA must name redis specifically, not stop at "backend unhealthy" and not
+# blame the other (healthy) dependencies.
+
+root_cause_category: dependency_down
+category_aliases:
+  - redis_down
+  - redis_unavailable
+  - cache_down
+  - service_down
+  - service_unhealthy
+  - redis_unhealthy
+  - redis_dependency_failure
+  - dependency_failure
+  - redis_failure
+
+required_keywords:
+  - redis
+
+required_keyword_groups:
+  - [down, stopped, exited, "not running", unreachable, "connection refused", "cannot reach", "not healthy"]
+
+# Blaming the WRONG dependency (the two healthy ones) is the localization failure this tests.
+forbidden_category:
+  - postgres_down
+  - database_down
+  - rabbitmq_down
+  - db_down
+
+forbidden_keywords: []
+
+required_evidence_sources:
+  - redis
+
+max_investigation_loops: 40

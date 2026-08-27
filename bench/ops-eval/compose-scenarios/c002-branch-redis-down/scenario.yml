@@ -1,0 +1,12 @@
+id: c002-branch-redis-down
+title: Site down — which of the backend's dependencies failed?
+# The backend depends on THREE services (postgres, redis, rabbitmq). Exactly ONE (redis) is down. The
+# branch-localization test: identify REDIS specifically, not the other two healthy deps, and not just
+# "the backend is unhealthy".
+incident: >
+  Our site is returning errors. The backend service is unhealthy. The backend depends on several backing
+  services — figure out WHICH dependency actually failed and is causing this, read-only.
+fault: "docker compose -p {proj} -f {stack} stop redis"
+fault_timing: after
+settle: 30
+resolved_check: "curl -sf -o /dev/null --connect-timeout 3 http://127.0.0.1:8090/health"

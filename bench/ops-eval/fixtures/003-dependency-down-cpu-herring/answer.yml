@@ -1,0 +1,38 @@
+# Ground truth: the app is up but its database dependency (127.0.0.1:5432) is down → 500s. High CPU is a
+# red herring. Blaming the app being "overloaded" or the app code is the wrong diagnosis.
+
+root_cause_category: dependency_down
+category_aliases:
+  - database_down
+  - db_down
+  - dependency_unreachable
+  - backend_down
+  - database_unreachable
+  - postgres_down
+  - dependency_missing
+
+required_keywords:
+  - 5432
+
+required_keyword_groups:
+  - [database, db, postgres, dependency, backend]
+  - [down, "not running", unreachable, "connection refused", "could not connect", "not listening", "no listener"]
+
+forbidden_keywords:
+  - overload
+  - overloaded
+  - high cpu load
+  - too much traffic
+  - application bug
+  - code bug
+
+forbidden_category:
+  - resource_exhaustion
+  - high_cpu
+  - overload
+  - application_error
+
+required_evidence_sources:
+  - "5432"
+
+max_investigation_loops: 25

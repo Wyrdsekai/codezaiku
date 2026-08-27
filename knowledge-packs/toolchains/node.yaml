@@ -1,0 +1,181 @@
+# Node.js LTS — tarball install + metadata.
+# Latest LTS as of 2026-04-17.
+name: node
+version: "24.14.1"
+triggers: ["node", "node.js", "nodejs", "javascript", "typescript",
+           "node/express", "node/fastify", "node/nest"]
+source_extensions: [".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"]
+max_file_size: 60000
+config_files: ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+               "tsconfig.json", ".npmrc", ".nvmrc", ".gitignore"]
+url: "https://nodejs.org/dist/v24.14.1/node-v24.14.1-linux-x64.tar.xz"
+archive_format: tar.xz
+install_dir: "node-24.14.1"
+flatten: true
+symlinks:
+  node: "bin/node"
+  npm: "bin/npm"
+  npx: "bin/npx"
+validation: "node --version"
+install_command: "if [ -f package-lock.json ]; then npm ci 2>&1 | tail -5; else npm install --silent 2>&1 | tail -5; fi"
+build_command: "if [ -f tsconfig.json ]; then npx tsc --noEmit 2>&1 | tail -30; else node --check $(find . -name '*.js' -not -path '*/node_modules/*' | head -20) 2>&1; fi"
+test_command: "if grep -q '\"test\"' package.json 2>/dev/null; then npm test -- --silent 2>&1 | tail -30; fi"
+run_command: "npm start"
+# Syntax gates — node --check parses JS; TS needs tsc at project level.
+syntax_check_file: "case '{file}' in *.ts|*.tsx) echo OK ;; *) node --check {file} 2>&1 ;; esac"
+syntax_check_project: "if [ -f tsconfig.json ]; then npx tsc --noEmit --incremental false 2>&1 | tail -30; else node --check $(find . -name '*.js' -not -path '*/node_modules/*' | head -30) 2>&1; fi"
+# cp-check config — node --check is silent on success and emits clean
+# `SyntaxError: ... at <file>:<line>` on failure. For TypeScript we use
+# tsc --noEmit on the surrounding project (per-file isn't safe — TS needs
+# the type-graph). tsc output is mostly clean (`file(line,col): error TSxxxx`).
+clean_check_file:
+  command: 'case "{file}" in *.ts|*.tsx) cd "$(dirname "{file}")" && (while [ ! -f tsconfig.json ] && [ "$PWD" != / ]; do cd ..; done; if [ -f tsconfig.json ]; then npx --no-install tsc --noEmit 2>&1; else echo "tsc skipped (no tsconfig.json)"; fi) ;; *) node --check "{file}" 2>&1 ;; esac'
+  strip_lines_matching:
+    - "^npm warn"
+    - "^npm WARN"
+    - "^npm notice"
+  on_empty: "node syntax-check: OK"
+  timeout_secs: 60
+# Required files — written by the scaffolding pass if missing.
+required_files:
+  - path: package.json
+    template: |
+      {
+        "name": "{{project_name}}",
+        "version": "0.1.0",
+        "description": "{{description}}",
+        "main": "index.js",
+        "scripts": {
+          "start": "node index.js",
+          "test": "echo \"Error: no test specified\" && exit 1"
+        },
+        "license": "Apache-2.0"
+      }
+
+skeleton_fill_supported: true  # strict compiler enforces cross-file correctness
+
+# Per-file linter — node --check for .js (syntax only, fast), tsc for .ts.
+# TS cross-file analysis is project-level; per-file we use node --check for
+# pure-parse validation. eslint would need project config and is slow on
+# first run (node_modules resolution), so we stick with --check at the
+# per-file tier and leave eslint/tsc for project-level syntax_check_project.
+lint_command_file: "case '{file}' in *.ts|*.tsx) echo OK ;; *) node --check {file} 2>&1 | head -10 ;; esac"
+
+# Runtime smoke — compose up, unit tests, UI render check, curl.
+# See PLAN_QE_AGENTS.md — this is Phase A + Phase C MVPs of the QE plan:
+# unit lane (npm test) + e2e lane (curl-based structural checks).
+# Upgrade path: Phase A becomes test_lanes[unit]; Phase C becomes
+# test_lanes[e2e] with real Playwright.
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (Node) ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    for i in $(seq 1 30); do
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:8090/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP after ${i}s"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:8090/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    ROOT_HTML=$(curl -sS http://localhost:8090/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, dashboard likely empty"
+      fi
+    fi
+    for sub in /health /api /api/health /api/emails /dashboard; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:8090${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  elif [ -f package.json ]; then
+    # No compose — parse check via --check on all .js entry points
+    node --check $(find . -name '*.js' -not -path '*/node_modules/*' | head -5) 2>&1 || exit 2
+  else
+    echo "NO_PACKAGE_JSON"
+    exit 2
+  fi
+
+# Lightweight structural check — runs inline in the coder gate chain.
+# When package.json declares a "main" field, verify that file exists.
+# Catches "package.json main: 'dist/server.js' but no build step ran."
+# Post-compile outcome check (audit 2026-05-11): verifies package.json's
+# main entry parses without syntax errors. structural_check ensures the
+# main file exists on disk; THIS catches "main exists but has a syntax
+# error" — symmetric with python's import_module probe.
+compile_artifact_check: |
+  if [ ! -f package.json ]; then
+    echo "ARTIFACT_OK no package.json"; exit 0
+  fi
+  MAIN=$(grep -E '^[[:space:]]*"main"[[:space:]]*:' package.json 2>/dev/null | head -1 | sed -E 's/.*"main"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+  [ -z "$MAIN" ] && MAIN="index.js"
+  if [ ! -f "$MAIN" ]; then
+    echo "ARTIFACT_OK main='$MAIN' missing (structural_check catches this)"; exit 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    echo "ARTIFACT_OK node binary not available — skipping"; exit 0
+  fi
+  err=$(node --check "$MAIN" 2>&1)
+  if [ $? -eq 0 ]; then
+    echo "ARTIFACT_OK node --check $MAIN passed"; exit 0
+  fi
+  echo "PARSE_FAIL — node --check '$MAIN' reported a syntax error. Fix the file before completing:"
+  echo "$err" | tail -20
+  exit 1
+
+structural_check: |
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  if [ -f package.json ]; then
+    last=$(tail -c 200 package.json 2>/dev/null)
+    if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+      echo "ENVELOPE_LEAK — package.json ends with a leaked tool-call envelope tail. Rewrite package.json as proper JSON ending with the closing brace."
+      exit 4
+    fi
+  fi
+  # Java-misnamed-as-package.json — see gradle.yaml's BUILD_GRADLE_CORRUPT.
+  # Caught BEFORE the JSON-parse check so the diagnostic names the actual
+  # corruption shape rather than the generic "doesn't parse as JSON".
+  if [ -f package.json ] && grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' package.json 2>/dev/null; then
+    echo "PACKAGE_JSON_IS_JAVA — package.json starts with a Java 'package x.y;' line. This is not a Node manifest. Rewrite package.json as proper JSON with at least { \"name\": \"...\", \"version\": \"...\" }."
+    exit 4
+  fi
+  # Catch package.json containing non-JSON content (e.g. leaked source
+  # code, tool-call envelope tails). The manifest must parse as JSON; if
+  # it doesn't, npm/node refuse to run and downstream gates produce
+  # confusing errors that don't name the real problem.
+  if [ -f package.json ]; then
+    if ! python3 -c "import json,sys; json.load(open('package.json'))" 2>/dev/null; then
+      echo 'PACKAGE_JSON_INVALID — package.json does not parse as JSON. Every Node manifest must be a valid JSON object with at least { "name": "...", "version": "..." }. Rewrite package.json as proper JSON.'
+      exit 4
+    fi
+  fi
+  MAIN=$(grep -E '^[[:space:]]*"main"[[:space:]]*:' package.json 2>/dev/null | head -1 | sed -E 's/.*"main"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+  if [ -z "$MAIN" ]; then echo 'SMOKE_OK no main declared'; exit 0; fi
+  if [ ! -f "$MAIN" ]; then
+    echo "MAIN_FILE_MISSING — package.json declares main='$MAIN' but the file does not exist. Either write the file at that path, or update package.json main to reference an existing file"
+    exit 2
+  fi
+  echo "SMOKE_OK main=$MAIN"
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "22"
+  dockerfile_base_builder: "node:22-alpine"
+  dockerfile_base_runtime: "node:22-alpine"
+  web_framework: "Express"
+  web_framework_version: "5.x"
+  cli_framework: "commander or yargs"
+  notes: "Use ESM ('type': 'module' in package.json) for new projects. Express 5 supports async/await natively. Pin Node version in package.json 'engines' field and match Docker image tag."
+

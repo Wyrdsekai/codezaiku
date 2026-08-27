@@ -1,0 +1,41 @@
+# Ground truth: the ROOT cause is disk_full (the app can't write its startup lock → it exits → nginx 502).
+# The 502 and the down app are intermediate SYMPTOMS. A conclusion that stops at bad_gateway / service_down
+# is wrong (its fix — restart the app — just re-crashes). Mentioning 502/app-down as part of the CHAIN is
+# fine; concluding them as the category is not.
+
+root_cause_category: disk_full
+category_aliases:
+  - disk_space
+  - no_space
+  - filesystem_full
+  - out_of_space
+  - enospc
+  - no_space_left
+  - full_disk
+
+required_keywords:
+  - disk
+
+required_keyword_groups:
+  - [full, "no space", "100%", enospc, "out of space", "no space left", exhausted]
+  - [disk, filesystem, appdata, "/var/lib", volume]
+
+# The shallow stopping points — concluding any of these as the ROOT cause is the failure this scenario tests.
+forbidden_category:
+  - bad_gateway
+  - http_502
+  - "502"
+  - service_down
+  - app_down
+  - service_not_running
+  - upstream_down
+  - nginx_error
+
+# No keyword herring — the trap is the causal chain itself (captured by forbidden_category). Naming 502 /
+# app-down as intermediate links is correct, so they are NOT forbidden keywords.
+forbidden_keywords: []
+
+required_evidence_sources:
+  - "df"
+
+max_investigation_loops: 25

@@ -1,0 +1,38 @@
+name: Feature request or idea
+description: Something CodeZaiku should be able to do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth reading `ROADMAP.md` in this repository first — it lists what is planned, and
+        also what is deliberately **not** planned (multi-agent orchestration, a UI, autonomous
+        security remediation, and coding improvements expected from harness work rather than better
+        models). Those were removed under measurement, so a request to restore one needs to argue
+        with the measurement rather than the decision.
+
+        A description of the **situation you are in** is more useful than a description of the
+        feature you have in mind. The situation is the thing that can be measured against.
+
+  - type: textarea
+    id: situation
+    attributes:
+      label: The situation
+      description: What are you trying to do, and where does CodeZaiku currently leave you?
+    validations: { required: true }
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you think would fix it
+      description: Optional. If you already have a design in mind, describe it here.
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: How would we know it worked?
+      description: >
+        What would you measure, on what, to tell the difference between this working and this only
+        appearing to work? Nothing here is believed without a positive controlled flip — better with
+        it on than off, same fixtures, everything else held still. A rough answer is fine and is
+        much better than none.

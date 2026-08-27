@@ -1,0 +1,24 @@
+name: rest-service-probes
+archetype: rest-service
+notes: |
+  HTTP REST services (Spring Boot, FastAPI, Express, Axum, Quarkus,
+  Sinatra, etc.). The DynamicVerifier's HTTP-shape matcher already handles
+  curl probes structurally — this pack adds advice for non-HTTP-shaped
+  BEHAVIOR claims (e.g. "API serves JSON", "Endpoint returns 201 on
+  POST"). Use curl with --max-time + -o /dev/null -w '%{http_code}' to
+  capture status codes without saving response bodies.
+  Assume the project is already running on the http_base_url given in
+  the user message. Do NOT start/stop the server — it's managed by the
+  template's live block.
+do_probe:
+  - 'curl -s -o /dev/null -w "%{http_code}\n" --max-time 3 <BASE>/<path>'
+  - 'curl -s --max-time 3 <BASE>/<path> | head -50'
+  - 'curl -s --max-time 3 -X POST -H "Content-Type: application/json" -d ''<json>'' <BASE>/<path>'
+  - 'curl -s --max-time 3 <BASE>/openapi.json | head -100'
+  - 'curl -s --max-time 3 <BASE>/health'
+dont_probe:
+  - '<BIN> --help'
+  - 'kill <pid>'
+  - 'gradle bootRun'
+  - 'uvicorn <app>'
+  - 'curl <BASE>/<path> -X DELETE  # destructive'

@@ -1,0 +1,97 @@
+language: java
+corrections:
+  # ── Gradle Plugin Versions ──────────────────────────────────────
+  # Note: Spring Boot 4.0.x is the current release (as of March 2026).
+  # DO NOT downgrade 4.x to 3.x — that was a mistake in earlier versions.
+  # Only pin io.spring.dependency-management to a version compatible with
+  # whatever Spring Boot plugin version the model picked.
+  # Spring Boot 4.x requires spring-dependency-management 1.1.7+.
+
+  - name: spring-dependency-management-old
+    description: "Pin spring-dependency-management to 1.1.7+ (required for Spring Boot 3.2+ and 4.x)"
+    type: regex_replace
+    target_files: ["build.gradle", "build.gradle.kts"]
+    pattern: "(?<=id\\s+['\"]io\\.spring\\.dependency-management['\"]\\s+version\\s+['\"])1\\.0\\.[\\d.]+(?=['\"])"
+    replacement: "1.1.7"
+
+  # ── Jakarta EE Namespace Migration (Spring Boot 3+) ─────────────
+  # Spring Boot 3 uses Jakarta EE 9+. Models trained on older code
+  # generate javax.* imports for EE packages.
+  - name: javax-persistence
+    description: "JPA: javax.persistence → jakarta.persistence"
+    type: string_replace
+    target_files: ["*.java"]
+    find: "javax.persistence"
+    replace: "jakarta.persistence"
+
+  - name: javax-validation
+    description: "Bean Validation: javax.validation → jakarta.validation"
+    type: string_replace
+    target_files: ["*.java"]
+    find: "javax.validation"
+    replace: "jakarta.validation"
+
+  - name: javax-servlet
+    description: "Servlet API: javax.servlet → jakarta.servlet"
+    type: string_replace
+    target_files: ["*.java"]
+    find: "javax.servlet"
+    replace: "jakarta.servlet"
+
+  - name: javax-transaction
+    description: "JTA: javax.transaction → jakarta.transaction"
+    type: string_replace
+    target_files: ["*.java"]
+    find: "javax.transaction"
+    replace: "jakarta.transaction"
+
+  - name: javax-inject
+    description: "CDI: javax.inject → jakarta.inject"
+    type: string_replace
+    target_files: ["*.java"]
+    find: "javax.inject"
+    replace: "jakarta.inject"
+
+  - name: javax-ws-rs
+    description: "JAX-RS: javax.ws.rs → jakarta.ws.rs"
+    type: string_replace
+    target_files: ["*.java"]
+    find: "javax.ws.rs"
+    replace: "jakarta.ws.rs"
+
+  - name: javax-websocket
+    description: "WebSocket: javax.websocket → jakarta.websocket"
+    type: string_replace
+    target_files: ["*.java"]
+    find: "javax.websocket"
+    replace: "jakarta.websocket"
+
+  - name: javax-mail
+    description: "Mail: javax.mail → jakarta.mail"
+    type: string_replace
+    target_files: ["*.java"]
+    find: "javax.mail"
+    replace: "jakarta.mail"
+
+  - name: javax-json
+    description: "JSON: javax.json → jakarta.json"
+    type: string_replace
+    target_files: ["*.java"]
+    find: "javax.json"
+    replace: "jakarta.json"
+
+  # ── Java Source Compatibility ────────────────────────────────────
+  # Spring Boot 3.x requires Java 17+. Models sometimes set Java 11/8.
+  - name: java-source-compat-8
+    description: "Spring Boot 3+ requires Java 17+"
+    type: regex_replace
+    target_files: ["build.gradle", "build.gradle.kts"]
+    pattern: "(?<=sourceCompatibility\\s*=\\s*['\"]?)(?:1\\.8|8|11)(?=['\"]?)"
+    replacement: "17"
+
+  - name: java-target-compat-8
+    description: "Spring Boot 3+ requires Java 17+"
+    type: regex_replace
+    target_files: ["build.gradle", "build.gradle.kts"]
+    pattern: "(?<=targetCompatibility\\s*=\\s*['\"]?)(?:1\\.8|8|11)(?=['\"]?)"
+    replacement: "17"

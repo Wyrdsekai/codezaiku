@@ -1,0 +1,19 @@
+id: 008-multifault-portconflict-disk
+title: App won't start — and the box has more than one problem
+category: web-service
+scenario_difficulty: hard
+
+incident: >
+  Our app on port 8080 will not start / is not serving. Monitoring is also flagging the disk as nearly
+  full. Investigate read-only and determine the REAL reason the app is down — there may be more than one
+  issue on the box, so identify which one actually caused the outage.
+
+adversarial_signals:
+  - the disk is genuinely ~92% full (a real problem, but NOT why the app won't start)
+
+image: 008-multifault-portconflict-disk
+setup: setup.sh
+run_args: "--tmpfs /var/lib/data:size=64m"
+
+# Resolved when the app is actually serving on :8080 (requires the port freed — freeing disk alone won't do it).
+resolved_check: "curl -sf -o /dev/null --connect-timeout 3 http://127.0.0.1:8080/"

@@ -1,0 +1,56 @@
+# certstack — the fixture that makes the card-applicability question MEASURABLE.
+#
+# An expired TLS certificate produces the evidence string "certificate has expired", which is in
+# `host-tls-cert-expiry`'s signature. That card passes the keyword gate on ANY target (it declares
+# `match: linux, host, tls, ssl, certificate`, and `host` is true everywhere) and its procedure is
+# systemctl-based. So on a docker-only or macOS target the harness hands the model a fix procedure
+# that cannot run — the exact failure `platform:` + CODEZAIKU_OPS_CARD_APPLICABILITY exist to prevent,
+# and the only one of the three generic-signature cards that is easy to inject deliberately.
+services:
+  tls:
+    build: ./tls
+    container_name: certstack-tls
+    environment:
+      CERT_EXPIRED_DAYS_AGO: "${CERT_EXPIRED_DAYS_AGO:-30}"   # 0 = healthy, >0 = expired that many days ago
+    volumes: [certs:/certs]
+    networks: [certnet]
+    # THE TLS SERVICE MUST BE THE ROOT, and that takes a healthcheck it fails. Without one the only
+    # troubled service is the api, the localizer names root=api, and the root identity ("api …") holds
+    # none of host-tls-cert-expiry's match keywords, so the card can never fire — measured, and it is
+    # what made the first version of this fixture unable to demonstrate anything.
+    #
+    # With root=tls the identity contains "tls", which IS one of that card's match keywords, and the
+    # evidence carries "certificate has expired", which is in its signature. The card therefore fires
+    # — and its procedure is `systemctl`, which cannot run on a Mac or any systemd-less host. That is
+    # the misfire CODEZAIKU_OPS_CARD_APPLICABILITY exists to prevent, and this is the only fixture we
+    # have that produces it.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import ssl,urllib.request;urllib.request.urlopen('https://localhost:8443/',context=ssl.create_default_context(cafile='/certs/server.crt'))\" || exit 1"]
+      interval: 5s
+      timeout: 4s
+      retries: 3
+      start_period: 8s
+
+  api:
+    build: ./app
+    container_name: certstack-api
+    environment:
+      TLS_URL: https://tls:8443/
+      TLS_CA: /certs/server.crt
+    ports: ["28091:8000"]
+    volumes: [certs:/certs]
+    depends_on: [tls]
+    networks: [certnet]
+    # NO healthcheck on the api, deliberately — the SAME law authstack cost me. The api is up and
+    # serving; what is broken is its dependency. A dep-sensitive healthcheck here makes the api itself
+    # "objectively troubled", the localizer names root=api, and the identity "api …" matches no
+    # engine card. The troubled service must be the one that is actually at fault: tls, above.
+    #
+    # The readiness verdict still needs CODEZAIKU_OPS_APP_HEALTH=http://localhost:28091/ set or
+    # discovered, or the localizer sees "readiness ok, containers healthy" and localizes nothing.
+
+volumes:
+  certs:
+networks:
+  certnet:
+    name: certstack_certnet

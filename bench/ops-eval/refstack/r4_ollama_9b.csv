@@ -1,0 +1,5 @@
+{"fault": "ollama-model-missing", "k": 1, "tier": "9b", "detected": true, "localized": true, "card": "ollama-model-missing.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "ollama-model-missing", "k": 2, "tier": "9b", "detected": true, "localized": true, "card": "ollama-model-missing.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "ollama-model-missing", "k": 3, "tier": "9b", "detected": true, "localized": true, "card": "ollama-model-missing.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "ollama-model-missing", "k": 4, "tier": "9b", "detected": true, "localized": true, "card": "ollama-model-missing.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "ollama-model-missing", "k": 5, "tier": "9b", "detected": true, "localized": true, "card": "ollama-model-missing.md", "fixed": true, "harm": false, "harm_svcs": []}

@@ -1,0 +1,200 @@
+# Rust — metadata + tarball install.
+# Standalone tarballs from static.rust-lang.org contain an install.sh. We extract
+# and run it with a custom prefix so rustc/cargo end up at a predictable path.
+# Latest stable as of 2026-04-17.
+name: rust
+version: "1.95.0"
+triggers: ["rust", "rust/axum", "rust/actix", "rust/rocket"]
+source_extensions: [".rs"]
+max_file_size: 50000
+config_files: ["Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml",
+               "rustfmt.toml", ".gitignore"]
+# Installer fields. The tarball unpacks into rust-<version>-x86_64-unknown-linux-gnu/
+# which has an install.sh. post_install runs after extraction, relative to install_dir.
+url: "https://static.rust-lang.org/dist/rust-1.95.0-x86_64-unknown-linux-gnu.tar.gz"
+archive_format: tar.gz
+install_dir: "rust-1.95.0"
+flatten: true
+# After extract, run ./install.sh --prefix=<install_dir>/prefix --disable-ldconfig
+post_install: "./install.sh --prefix=$INSTALL_DIR/prefix --disable-ldconfig"
+# Symlinks to create — multiple for Rust: cargo, rustc, rustup
+symlinks:
+  cargo: "prefix/bin/cargo"
+  rustc: "prefix/bin/rustc"
+  rustdoc: "prefix/bin/rustdoc"
+validation: "cargo --version"
+install_command: "cargo fetch 2>&1 | tail -5"
+build_command: "cargo check --message-format=short 2>&1 | tail -40"
+test_command: "cargo test --no-run 2>&1 | tail -20"
+run_command: "cargo run --release"
+# Per-file lightweight check — runs at write_file time. Rust legitimately
+# uses `#[attr]` and `#![inner_attr]` so we can't reject `#`. We DO catch
+# tool-call envelope leakage in the file body, which is the most common
+# stub-pollution failure mode (Run #31 zone-b41b750c had orphan files
+# with truncated `vec![ TabKind::System, TabKind::Cpu, TabKind::Memory, ]`
+# tails). rustc per-file needs full crate context — too heavy for write-time;
+# the project-wide `syntax_check_project` below remains the authority.
+syntax_check_file: |
+  m=$(grep -nE '\[tool_call:|</tool_calls?>|</function>|</parameter>' {file} 2>/dev/null || true)
+  if [ -n "$m" ]; then echo "Tool-call envelope leakage in file body:"; echo "$m"; exit 1; fi
+  exit 0
+# Syntax gates — cargo check is the cheapest safe project-wide parse.
+syntax_check_project: "cargo check --message-format=short 2>&1 | tail -40"
+# cp-check config — Rust per-file isn't actionable without crate context,
+# so cp-check on a .rs file runs cargo check at the crate root. cargo's
+# `--message-format=short` keeps output focused (one line per error,
+# `path:line:col: error[E...]` format), no banner to strip.
+clean_check_file:
+  command: 'cd "$(dirname "{file}")" && (while [ ! -f Cargo.toml ] && [ "$PWD" != / ]; do cd ..; done; cargo check --message-format=short 2>&1)'
+  strip_lines_matching:
+    - "^\\s*Compiling "
+    - "^\\s*Checking "
+    - "^\\s*Finished "
+    - "^\\s*Updating "
+  on_empty: "rust cargo-check: OK"
+  timeout_secs: 60
+# Required files — written by the scaffolding pass if missing.
+required_files:
+  - path: Cargo.toml
+    template: |
+      [package]
+      name = "{{project_name}}"
+      version = "0.1.0"
+      edition = "2024"
+
+      [dependencies]
+
+  - path: src/main.rs
+    template: |
+      fn main() {
+          println!("Hello from {{project_name}}");
+      }
+
+skeleton_fill_supported: true  # strict compiler enforces cross-file correctness
+
+# Runtime smoke — Rust projects are typically CLIs or servers.
+# Phase A MVP (PLAN_QE_AGENTS.md): cargo test runs unit tests alongside
+# the binary smoke. Non-blocking — test failures are signal, not gate.
+# No UI render check: Rust CLIs don't serve HTML.
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (Rust) ==="
+  cargo build --release --quiet 2>&1 | tail -15 || exit 2
+  BIN=$(find target/release -maxdepth 1 -type f -executable -not -name "*.d" | head -1)
+  if [ -z "$BIN" ]; then
+    echo "NO_BINARY — cargo build produced no executable"
+    exit 2
+  fi
+  echo "=== BINARY: $BIN ==="
+  # Minimum smoke: --help must succeed (exercises clap / arg parsing)
+  "$BIN" --help 2>&1 | head -20 || exit 3
+  echo "=== --version ==="
+  "$BIN" --version 2>&1 | head -3 || true
+
+
+# Lightweight structural check — runs inline in the coder gate chain.
+# `cargo check` only checks metadata, not the existence of [[bin]] paths,
+# so a Cargo.toml declaring `path = "src/main.rs"` can pass cargo check
+# even when src/main.rs doesn't exist. zone-620a42c9 2026-05-11 had
+# exactly this — 18/18 cargo check PASS, binary structurally absent.
+# This catches: any [[bin]] declares a path that must exist; fall back to
+# verifying src/main.rs OR src/lib.rs exists when no explicit [[bin]].
+structural_check: |
+  if [ ! -f Cargo.toml ]; then echo 'SMOKE_OK no Cargo.toml'; exit 0; fi
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  last=$(tail -c 200 Cargo.toml 2>/dev/null)
+  if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+    echo "ENVELOPE_LEAK — Cargo.toml ends with a leaked tool-call envelope tail. Rewrite Cargo.toml and stop at the natural end-of-content."
+    exit 4
+  fi
+  # Java-misnamed-as-Cargo.toml — see gradle.yaml's BUILD_GRADLE_CORRUPT.
+  # TOML uses [package] (bracketed); Java's `package x.y;` is unambiguous
+  # corruption. Caught BEFORE the generic [package]/[workspace] check so
+  # the diagnostic names the actual corruption shape.
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' Cargo.toml 2>/dev/null; then
+    echo "CARGO_TOML_IS_JAVA — Cargo.toml starts with a Java 'package x.y;' line. This is not a Rust manifest. Rewrite Cargo.toml as proper TOML: [package]\\nname = \"...\"\\nversion = \"0.1.0\"\\nedition = \"2024\"."
+    exit 4
+  fi
+  # Catch Cargo.toml containing non-TOML content (e.g. leaked source code,
+  # tool-call envelope tails). A valid Cargo.toml has either [package] or
+  # [workspace] as a top-level section. Without this check, downstream
+  # cargo invocations fail with confusing TOML parse errors instead of
+  # naming the real problem (manifest is the wrong file type).
+  if ! grep -qE '^[[:space:]]*\[package\]|^[[:space:]]*\[workspace\]' Cargo.toml 2>/dev/null; then
+    echo 'CARGO_TOML_CORRUPT — Cargo.toml lacks a [package] or [workspace] section. Every Rust manifest needs at least: [package]\nname = "..."\nversion = "..."\nedition = "2024". Rewrite Cargo.toml as proper TOML.'
+    exit 4
+  fi
+  MISSING=''
+  # Extract any [[bin]].path entries. Pipe rather than heredoc: a literal
+  # YAML block scalar (`|`) requires consistent indentation, but a bash
+  # heredoc's EOF terminator must be at column 1 — incompatible. The pipe
+  # form works under both constraints. Without this (heredoc form), Jackson
+  # silently failed to parse the file → structural_check stayed null →
+  # smoke gate silent-skipped for every rust board (5 runs of evidence).
+  BIN_PATHS=$(awk '/^\[\[bin\]\]/{inbin=1;next} /^\[/{inbin=0} inbin && /^[[:space:]]*path[[:space:]]*=/' Cargo.toml | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' | grep -v '^$')
+  if [ -n "$BIN_PATHS" ]; then
+    printf '%s\n' "$BIN_PATHS" | while IFS= read -r p; do
+      [ -z "$p" ] && continue
+      if [ ! -f "$p" ]; then printf '%s\n' "$p"; fi
+    done > /tmp/bin_path_missing.$$
+    MISSING=$(tr '\n' ' ' < /tmp/bin_path_missing.$$ | sed 's/[[:space:]]*$//')
+    rm -f /tmp/bin_path_missing.$$
+  else
+    # No explicit [[bin]] — verify a default entry point exists
+    if [ ! -f src/main.rs ] && [ ! -f src/lib.rs ]; then
+      MISSING='src/main.rs (or src/lib.rs)'
+    fi
+  fi
+  if [ -n "$MISSING" ]; then
+    echo "BIN_PATH_MISSING — Cargo.toml declares binary path(s) that do not exist:$MISSING. Write the source file at the declared path, or update Cargo.toml's [[bin]].path to reference an existing file. Note: cargo check is metadata-only and won't catch this."
+    exit 3
+  fi
+  echo 'SMOKE_OK rust bin paths resolve'
+
+# Post-compile outcome check (audit 2026-05-11, fixed 2026-05-11 v2):
+# Verifies the source structure supports producing a build artifact.
+# IMPORTANT: the compile gate runs `cargo check` (parse-only, no link),
+# which never produces a binary in target/. So we cannot verify "binary
+# in target/release exists" — we verify "source files exist that would
+# build to a binary." This catches the empty-crate trap (Cargo.toml but
+# no entry source files) without requiring a full cargo build per iteration.
+#
+# For semantically-accurate "binary exists" we'd need cargo build per
+# compile-gate fire — cost-prohibitive. Source-presence check is a
+# reliable proxy: if main.rs/lib.rs exists AND cargo check passed, the
+# build would produce an artifact.
+compile_artifact_check: |
+  if [ ! -f Cargo.toml ]; then echo "ARTIFACT_OK no Cargo.toml"; exit 0; fi
+  BIN_PATHS=$(awk '/^\[\[bin\]\]/{inbin=1;next} /^\[/{inbin=0} inbin && /^[[:space:]]*path[[:space:]]*=/' Cargo.toml | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' | grep -v '^$')
+  if [ -n "$BIN_PATHS" ]; then
+    MISSING=''
+    printf '%s\n' "$BIN_PATHS" | while IFS= read -r p; do
+      [ -z "$p" ] && continue
+      if [ ! -f "$p" ]; then printf '%s\n' "$p"; fi
+    done > /tmp/rs_artifact_missing.$$
+    MISSING=$(tr '\n' ' ' < /tmp/rs_artifact_missing.$$ | sed 's/[[:space:]]*$//')
+    rm -f /tmp/rs_artifact_missing.$$
+    if [ -n "$MISSING" ]; then
+      echo "NO_BUILD_ARTIFACT — Cargo.toml declares [[bin]].path entries that do not exist on disk: $MISSING. cargo check passed silently (it validates metadata, not source presence), but cargo build would produce no binary. Create the source files at the declared paths."
+      exit 1
+    fi
+    echo "ARTIFACT_OK [[bin]] paths resolve"; exit 0
+  fi
+  if [ -f src/main.rs ] || [ -f src/lib.rs ]; then
+    echo "ARTIFACT_OK default entry point exists"; exit 0
+  fi
+  echo "NO_BUILD_ARTIFACT — Cargo.toml has no [[bin]] declaration AND neither src/main.rs nor src/lib.rs exists. This is the empty-crate trap: cargo check returns exit 0 but produces no binary or library. Add src/main.rs (or src/lib.rs) with at least a working entry point."
+  exit 1
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "edition = 2024"
+  dockerfile_base_builder: "rust:1-slim"
+  dockerfile_base_runtime: "debian:bookworm-slim"
+  web_framework: "Axum"
+  web_framework_version: "0.7+"
+  cli_framework: "clap 4.x (with derive feature)"
+  notes: "VERIFY every crate version against crates.io before pinning. Phantom versions like 'anymap 1.0' (a version that does not exist on crates.io) are a known LLM failure mode. Pin to concrete versions you have seen published, or use '*' and let cargo resolve. Edition 2024 is stable since Feb 2025."
+

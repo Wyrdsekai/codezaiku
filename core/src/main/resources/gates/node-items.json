@@ -1,0 +1,16 @@
+{
+  "name": "node-items",
+  "archetype": "http-service",
+  "boot": "PORT={port} node src/server.js",
+  "readinessPath": "/api/items",
+  "bootTimeoutSec": 60,
+  "claims": [
+    { "id": "list",    "method": "GET",    "path": "/api/items",        "expectStatus": 200, "bodyCheck": { "kind": "jsonArray" } },
+    { "id": "create",  "method": "POST",   "path": "/api/items",        "expectStatus": 201, "body": "{\"name\":\"Dune\"}", "bodyCheck": { "kind": "hasField", "arg": "id" }, "capture": "id" },
+    { "id": "has",     "method": "GET",    "path": "/api/items",        "expectStatus": 200, "bodyCheck": { "kind": "contains", "arg": "Dune" } },
+    { "id": "byid",    "method": "GET",    "path": "/api/items/{id}",   "expectStatus": 200, "bodyCheck": { "kind": "contains", "arg": "Dune" } },
+    { "id": "missing", "method": "GET",    "path": "/api/items/999999", "expectStatus": 404 },
+    { "id": "delete",  "method": "DELETE", "path": "/api/items/{id}",   "expectStatus": 204 },
+    { "id": "gone",    "method": "GET",    "path": "/api/items/{id}",   "expectStatus": 404 }
+  ]
+}

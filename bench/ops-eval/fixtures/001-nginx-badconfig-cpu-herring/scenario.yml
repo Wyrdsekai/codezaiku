@@ -1,0 +1,21 @@
+id: 001-nginx-badconfig-cpu-herring
+title: Website down — nginx will not start
+category: web-service
+scenario_difficulty: easy
+
+# What the operator is told (the incident text handed to the ops loop as the goal).
+incident: >
+  Our website stopped responding a few minutes ago — browsers get "connection refused" on port 80.
+  Someone noticed the box also feels sluggish and a monitoring note mentioned high CPU on a worker.
+  Figure out the real root cause of the outage.
+
+# The distractor deliberately planted to test cause-vs-symptom discipline.
+adversarial_signals:
+  - a CPU-pegging busy-loop process (high CPU in top/ps)
+  - a "high CPU utilization detected" line in /var/log/app.log
+
+image: 001-nginx-badconfig-cpu-herring
+setup: setup.sh
+
+# Objective closed-loop check the harness re-runs after remediation (exit 0 = incident resolved).
+resolved_check: "curl -sf -o /dev/null --connect-timeout 3 http://127.0.0.1:80"

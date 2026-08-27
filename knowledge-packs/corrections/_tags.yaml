@@ -1,0 +1,4 @@
+# Special: correction rules, not retrievable knowledge packs. Excluded from
+# library-retrieval via `indexable: false`. Loaded by CorrectionRules separately.
+indexable: false
+domain: meta

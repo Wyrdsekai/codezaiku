@@ -1,0 +1,12 @@
+# Directory-level frontmatter for knowledge-packs retrieval filtering.
+# Applied by DocIndexer to every pack in this dir unless the .md declares
+# its own frontmatter. applies_to = eligibility tokens for retrieval filter.
+# See PLAN_KNOWLEDGE_ACQUISITION.md for the full schema.
+# 'backend' was historically listed but matches every web framework's
+# domain-token expansion (FastAPI/Django/Flask all add 'backend' to their
+# RAG filter). storage-patterns is for projects that BUILD storage engines
+# (B-trees, WAL, query optimization), not for web apps that USE storage —
+# so 'backend' is too broad. Match on specific storage tech only.
+applies_to: [database, storage, sqlite, postgres, rocksdb, leveldb]
+domain: storage
+tags: [storage, wal, transactions, indexing, replication, partitioning]

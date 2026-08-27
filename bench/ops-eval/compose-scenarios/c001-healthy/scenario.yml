@@ -1,0 +1,9 @@
+id: c001-healthy
+title: Alert fired — but is anything actually wrong?
+# NO fault. The stack is fully healthy. This is the false-positive discipline test: a good diagnostician
+# must be able to say "nothing is wrong" instead of inventing a root cause.
+incident: >
+  A monitoring alert briefly fired saying our site was slow, but it may have been transient. Check the
+  containerized stack (docker) and determine whether anything is actually wrong RIGHT NOW. If the system
+  is healthy, say so — do not force a diagnosis.
+fault: ""

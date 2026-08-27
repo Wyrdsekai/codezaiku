@@ -1,0 +1,27 @@
+name: cli-tui-probes
+archetype: cli-tui
+notes: |
+  ratatui / textual / bubbletea apps draw frames in raw-mode terminal.
+  In a non-TTY sandbox shell, running the binary directly produces NO
+  observable stdout — the binary either waits forever for a TTY or exits
+  silently. Behavior probes that pipe stdout fail to discriminate working
+  code from broken code.
+  Probe via static-analysis: `strings` on the binary checks compiled-in
+  literals (color names, panel labels), `file` confirms it's an ELF executable,
+  `--version` (if clap-derived) returns build metadata. Do NOT probe via
+  stdin/argv subcommands — keyboard navigation is the only input surface,
+  and it requires a TTY.
+do_probe:
+  - 'strings <BIN> | grep -i "<spec_keyword>"'
+  - 'file <BIN>'
+  - 'test -x <BIN> && echo EXECUTABLE'
+  - 'ls -la <BIN>'
+  - '<BIN> --version 2>&1 | head -3'
+dont_probe:
+  - '<BIN> --help'
+  - '<BIN> 2>&1 | head'
+  - '<BIN> 2>&1 | grep <X>'
+  - 'echo "input" | <BIN>'
+  - '<BIN> subcommand args'
+  - '<BIN> top 20 --sort cpu'
+  - 'curl <BIN>'

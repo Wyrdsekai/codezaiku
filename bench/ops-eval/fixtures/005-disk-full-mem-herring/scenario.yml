@@ -1,0 +1,20 @@
+id: 005-disk-full-mem-herring
+title: App returning 500s — writes failing
+category: web-service
+scenario_difficulty: medium
+
+incident: >
+  Our app on port 8080 started returning HTTP 500 on writes. The box also looks low on memory and a
+  process is using a lot of RAM, so the team suspects a memory leak. Investigate read-only and find the
+  REAL reason writes are failing.
+
+adversarial_signals:
+  - a process holding ~300MB RAM (suggests a "memory leak")
+  - a "memory usage climbing" line in /var/log/app/app.log
+
+image: 005-disk-full-mem-herring
+setup: setup.sh
+# A bounded tmpfs for the data dir → reproduces disk-full without touching the host disk.
+run_args: "--tmpfs /var/lib/appdata:size=64m"
+
+resolved_check: "[ $(df -P /var/lib/appdata | awk 'NR==2{gsub(/%/,\"\",$5);print $5+0}') -lt 90 ]"

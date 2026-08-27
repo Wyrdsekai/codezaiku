@@ -1,0 +1,135 @@
+name: Release
+
+# Attest published release artifacts with Sigstore (keyless).
+#
+# This workflow deliberately BUILDS NOTHING. CodeZaiku's artifacts are built and
+# validated on real hardware before the release is published — a platform claim
+# that rests on CI rather than a run is exactly the kind this project refuses to
+# make. The workflow fires after publication, downloads each asset, checks it
+# against the release's own SHA256SUMS, attests the artifact hash via Sigstore
+# keyless signing, and uploads the <asset>.sigstore.json bundle back to the
+# release as a sibling.
+#
+# What the signature MEANS: "the CodeZaiku release workflow, running at this tag,
+# blessed these exact bytes." It is an authenticity statement from the project's
+# pinned CI identity — NOT SLSA build provenance, because this runner did not
+# build the bytes. The predicate says so rather than letting the badge imply more
+# than it earned.
+#
+# Verification, from any machine with the GitHub CLI:
+#   gh attestation verify codezaiku-X.Y.Z.tar.gz --repo Wyrdsekai/codezaiku
+#
+# Uses ONLY GitHub-authored actions (actions/*), so a repository Actions policy
+# can stay narrow.
+
+on:
+  release:
+    types: [published]
+  # Re-run for an already-published tag (e.g. the attest job failed):
+  #   gh workflow run release.yml --ref v0.1.0
+  # The ref MUST be the release tag — the Sigstore certificate identity embeds
+  # it, so a run from any other ref signs under an identity verifiers reject.
+  workflow_dispatch: {}
+
+permissions:
+  contents: write        # upload .sigstore.json bundles to the release
+  id-token: write        # Sigstore keyless signing via GitHub OIDC
+  attestations: write    # actions/attest -> GitHub attestation store
+
+jobs:
+  attest:
+    name: Attest ${{ matrix.artifact }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false     # one unattested artifact must not hide the others
+      matrix:
+        include:
+          - artifact: tarball
+            pattern: 'codezaiku-[0-9]*.tar.gz'
+          - artifact: deb
+            pattern: 'codezaiku_*_all.deb'
+    steps:
+      - name: Resolve tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            TAG="$RELEASE_TAG"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            echo "workflow_dispatch must run on a tag ref (got $GITHUB_REF)." >&2
+            echo "Use: gh workflow run release.yml --ref vX.Y.Z" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Attesting release $TAG"
+
+      - name: Download asset + checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p assets
+          gh release download "${{ steps.tag.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern '${{ matrix.pattern }}' \
+            --dir assets
+          gh release download "${{ steps.tag.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'SHA256SUMS*' \
+            --dir assets
+          ls -lh assets
+
+      - name: Verify checksum before attesting
+        id: asset
+        run: |
+          cd assets
+          FILE=$(find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%f\n')
+          COUNT=$(printf '%s\n' "$FILE" | grep -c .)
+          if [ "$COUNT" -ne 1 ]; then
+            echo "Expected exactly one asset for pattern '${{ matrix.pattern }}', got $COUNT:" >&2
+            printf '%s\n' "$FILE" >&2
+            exit 1
+          fi
+          EXPECTED=$(awk -v f="$FILE" '$2 == f { print $1 }' SHA256SUMS*)
+          if [ -z "$EXPECTED" ]; then
+            echo "$FILE is not listed in the release's SHA256SUMS — refusing to attest." >&2
+            exit 1
+          fi
+          ACTUAL=$(sha256sum "$FILE" | awk '{ print $1 }')
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "Checksum mismatch for $FILE (expected $EXPECTED, got $ACTUAL) — refusing to attest." >&2
+            exit 1
+          fi
+          echo "Checksum OK: $ACTUAL  $FILE"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Attest
+        id: attest
+        uses: actions/attest@v3
+        with:
+          subject-path: assets/${{ steps.asset.outputs.file }}
+          predicate-type: 'https://codezaiku.dev/attestation/release/v1'
+          predicate: >-
+            {"tag": "${{ steps.tag.outputs.tag }}",
+             "checksumSource": "release SHA256SUMS, verified pre-attestation",
+             "builder": "built and validated on real hardware before publish, not by this runner",
+             "attestedBy": "post-publish attestation via .github/workflows/release.yml"}
+
+      - name: Upload bundle to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BUNDLE="${{ steps.attest.outputs.bundle-path }}"
+          if [ -z "$BUNDLE" ] || [ ! -f "$BUNDLE" ]; then
+            echo "actions/attest produced no bundle" >&2
+            exit 1
+          fi
+          # Convention: <artifact>.sigstore.json is the sibling bundle of <artifact>.
+          OUT="assets/${{ steps.asset.outputs.file }}.sigstore.json"
+          cp "$BUNDLE" "$OUT"
+          gh release upload "${{ steps.tag.outputs.tag }}" "$OUT" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          echo "Uploaded $(basename "$OUT")"

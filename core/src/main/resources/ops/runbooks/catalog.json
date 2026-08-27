@@ -1,0 +1,20 @@
+{
+  "runbooks": [
+    { "id": "service-down",   "match": ["not running", "won't start", "failed to start", "inactive", "dead"],
+      "description": "A service/unit is down or won't start — find WHY (config, port, dependency, resource), not just THAT it's down." },
+    { "id": "web-502",        "match": ["502", "503", "bad gateway", "upstream", "connection refused"],
+      "description": "A web endpoint returns 5xx / connection refused — trace front proxy → app → dependency." },
+    { "id": "disk-full",      "match": ["no space", "disk full", "enospc", "read-only file system"],
+      "description": "A filesystem is full or read-only — find what filled it and which service it broke." },
+    { "id": "port-conflict",  "match": ["address already in use", "eaddrinuse", "port", "bind"],
+      "description": "A process cannot bind its port because another already holds it — identify the squatter." },
+    { "id": "dependency-down", "match": ["database", "cache", "redis", "postgres", "could not connect", "unreachable", "backend"],
+      "description": "An app 500s or exits because a backend (DB/cache/socket) is unreachable — local vs external." },
+    { "id": "cert-expired",   "match": ["certificate", "expired", "ssl", "tls", "handshake"],
+      "description": "TLS fails because a certificate is expired/invalid — check the served cert's validity." },
+    { "id": "oom",            "match": ["killed process", "out of memory", "oom", "cannot allocate"],
+      "description": "The kernel OOM-killer or an allocation failure — find the memory hog and the victim." },
+    { "id": "bad-config",     "match": ["syntax", "invalid", "unknown directive", "parse error", "config test failed"],
+      "description": "A daemon won't load because its config is invalid — locate the exact offending directive." }
+  ]
+}

@@ -1,0 +1,5 @@
+{"fault": "rabbitmq-disk-alarm", "k": 1, "tier": "30b", "detected": true, "localized": true, "card": "rabbitmq-disk-alarm.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "rabbitmq-disk-alarm", "k": 2, "tier": "30b", "detected": true, "localized": true, "card": "rabbitmq-disk-alarm.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "rabbitmq-disk-alarm", "k": 3, "tier": "30b", "detected": true, "localized": true, "card": "rabbitmq-disk-alarm.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "rabbitmq-disk-alarm", "k": 4, "tier": "30b", "detected": true, "localized": true, "card": "rabbitmq-disk-alarm.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "rabbitmq-disk-alarm", "k": 5, "tier": "30b", "detected": true, "localized": true, "card": "rabbitmq-disk-alarm.md", "fixed": true, "harm": false, "harm_svcs": []}

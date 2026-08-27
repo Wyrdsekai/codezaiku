@@ -1,0 +1,4 @@
+# Special: toolchain install configs. Not markdown packs. ToolchainInstaller
+# handles these directly. DocIndexer skips via `indexable: false`.
+indexable: false
+domain: toolchain

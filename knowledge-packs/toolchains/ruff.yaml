@@ -1,0 +1,28 @@
+# ruff — fast Python linter/static-analysis (100× faster than flake8).
+# Provides the per-file lint_command_file consumed by python.yaml (and any
+# future Python-flavoured toolchain) via ToolchainInstaller.lintCommandFileFor.
+# Isolated in a uv-managed venv under ~/.codezaiku/tools/ because modern
+# Debian/Ubuntu pip refuses --user installs on system Python (PEP 668).
+name: ruff
+version: "0.x"
+# Same triggers as python.yaml so the matching-toolchains lookup finds
+# both when a Python board spawns. Add any new Python-variant triggers
+# here if python.yaml's list grows.
+triggers: ["python", "python/fastapi", "python/flask", "python/django", "python/cli"]
+# Metadata only — no archive install. setup_command does the work.
+source_extensions: []
+# Runs once per JVM when a matching language starts. Idempotent: uv venv
+# is a no-op if the venv exists; `uv pip install` is fast when already
+# satisfied. Bootstrap uv on first ever run via the astral install script
+# (same as gdtoolkit.yaml).
+setup_command: |
+  set -e
+  if ! command -v uv >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || true
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+  VENV="$HOME/.codezaiku/tools/ruff-venv"
+  uv venv --quiet "$VENV"
+  uv pip install --quiet --python "$VENV/bin/python" "ruff"
+  mkdir -p "$HOME/.codezaiku/tools/bin"
+  ln -sf "$VENV/bin/ruff" "$HOME/.codezaiku/tools/bin/ruff"

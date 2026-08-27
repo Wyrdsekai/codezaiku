@@ -1,0 +1,94 @@
+# C# / .NET — metadata-only for now. .NET SDK install is a larger effort
+# (MSI on Windows, package manager on Linux). Scanner metadata gives us
+# per-file fills for C# files without waiting on that.
+name: csharp
+version: "8.0+"
+triggers: ["csharp", "c#", "dotnet", "csharp/asp.net"]
+source_extensions: [".cs", ".csproj", ".vb", ".fs"]
+config_files: ["*.sln", ".gitignore", "appsettings.json", "appsettings.Development.json",
+               "global.json", "nuget.config", "Directory.Build.props"]
+install_command: "dotnet restore 2>&1 | tail -5"
+build_command: "dotnet build --no-restore -v quiet 2>&1 | tail -30"
+test_command: "dotnet test --no-restore -v quiet 2>&1 | tail -30"
+run_command: "dotnet run"
+# Syntax gate — C# has no per-file check (MSBuild project scope). Project-level only.
+syntax_check_project: "dotnet build --no-restore -v quiet 2>&1 | tail -40"
+
+skeleton_fill_supported: true  # strict compiler enforces cross-file correctness
+
+# Runtime smoke — C#/.NET: ASP.NET Core service or console CLI.
+# Phase A + Phase C MVPs (PLAN_QE_AGENTS.md).
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (.NET) ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    PORT="${APP_PORT:-8090}"
+    for i in $(seq 1 60); do
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:${PORT}/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP after ${i}s"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:${PORT}/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    ROOT_HTML=$(curl -sS http://localhost:${PORT}/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, likely empty"
+      fi
+    fi
+    for sub in /health /api /swagger /api/health /weatherforecast; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:${PORT}${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  else
+    dotnet build --no-restore -v quiet 2>&1 | tail -10 || exit 2
+    dotnet run --no-build -- --help 2>&1 | head -20 || true
+  fi
+
+structural_check: |
+  CSPROJ=$(ls *.csproj 2>/dev/null | head -1)
+  if [ -z "$CSPROJ" ]; then echo 'SMOKE_OK no .csproj'; exit 0; fi
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  last=$(tail -c 200 "$CSPROJ" 2>/dev/null)
+  if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+    echo "ENVELOPE_LEAK — $CSPROJ ends with a leaked tool-call envelope tail. Rewrite $CSPROJ ending with </Project>."
+    exit 4
+  fi
+  # Java-misnamed-as-.csproj — see gradle.yaml's BUILD_GRADLE_CORRUPT.
+  # .csproj is XML; Java's `package x.y;` is unambiguous corruption.
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' "$CSPROJ" 2>/dev/null; then
+    echo "CSPROJ_IS_JAVA — $CSPROJ starts with a Java 'package x.y;' line. This is not a .NET project file. Rewrite $CSPROJ as proper XML starting with <Project Sdk=\"Microsoft.NET.Sdk\"> ... </Project>."
+    exit 4
+  fi
+  if ! grep -qE '<Project([[:space:]]|>)' "$CSPROJ" 2>/dev/null; then
+    echo "CSPROJ_CORRUPT — $CSPROJ does not contain a <Project> root element. Every .NET project file must be valid XML starting with <Project Sdk=\"Microsoft.NET.Sdk\">."
+    exit 4
+  fi
+  if ! grep -qE '<TargetFramework[s]?>' "$CSPROJ" 2>/dev/null; then
+    echo "CSPROJ_THIN — $CSPROJ has no <TargetFramework> / <TargetFrameworks> element. Add one (e.g. <TargetFramework>net9.0</TargetFramework>)."
+    exit 4
+  fi
+  echo "SMOKE_OK $CSPROJ parses"
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: ".NET 9"
+  dockerfile_base_builder: "mcr.microsoft.com/dotnet/sdk:9.0"
+  dockerfile_base_runtime: "mcr.microsoft.com/dotnet/aspnet:9.0"
+  web_framework: "ASP.NET Core"
+  web_framework_version: "9.0"
+  cli_framework: "System.CommandLine"
+  notes: "Prefer minimal APIs over controller-based routing for new apps. Enable nullable reference types in csproj. TargetFramework must match the SDK and runtime Docker images."

@@ -1,0 +1,15 @@
+name: shop
+services:
+  web:
+    image: python:3.11-slim
+    command: sh -c "pip install -q redis && python /app/app.py"
+    volumes: ["./app.py:/app/app.py:ro"]
+    ports: ["38080:8080"]
+    environment: ["CACHE_HOST=cache"]
+    depends_on: ["cache"]
+    networks: ["shopnet"]
+  cache:
+    image: redis:7-alpine
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 10s, timeout: 5s, retries: 5}
+    networks: ["shopnet"]
+networks: {shopnet: {}}

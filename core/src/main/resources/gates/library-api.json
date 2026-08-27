@@ -1,0 +1,16 @@
+{
+  "name": "library-api",
+  "archetype": "http-service",
+  "boot": "./gradlew --no-daemon bootRun --console=plain -q --args=--server.port={port}",
+  "readinessPath": "/api/books",
+  "bootTimeoutSec": 180,
+  "claims": [
+    { "id": "C4-list",    "method": "GET",    "path": "/api/books",        "expectStatus": 200, "bodyCheck": { "kind": "jsonArray" } },
+    { "id": "C3-create",  "method": "POST",   "path": "/api/books",        "expectStatus": 201, "body": "{\"title\":\"Dune\",\"author\":\"Herbert\"}", "bodyCheck": { "kind": "hasField", "arg": "id" }, "capture": "id" },
+    { "id": "C4-has",     "method": "GET",    "path": "/api/books",        "expectStatus": 200, "bodyCheck": { "kind": "contains", "arg": "Dune" } },
+    { "id": "C5-byid",    "method": "GET",    "path": "/api/books/{id}",   "expectStatus": 200, "bodyCheck": { "kind": "contains", "arg": "Dune" } },
+    { "id": "C5-missing", "method": "GET",    "path": "/api/books/999999", "expectStatus": 404 },
+    { "id": "C6-delete",  "method": "DELETE", "path": "/api/books/{id}",   "expectStatus": 204 },
+    { "id": "C6-gone",    "method": "GET",    "path": "/api/books/{id}",   "expectStatus": 404 }
+  ]
+}

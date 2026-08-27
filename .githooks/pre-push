@@ -1,0 +1,5 @@
+#!/bin/bash
+# Card lint gate: a below-bar knowledge card voids the measurement built on it, so it can't be pushed.
+if ls ops-knowledge/*.md >/dev/null 2>&1; then
+  python3 ops-knowledge/lint.py ops-knowledge || { echo "push blocked: fix the card(s) above"; exit 1; }
+fi

@@ -1,0 +1,92 @@
+# Dart / Flutter — metadata-only.
+name: dart
+version: "3.5+"
+triggers: ["dart", "flutter"]
+source_extensions: [".dart"]
+config_files: ["pubspec.yaml", "pubspec.lock", "analysis_options.yaml",
+               ".gitignore", ".metadata"]
+install_command: "dart pub get 2>&1 | tail -5 || flutter pub get 2>&1 | tail -5"
+build_command: "dart analyze 2>&1 | tail -30 || flutter analyze 2>&1 | tail -30"
+test_command: "dart test 2>&1 | tail -30 || flutter test 2>&1 | tail -30"
+run_command: "dart run || flutter run"
+# Syntax gates — dart analyze works at project scope; per-file needs context.
+syntax_check_project: "dart analyze --fatal-infos 2>&1 | tail -30 || flutter analyze 2>&1 | tail -30"
+
+skeleton_fill_supported: true  # strict compiler enforces cross-file correctness
+
+# Runtime smoke — Dart: server (shelf, aqueduct) or CLI. Flutter mobile
+# smoke is out of scope for this lane (belongs in the future mobile lane
+# via Maestro). Phase A + Phase C MVPs (PLAN_QE_AGENTS.md).
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside any docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (Dart) ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    PORT="${APP_PORT:-8090}"
+    for i in $(seq 1 30); do
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:${PORT}/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP after ${i}s"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:${PORT}/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    ROOT_HTML=$(curl -sS http://localhost:${PORT}/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, likely empty"
+      fi
+    fi
+    for sub in /api /health /api/health; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:${PORT}${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  else
+    # CLI path — dart run --help
+    dart analyze 2>&1 | tail -15 || flutter analyze 2>&1 | tail -15 || true
+    dart run --help 2>&1 | head -20 || true
+  fi
+
+structural_check: |
+  if [ ! -f pubspec.yaml ]; then echo 'SMOKE_OK no pubspec.yaml'; exit 0; fi
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  last=$(tail -c 200 pubspec.yaml 2>/dev/null)
+  if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+    echo "ENVELOPE_LEAK — pubspec.yaml ends with a leaked tool-call envelope tail. Rewrite pubspec.yaml as proper YAML and stop at the natural end-of-content."
+    exit 4
+  fi
+  # Java-misnamed-as-pubspec.yaml — see gradle.yaml's BUILD_GRADLE_CORRUPT.
+  # YAML uses `key: value`; Java's `package x.y;` is unambiguous corruption.
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' pubspec.yaml 2>/dev/null; then
+    echo "PUBSPEC_IS_JAVA — pubspec.yaml starts with a Java 'package x.y;' line. This is not a Dart/Flutter manifest. Rewrite pubspec.yaml as proper YAML: name: my_app\\nenvironment:\\n  sdk: ^3.5.0\\ndependencies: ..."
+    exit 4
+  fi
+  if ! grep -qE '^[[:space:]]*name:[[:space:]]*[A-Za-z_]' pubspec.yaml 2>/dev/null; then
+    echo 'PUBSPEC_CORRUPT — pubspec.yaml does not declare `name: <package_name>` at top level. Every Dart/Flutter manifest needs at minimum: name, environment (sdk constraint), dependencies. Rewrite pubspec.yaml.'
+    exit 4
+  fi
+  if ! grep -qE '^[[:space:]]*(environment|dependencies):' pubspec.yaml 2>/dev/null; then
+    echo 'PUBSPEC_THIN — pubspec.yaml is missing both `environment:` and `dependencies:` keys. Add at least an environment block (e.g. environment:\n  sdk: ^3.5.0).'
+    exit 4
+  fi
+  echo 'SMOKE_OK pubspec.yaml parses'
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "Dart 3.5"
+  dockerfile_base_builder: "dart:stable"
+  dockerfile_base_runtime: "debian:bookworm-slim"
+  web_framework: "Shelf"
+  cli_framework: "args package"
+  notes: "For server workloads use Shelf. Flutter mobile builds are out of scope for this Docker lane — they live in a separate Maestro-driven mobile lane."

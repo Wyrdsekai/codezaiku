@@ -1,0 +1,36 @@
+# Per-category override for GREENFIELD problems.
+#
+# This file overlays specific (claim_type, oracle) cells on top of
+# _default.yaml. Anything not listed here falls through to the default —
+# no need to repeat the full table.
+#
+# Greenfield-specific tuning rationale:
+# - Greenfield specs are typically straightforward CRUD/REST/CLI shapes
+#   where the dynamic verifier has direct access to the running server.
+#   Its concrete observations (HTTP status, response body) are the
+#   highest-value signal — boost it slightly above the default 0.85.
+# - Adversarial probes are still useful for catching unhandled error
+#   paths, but on greenfield they often probe behaviors the spec doesn't
+#   actually require. Trim a notch.
+# - Judge oracle on BEHAVIOR claims is consistently the weakest signal
+#   (it can fabricate PASS verdicts on behavior it cannot run). Trim
+#   further.
+#
+# Empty by default — the canonical four greenfield specs were already
+# tuned against the default weights, so this file documents the
+# extension point without changing baseline behavior. Edit and
+# uncomment as you observe under-/over-weighting in real runs.
+
+weights: {}
+
+# Example overrides (uncomment to apply):
+#
+# weights:
+#   BEHAVIOR:
+#     dynamic: 0.95
+#     adversarial: 0.4
+#     judge: 0.15
+#   ROBUSTNESS:
+#     adversarial: 0.9
+#     dynamic: 0.55
+#     judge: 0.25

@@ -1,0 +1,96 @@
+# authstack — the fault class the refstack CANNOT express.
+#
+# >>> IT IS SOLVABLE — an earlier note here claimed otherwise and was WRONG (corrected 2026-08-18)
+#
+# A legal winning move exists and is verified by hand:
+#     CACHE_PASSWORD= docker compose up -d --force-recreate cache
+# It writes no host file (so the host-write guard does not block it), it clears the fault, and it
+# SURVIVES `docker restart` — i.e. it passes the latent check. A `docker rm` + `docker run` with
+# corrected args also works, at the cost of leaving the service unmanaged by compose.
+#
+# So the fixture is a legitimate SUCCESS fixture. What is missing is KNOWLEDGE, not a legal path:
+#
+# >>> WHY THE 9B SCORES 0/6 ANYWAY (measured, K=6, every run rolledBack=true)
+#   * the validated `redis-auth-server` card covers the RUNTIME case only — "if requirepass is not
+#     persisted in a config file/args, just RESTART" — and says nothing about what to do when it IS
+#     in args, which is this fault;
+#   * the host-write guard's rejection text steers toward "fix the service ... via its API";
+#   * so the model does `CONFIG SET requirepass ''` 6-8 times per run and never once tries anything
+#     else (0 host-write blocks across all six runs);
+#   * that is a band-aid, the latent check catches it, R3 rolls it back.
+#
+# So: right problem, missing knowledge. Launch-baked configuration is a real and common fault class.
+# The blocker is that the card cannot simply be extended — the measured 900-char terseness ceiling is
+# already nearly spent, and the one time it was rewritten to add this case it scored 5/8 against 8/8.
+# A separate card cannot be selectively triggered either, because the EVIDENCE is identical in both
+# cases ("Authentication required"); what distinguishes them is the container's command line, which
+# is not in the probe. Putting the root's launch config INTO the evidence would let a card trigger on
+# `--requirepass` and is the smallest change that makes this solvable by a small model.
+#
+# refstack's redis-auth fault is a RUNTIME `CONFIG SET requirepass`, which any restart clears. That
+# makes it easy in a specific way: `CONFIG SET requirepass ''` both fixes it and survives the verify.
+#
+# Here the password is baked into the SERVER'S COMMAND LINE. `CONFIG SET` still makes the verify pass
+# — and then the setting is GONE on the next restart, because the command line wins. So this fixture
+# separates a real fix (change the command line / recreate the service) from a band-aid that verifies,
+# which is exactly what the LATENT-config restart-validate exists to catch. Measured on macOS: the
+# model band-aided it and the run was scored a failure without anyone knowing why.
+services:
+  cache:
+    image: redis:7-alpine
+    container_name: authstack-cache
+    # THE FAULT LIVES HERE, ON THE COMMAND LINE. Healthy = no auth on either side. Injection recreates
+    # this service with CACHE_PASSWORD set, so the SERVER demands a password the client does not have
+    # and redis answers NOAUTH — which is what `redis-auth-server`'s signature actually matches, and
+    # what the macOS fixture produced. (An inverted fixture, where the client holds the wrong password,
+    # yields "invalid username-password pair" instead: redis-py strips the WRONGPASS code, so no
+    # signature string matches and the card never fires. Real coverage gap, noted, not patched here.)
+    #
+    # THE INJECTION MUST LIVE IN `.env`, NOT IN THE INVOKING SHELL. Measured: with CACHE_PASSWORD
+    # exported in the shell, R3's rollback (`compose up --force-recreate`) re-read an environment that
+    # no longer had it, brought the cache back WITHOUT the password, and thereby HEALED the fault it
+    # was supposed to restore — `post-rollback verify=true` was the rollback fixing the bug, not a
+    # restore. That is the same oracle contamination as refstack's runtime CONFIG SET, in a new
+    # costume. Compose reads `.env` from the project directory on every `up`, so a fault written there
+    # SURVIVES a recreate, which is what makes this fixture latent-proof.
+    #
+    # Recreating through COMPOSE (not `docker run`) matters: a hand-rolled replacement would be a
+    # non-compose container holding the name, which is the R3 impostor case and a different bug.
+    # HEALTHY = no auth at all. The faulted state comes from docker-compose.fault.yml, which REPLACES
+    # this command. Deliberately NOT a conditional like
+    #   sh -c 'if [ -n "$$PW" ]; then exec redis-server --requirepass "$$PW"; else exec redis-server; fi'
+    # — that was the first version and it is UNREPRESENTATIVE: `--requirepass` then appears in
+    # `.Config.Cmd` even in the branch NOT taken, so anything reading the launch config sees a password
+    # that is not in effect. Measured: it made the launch-args card fire on the RUNTIME fault. Real
+    # stacks pin the flag or omit it; they do not carry both in one string.
+    command: ["redis-server"]
+    networks: [authnet]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -qE 'PONG|NOAUTH'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./app
+    container_name: authstack-api
+    environment:
+      REDIS_HOST: cache
+      REDIS_PASS: ""              # the CLIENT uses no auth — never add one here to "fix" the fault
+    ports: ["28090:8000"]
+    depends_on:
+      cache: {condition: service_healthy}
+    networks: [authnet]
+    # NO healthcheck on the api ON PURPOSE. The api is UP and serving — what is broken is its
+    # DEPENDENCY. Giving it a dep-sensitive healthcheck makes the api itself "objectively troubled",
+    # and the localizer's unambiguous-readiness fast-path then names root=api and short-circuits the
+    # dep analysis entirely — measured, twice. The refstack app behaves the same way: it stays healthy
+    # while an engine is down, and the ROOT comes from the readiness verdict naming that engine.
+    #
+    # That verdict requires CODEZAIKU_OPS_APP_HEALTH=http://localhost:28090/ to be set (or discovered);
+    # with no dep map the localizer sees "readiness ok, containers healthy" and correctly localizes
+    # NOTHING.
+
+networks:
+  authnet:
+    name: authstack_authnet

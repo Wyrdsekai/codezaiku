@@ -1,0 +1,20 @@
+id: 007-cascade-3hop-badconfig
+title: Site returns 502 — trace the chain to its ROOT (3 hops)
+category: web-service
+scenario_difficulty: hard
+
+incident: >
+  Our website returns "502 Bad Gateway" on every request. nginx itself is running. Find the REAL root
+  cause. There is more than one thing "down" — keep tracing until you reach the thing that failed on its
+  own. A fix that only restarts a service will not hold.
+
+adversarial_signals:
+  - the 502 (nginx edge) is the last link, not the cause
+  - the app being down looks like the answer, but the app is down because ITS dependency is down
+  - the cache being down looks like the answer, but the cache is down because of a config error
+
+image: 007-cascade-3hop-badconfig
+setup: setup.sh
+
+# Resolved only when the whole chain is fixed (config → cache up → app up → edge serves 200).
+resolved_check: "curl -sf -o /dev/null --connect-timeout 3 http://127.0.0.1:80/"

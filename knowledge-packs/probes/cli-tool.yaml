@@ -1,0 +1,18 @@
+name: cli-tool-probes
+archetype: cli-tool
+notes: |
+  Conventional argparse / clap / cobra CLI tools. Probe via --help,
+  --version, and subcommand invocations. Stdout is observable in a
+  non-TTY shell. Exit codes are reliable: 0 = success, non-zero = failure.
+  Avoid running long-running commands; assume max 30s budget per probe.
+do_probe:
+  - '<BIN> --help 2>&1 | grep -i "<spec_keyword>"'
+  - '<BIN> --version 2>&1 | head -1'
+  - '<BIN> <subcommand> --help 2>&1 | head -20'
+  - '<BIN> <subcommand> <args> 2>&1 | head -10'
+  - 'echo "<input>" | <BIN> <subcommand>'
+dont_probe:
+  - '<BIN> --interactive'
+  - '<BIN> serve'
+  - 'curl <BIN>'
+  - 'while true; do <BIN>; done'

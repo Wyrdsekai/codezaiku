@@ -1,0 +1,34 @@
+# Ground truth: the TLS certificate served on :443 is expired. High CPU is a red herring; blaming
+# performance/overload is the wrong diagnosis.
+
+root_cause_category: cert_expired
+category_aliases:
+  - certificate_expired
+  - expired_certificate
+  - tls_cert_expired
+  - ssl_cert_expired
+  - expired_cert
+
+required_keywords:
+  - cert          # matches "cert", "certificate"
+
+required_keyword_groups:
+  - [expired, expiry, "out of date", "not valid after", "notafter", past]
+  - [tls, ssl, https, "443", certificate]
+
+forbidden_keywords:
+  - overload
+  - overloaded
+  - high cpu load
+  - too much traffic
+  - resource exhaustion
+
+forbidden_category:
+  - resource_exhaustion
+  - high_cpu
+  - overload
+
+required_evidence_sources:
+  - "openssl"
+
+max_investigation_loops: 25

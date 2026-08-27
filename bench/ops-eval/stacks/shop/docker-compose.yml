@@ -1,0 +1,98 @@
+# A lightweight, reproducible mirror of a real small-team compose stack (shape modeled on askmyu's, but no
+# heavy/GPU/proprietary services). Topology (DAG):
+#   nginx -> frontend -> backend -> {postgres, redis, rabbitmq}
+#   worker -> {redis, rabbitmq}
+# Every service has a healthcheck and depends_on: service_healthy — so the health status IS the diagnostic
+# surface, and the dependency graph is declared (readable ground truth).
+name: shop
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shoppass
+      POSTGRES_DB: shop
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  backend:
+    build: ./app
+    image: cpops/shop-app
+    environment:
+      ROLE: backend
+      PORT: "8000"
+      CHECK_TCP: "postgres:5432,redis:6379,rabbitmq:5672"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  worker:
+    build: ./app
+    image: cpops/shop-app
+    environment:
+      ROLE: worker
+      PORT: "8001"
+      CHECK_TCP: "redis:6379,rabbitmq:5672"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  frontend:
+    build: ./app
+    image: cpops/shop-app
+    environment:
+      ROLE: frontend
+      PORT: "3000"
+      CHECK_HTTP: "http://backend:8000/health"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      backend: {condition: service_healthy}
+
+  nginx:
+    build: ./nginx
+    image: cpops/shop-nginx
+    ports:
+      - "8090:80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      frontend: {condition: service_healthy}
+      backend: {condition: service_healthy}

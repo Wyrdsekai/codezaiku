@@ -1,0 +1,98 @@
+# cp-refstack — a representative production AI/RAG stack (askmyu-shaped) for CodeZaiku autonomous-SRE
+# validation. A basic RAG app (./app) couples every engine so a fault anywhere breaks a real query.
+# Host ports use a distinct 2xxxx range to avoid the standalone chaos containers. See DESIGN.md.
+name: refstack
+
+networks:
+  refstack-net:
+
+volumes:
+  pg_data:
+  qdrant_data:
+  os_data:
+  neo4j_data:
+  ollama_data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: {POSTGRES_DB: refstack, POSTGRES_USER: refstack, POSTGRES_PASSWORD: refstack}
+    ports: ["25432:5432"]
+    volumes: ["pg_data:/var/lib/postgresql/data"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U refstack"], interval: 10s, timeout: 5s, retries: 5}
+    networks: [refstack-net]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["26379:6379"]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 10s, timeout: 5s, retries: 5}
+    networks: [refstack-net]
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment: {RABBITMQ_DEFAULT_USER: refstack, RABBITMQ_DEFAULT_PASS: refstack}
+    ports: ["25672:5672", "25673:15672"]
+    healthcheck: {test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"], interval: 15s, timeout: 10s, retries: 5}
+    networks: [refstack-net]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports: ["26333:6333"]
+    volumes: ["qdrant_data:/qdrant/storage"]
+    healthcheck: {test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333'"], interval: 10s, timeout: 5s, retries: 5}
+    networks: [refstack-net]
+
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports: ["29200:9200"]
+    volumes: ["os_data:/usr/share/opensearch/data"]
+    healthcheck: {test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"], interval: 15s, timeout: 10s, retries: 10, start_period: 40s}
+    networks: [refstack-net]
+
+  neo4j:
+    image: neo4j:5.22
+    environment: {NEO4J_AUTH: "neo4j/refstackpass"}
+    ports: ["27474:7474", "27687:7687"]
+    volumes: ["neo4j_data:/data"]
+    healthcheck: {test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"], interval: 15s, timeout: 10s, retries: 10, start_period: 30s}
+    networks: [refstack-net]
+
+  localstack:
+    image: localstack/localstack:3.4.0
+    environment: {SERVICES: "s3,sqs", EAGER_SERVICE_LOADING: "1"}
+    ports: ["24566:4566"]
+    healthcheck: {test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health || exit 1"], interval: 15s, timeout: 10s, retries: 10, start_period: 20s}
+    networks: [refstack-net]
+
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["21434:11434"]
+    volumes: ["ollama_data:/root/.ollama"]
+    healthcheck: {test: ["CMD-SHELL", "ollama list || exit 1"], interval: 15s, timeout: 10s, retries: 10, start_period: 20s}
+    networks: [refstack-net]
+
+  app:
+    build: ./app
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+      opensearch: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      localstack: {condition: service_healthy}
+      ollama: {condition: service_healthy}
+    ports: ["28000:8000"]
+    healthcheck: {test: ["CMD-SHELL", "python -c \"import requests,sys; sys.exit(0 if requests.get('http://localhost:8000/health').json()['status']=='ok' else 1)\""], interval: 15s, timeout: 10s, retries: 10, start_period: 30s}
+    networks: [refstack-net]
+
+  nginx:
+    image: nginx:alpine
+    depends_on: {app: {condition: service_started}}
+    ports: ["28080:80"]
+    volumes: ["./nginx.conf:/etc/nginx/nginx.conf:ro"]
+    networks: [refstack-net]

@@ -1,0 +1,19 @@
+id: 004-cert-expired-cpu-herring
+title: HTTPS failing — customers see certificate errors
+category: web-service
+scenario_difficulty: medium
+
+incident: >
+  Customers report their browser refuses to load our site over HTTPS, warning about the security
+  certificate. The box also shows high CPU and someone wonders if it's overloaded. Investigate read-only
+  and find the REAL reason HTTPS is failing.
+
+adversarial_signals:
+  - a CPU-pegging busy-loop process (high CPU, suggests "overload")
+  - a "high CPU utilization detected" line in /var/log/app.log
+
+image: 004-cert-expired-cpu-herring
+setup: setup.sh
+
+# Objective closed-loop check after remediation (exit 0 = the served cert is valid / not expired).
+resolved_check: "openssl x509 -in /etc/nginx/ssl/cert.pem -noout -checkend 0"

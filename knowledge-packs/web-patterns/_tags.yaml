@@ -1,0 +1,7 @@
+# Directory-level frontmatter for knowledge-packs retrieval filtering.
+# Applied by DocIndexer to every pack in this dir unless the .md declares
+# its own frontmatter. applies_to = eligibility tokens for retrieval filter.
+# See PLAN_KNOWLEDGE_ACQUISITION.md for the full schema.
+applies_to: [web, frontend, backend, nextjs, react, express, django, flask, rails, fastapi, vue, svelte]
+domain: web
+tags: [routing, ssr, csr, forms, state-management, caching]

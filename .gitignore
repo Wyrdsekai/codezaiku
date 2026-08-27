@@ -1,0 +1,85 @@
+# Java / Gradle
+core/build/
+core/.gradle/
+core/jte-classes/
+.gradle/
+build/
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# Go
+cli/codezaiku
+cli/echoserver
+cli/embed/*.jar
+dist/
+
+# Python
+finetune/.venv/
+finetune/__pycache__/
+.pytest_cache/
+*.pyc
+
+# Docker data
+docker/data/
+docker/.env
+docker/docker-compose.override.yml
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CodeZaiku runtime
+.codezaiku/
+data/
+
+# Claude Code
+.claude/
+
+# Logs
+logs/
+*.log
+
+# SQLite
+*.db
+*.db-wal
+*.db-shm
+
+# Chronicle Queue
+*.cq4
+*.cq4t
+
+# Unsloth
+unsloth_compiled_cache/
+
+# Fine-tuning outputs (merged models, GGUF exports, checkpoints)
+finetune/output/
+
+# Generated migration files from E2E test runs
+cli/tools/migrations/
+
+# Mise
+.mise.local.toml
+.codezaiku-cp
+
+# verify-platform.sh scratch that can land in the repo root
+/main.py
+/mul.py
+/x.py
+
+# authstack fault state, written by inject.sh
+bench/ops-eval/authstack/.env
+
+# Generated at deploy time from scripts/ — committing them would create a second copy of the
+# installer, and the one people actually pipe into a shell would be the one nobody tests.
+site/install
+site/install.ps1
+.codeplane-cp

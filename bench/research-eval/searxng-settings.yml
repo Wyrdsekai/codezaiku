@@ -1,0 +1,36 @@
+use_default_settings: true
+server:
+  secret_key: "codezaiku-local-searxng-key"
+  limiter: false
+  image_proxy: false
+search:
+  safe_search: 0
+  autocomplete: ""
+  # JSON is NOT enabled by default; CodeZaiku's WebSearchTool needs it.
+  formats:
+    - html
+    - json
+# Sustained research load (a benchmark, or an agent working one question hard) rate-limits the free
+# upstreams, and SearXNG then SUSPENDS them — every engine down returns an EMPTY result list, which is
+# indistinguishable from "the web doesn't know". Two mitigations: give slow engines room to answer
+# instead of timing out into a suspension, and keep low-block engines enabled so a Brave/Google/
+# Startpage cooldown doesn't take the whole instance down with it.
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  pool_connections: 100
+  pool_maxsize: 20
+engines:
+  # bing is the one upstream that stayed healthy under our load (measured: the others returned
+  # "Suspended: too many requests" / CAPTCHA / timeout while bing answered every probe) — it is NOT
+  # enabled by default in this SearXNG build, which is why a general query returned nothing at all.
+  - name: bing
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: wikidata
+    disabled: false
+  - name: duckduckgo
+    timeout: 10.0
+  - name: wikipedia
+    timeout: 10.0

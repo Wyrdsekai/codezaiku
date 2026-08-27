@@ -1,0 +1,17 @@
+id: 002-port-conflict-log-herring
+title: App won't start — port already in use
+category: web-service
+scenario_difficulty: medium
+
+incident: >
+  Our internal app on port 8080 keeps failing to start. The app log has a scary-looking Python
+  traceback in it, so the on-call thinks it's a code bug. Investigate the box read-only and determine
+  the REAL reason the app will not start.
+
+adversarial_signals:
+  - a historical ValueError traceback in /var/log/app/app.log (unrelated to the bind failure)
+
+image: 002-port-conflict-log-herring
+setup: setup.sh
+
+resolved_check: "curl -sf -o /dev/null --connect-timeout 3 http://127.0.0.1:8080"

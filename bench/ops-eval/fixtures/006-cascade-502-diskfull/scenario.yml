@@ -1,0 +1,21 @@
+id: 006-cascade-502-diskfull
+title: Site returns 502 — find the ROOT cause, not the symptom
+category: web-service
+scenario_difficulty: hard
+
+incident: >
+  Our website returns "502 Bad Gateway" on every request. The web server (nginx) itself appears to be
+  running. Find the REAL root cause — not just the fact that the site is down. A fix that doesn't address
+  the underlying cause will not hold.
+
+adversarial_signals:
+  - the 502 at the edge (nginx) looks like the problem but is the last link in the chain
+  - the upstream app being "not running" looks like the answer, but restarting it will just crash again
+
+image: 006-cascade-502-diskfull
+setup: setup.sh
+run_args: "--tmpfs /var/lib/appdata:size=64m"
+
+# Resolved only when the FULL chain is fixed: the edge actually serves 200 (which requires disk freed →
+# app can start → nginx upstream healthy). A shallow "restart the app" cannot pass this.
+resolved_check: "curl -sf -o /dev/null --connect-timeout 3 http://127.0.0.1:80/"

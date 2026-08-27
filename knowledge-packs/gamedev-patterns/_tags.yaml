@@ -1,0 +1,7 @@
+# Directory-level frontmatter for knowledge-packs retrieval filtering.
+# Applied by DocIndexer to every pack in this dir unless the .md declares
+# its own frontmatter. applies_to = eligibility tokens for retrieval filter.
+# See PLAN_KNOWLEDGE_ACQUISITION.md for the full schema.
+applies_to: [game, godot, gdscript, godot4, gut, unity, unreal, bevy, pygame, phaser, 2d, 3d, simulation]
+domain: gamedev
+tags: [game-loop, ecs, physics, audio, multiplayer, asset-pipeline, ui, scene, gut, godot-test]

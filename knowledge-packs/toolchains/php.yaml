@@ -1,0 +1,89 @@
+# PHP — metadata-only. Rely on system php + composer.
+name: php
+version: "8.3+"
+triggers: ["php", "php/laravel", "php/symfony", "laravel", "symfony"]
+source_extensions: [".php", ".phtml", ".phar"]
+max_file_size: 60000
+config_files: ["composer.json", "composer.lock", ".env", ".env.example",
+               "phpunit.xml", ".gitignore", "artisan"]
+install_command: "if [ -f composer.json ]; then composer install --quiet --no-interaction 2>&1 | tail -5; fi"
+build_command: "php -l $(find . -name '*.php' -not -path '*/vendor/*' | head -30) 2>&1 | grep -v 'No syntax errors' | tail -20"
+test_command: "if [ -f phpunit.xml ] || [ -d tests ]; then ./vendor/bin/phpunit --no-coverage 2>&1 | tail -30; fi"
+run_command: "if [ -f artisan ]; then php artisan serve; else php -S localhost:8080; fi"
+# Syntax gates — php -l is a fast per-file lint.
+syntax_check_file: "php -l {file} 2>&1"
+syntax_check_project: "find . -name '*.php' -not -path '*/vendor/*' | head -40 | xargs -I{} php -l {} 2>&1 | tail -30"
+
+skeleton_fill_supported: false  # parse-only / no cross-file compile check
+
+# Runtime smoke — PHP: Laravel, Symfony, or plain PHP. Typically HTTP.
+# Phase A + Phase C MVPs (PLAN_QE_AGENTS.md).
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (PHP) ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    PORT="${APP_PORT:-8090}"
+    for i in $(seq 1 30); do
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:${PORT}/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP after ${i}s"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:${PORT}/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    ROOT_HTML=$(curl -sS http://localhost:${PORT}/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, likely empty"
+      fi
+    fi
+    for sub in /health /api /api/health /login /dashboard; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:${PORT}${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  else
+    # Fallback: PHP built-in server for ~10s just to confirm parse
+    php -l $(find . -name '*.php' -not -path '*/vendor/*' | head -30) 2>&1 | grep -v 'No syntax errors' | tail -15 || true
+    echo "NO_COMPOSE — PHP syntax check only (no runtime launch)"
+  fi
+
+structural_check: |
+  if [ ! -f composer.json ]; then echo 'SMOKE_OK no composer.json'; exit 0; fi
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  last=$(tail -c 200 composer.json 2>/dev/null)
+  if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+    echo "ENVELOPE_LEAK — composer.json ends with a leaked tool-call envelope tail. Rewrite composer.json as proper JSON ending with the closing brace."
+    exit 4
+  fi
+  # Java-misnamed-as-composer.json — see gradle.yaml's BUILD_GRADLE_CORRUPT.
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' composer.json 2>/dev/null; then
+    echo "COMPOSER_JSON_IS_JAVA — composer.json starts with a Java 'package x.y;' line. This is not a PHP/Composer manifest. Rewrite composer.json as proper JSON: { \"name\": \"vendor/package\", \"require\": { ... } }."
+    exit 4
+  fi
+  if ! python3 -c "import json,sys; json.load(open('composer.json'))" 2>/dev/null; then
+    echo 'COMPOSER_JSON_INVALID — composer.json does not parse as JSON. Rewrite as a proper JSON object with at least { "name": "vendor/package", "require": { ... } }.'
+    exit 4
+  fi
+  echo 'SMOKE_OK composer.json parses'
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "PHP 8.4"
+  dockerfile_base_builder: "php:8.4-fpm"
+  dockerfile_base_runtime: "php:8.4-fpm"
+  web_framework: "Laravel"
+  web_framework_version: "11.x"
+  cli_framework: "Symfony Console"
+  notes: "Use composer for deps. Laravel 11 requires PHP 8.2+; keep Dockerfile PHP >= 8.2 (we recommend 8.4). Declare PHP version in composer.json 'require' and match Docker image."

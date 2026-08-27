@@ -1,0 +1,94 @@
+# Elixir / Phoenix — metadata-only. Rely on system Elixir/erlang.
+name: elixir
+version: "1.17+"
+triggers: ["elixir", "elixir/phoenix", "phoenix"]
+source_extensions: [".ex", ".exs", ".eex", ".heex", ".leex"]
+config_files: ["mix.exs", "mix.lock", ".formatter.exs", "config/config.exs",
+               ".gitignore"]
+install_command: "mix deps.get 2>&1 | tail -5"
+build_command: "mix compile 2>&1 | tail -30"
+test_command: "mix test 2>&1 | tail -30"
+run_command: "mix run --no-halt"
+# Syntax gate — mix compile parses all .ex/.exs files.
+syntax_check_project: "mix compile --warnings-as-errors 2>&1 | tail -30"
+
+skeleton_fill_supported: true  # strict compiler enforces cross-file correctness
+
+# Runtime smoke — Elixir: typically Phoenix web app, sometimes OTP service.
+# Phoenix default port is 4000; docker-compose often remaps to 8090.
+# Phase A + Phase C MVPs (PLAN_QE_AGENTS.md).
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (Elixir) ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    PORT="${APP_PORT:-8090}"
+    for i in $(seq 1 45); do
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:${PORT}/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP after ${i}s"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:${PORT}/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    ROOT_HTML=$(curl -sS http://localhost:${PORT}/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, likely empty"
+      fi
+    fi
+    for sub in /api /health /status /api/health /live; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:${PORT}${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  else
+    # Non-web OTP: compile only check
+    mix compile 2>&1 | tail -15 || exit 2
+    echo "NO_COMPOSE — Elixir non-web build OK (no runtime launch)"
+  fi
+
+structural_check: |
+  if [ ! -f mix.exs ]; then echo 'SMOKE_OK no mix.exs'; exit 0; fi
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  last=$(tail -c 200 mix.exs 2>/dev/null)
+  if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+    echo "ENVELOPE_LEAK — mix.exs ends with a leaked tool-call envelope tail. Rewrite mix.exs and stop at the natural end-of-content (closing `end`)."
+    exit 4
+  fi
+  # Java-misnamed-as-mix.exs — see gradle.yaml's BUILD_GRADLE_CORRUPT.
+  # Elixir uses `defmodule X do`; Java's `package x.y;` is unambiguous
+  # corruption.
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' mix.exs 2>/dev/null; then
+    echo "MIX_EXS_IS_JAVA — mix.exs starts with a Java 'package x.y;' line. This is not an Elixir Mix manifest. Rewrite mix.exs starting with: defmodule MyApp.MixProject do\\n  use Mix.Project\\n  def project, do: [app: :my_app, version: \"0.1.0\", ...]\\nend."
+    exit 4
+  fi
+  if ! grep -qE '^[[:space:]]*defmodule[[:space:]]+[A-Z]' mix.exs 2>/dev/null; then
+    echo 'MIX_EXS_CORRUPT — mix.exs does not declare a `defmodule` at top level. Every Elixir Mix project must start with `defmodule MyApp.MixProject do` and `use Mix.Project`. Rewrite mix.exs.'
+    exit 4
+  fi
+  if ! grep -qE 'use[[:space:]]+Mix\.Project' mix.exs 2>/dev/null; then
+    echo 'MIX_EXS_THIN — mix.exs does not `use Mix.Project`. Add this directive inside the defmodule.'
+    exit 4
+  fi
+  echo 'SMOKE_OK mix.exs parses'
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "Elixir 1.18 / OTP 27"
+  dockerfile_base_builder: "elixir:1.18-otp-27"
+  dockerfile_base_runtime: "debian:bookworm-slim"
+  web_framework: "Phoenix"
+  web_framework_version: "1.7+"
+  cli_framework: "Mix.Task"
+  notes: "Use Ecto for persistence. LiveView for interactive UIs. Release builds via 'mix release'. Pin Elixir/OTP versions in .tool-versions or mix.exs and match Docker image."

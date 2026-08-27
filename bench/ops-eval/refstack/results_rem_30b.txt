@@ -1,0 +1,15 @@
+[remediate] tier=30b base=http://localhost:8201 cards=5
+[remediate] redis-auth: detected=True localized=redis(OK) card=None
+[remediate] t1 ACTION: docker exec refstack-redis-1 redis-cli ping
+[remediate] t2 ACTION: docker exec refstack-redis-1 redis-cli -a "$(cat /etc/redis/password)" ping
+[remediate] t3 ACTION: docker exec refstack-redis-1 cat /etc/redis/redis.conf | grep requirepass
+[remediate] t4 ACTION: docker exec refstack-redis-1 ls -la /etc/redis/
+[remediate] t5 ACTION: docker exec refstack-redis-1 ps aux | grep redis
+[remediate] t6 ACTION: docker exec refstack-redis-1 cat /proc/1/environ | tr '\0' '\n' | grep REDIS_PASSWORD
+[remediate] t7 ACTION: docker exec refstack-redis-1 redis-cli ping
+[remediate] t8 ACTION: docker exec refstack-redis-1 redis-cli -h 127.0.0.1 -p 6379 ping
+[remediate] t9 ACTION: docker restart refstack-redis-1
+[remediate] t10 ACTION: docker exec refstack-redis-1 redis-cli ping
+[remediate] DONE turn 11: Restarted the redis service to resolve authentication issues. The serv
+[remediate] RESULT redis-auth: localized=True service_ok=True e2e_ok=True => FIXED
+[remediate] SUMMARY {"fixed": 1, "n": 1}

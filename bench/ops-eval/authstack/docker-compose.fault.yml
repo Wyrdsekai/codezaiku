@@ -1,0 +1,6 @@
+# The FAULTED launch config: the password is pinned on the command line, which is the point of this
+# fixture. Applied as a compose OVERRIDE so `.Config.Cmd` is honest in both states — a healthy
+# container carries no `--requirepass` anywhere, a faulted one carries it for real.
+services:
+  cache:
+    command: ["redis-server", "--requirepass", "s3cret"]

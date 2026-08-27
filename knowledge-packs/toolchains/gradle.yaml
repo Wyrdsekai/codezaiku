@@ -1,0 +1,276 @@
+# Modern Gradle — distro packages are often years behind (e.g. 4.4.1 on older LTS)
+# (from 2017) which fails Spring Boot 3+. We install a recent version
+# that CodeZaiku sandboxes use instead.
+# Latest stable as of 2026-05-01 (release 2026-04-29). Update as new
+# releases ship. Gradle 9.x removed LenientConfiguration.getArtifacts(Spec);
+# any Spring Boot dep-management plugin pin must be ≥1.1.7 to work here.
+name: gradle
+version: "9.5"
+triggers: ["java", "java/spring", "kotlin", "gradle"]
+source_extensions: [".java", ".kt", ".groovy", ".gradle"]
+max_file_size: 70000
+config_files: ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+               "gradle.properties", "gradlew", "gradlew.bat", "application.properties",
+               "application.yml", "pom.xml", ".gitignore"]
+url: "https://services.gradle.org/distributions/gradle-9.5-bin.zip"
+archive_format: zip
+install_dir: "gradle-9.5"
+# Extraction produces gradle-9.5/gradle-9.5/bin/gradle
+# Flatten one level so bin/gradle is directly under install_dir.
+flatten: true
+symlink: "bin/gradle"
+validation: "gradle --version"
+install_command: "if [ -f gradlew ]; then chmod +x gradlew && ./gradlew --version; else gradle --version; fi"
+build_command: "if [ -f gradlew ]; then chmod +x gradlew && ./gradlew compileJava -q 2>&1 | tail -30; else gradle compileJava -q 2>&1 | tail -30; fi"
+test_command: "if [ -f gradlew ]; then chmod +x gradlew && ./gradlew test -q 2>&1 | tail -30; else gradle test -q 2>&1 | tail -30; fi"
+run_command: "if [ -f gradlew ]; then ./gradlew bootRun; else gradle bootRun; fi"
+# Per-file lightweight check — runs at write_file time. Catches the most
+# common LLM mistakes for Groovy/Java/Kotlin without needing a full classpath:
+#   1. Python-style `#` comments (Groovy/Java/Kotlin require `//` or `/* */`).
+#      Caught Run #32 zone-cac08487 settings.gradle:1 'Unexpected character: #'
+#      after the model burned 50min iterating on a project that wouldn't parse.
+#   2. Tool-call envelope leakage in file body (`</tool_calls>`, `}])` tails).
+#      Belt-and-suspenders with stripTrailingArtifacts.
+# javac/kotlinc need full classpath so we can't run them per-file; the
+# project-wide compileJava is `syntax_check_project` below.
+syntax_check_file: |
+  m=$(grep -nE '^[[:space:]]*#[^!\[]' {file} 2>/dev/null || true)
+  if [ -n "$m" ]; then echo "Python-style '#' comments — Groovy/Java/Kotlin/Gradle use // or /* */:"; echo "$m"; exit 1; fi
+  m=$(grep -nE '\[tool_call:|</tool_calls?>|</function>|</parameter>' {file} 2>/dev/null || true)
+  if [ -n "$m" ]; then echo "Tool-call envelope leakage in file body:"; echo "$m"; exit 1; fi
+  exit 0
+# Cut 8: forbidden patterns — physical enforcement of "MUST" rules that the
+# Java template prose lists but the model otherwise ignores. Each match
+# REJECTS the write_file with the rule's reason + suggestion. Universal
+# mechanism, language-specific patterns. Java/Spring Boot 3+ rules:
+forbidden_patterns:
+  # Spring Boot 3+ uses Jakarta EE 10 — javax.* package was renamed to jakarta.*.
+  # Mixing javax.persistence with jakarta.persistence will fail at runtime
+  # (no shared base type). Catches the most common drift class.
+  - regex: '^\s*import\s+javax\.(persistence|validation|servlet|annotation|inject|transaction|ws|jws|xml\.bind|el)\.'
+    reason: "Spring Boot 3+ uses Jakarta EE 10 — javax.* packages were renamed to jakarta.*"
+    suggestion: "Replace 'import javax.<X>' with 'import jakarta.<X>' (e.g. 'import jakarta.persistence.Entity')"
+  # Constructor injection is the canonical Spring pattern (testable, immutable,
+  # avoids circular deps). Field-level @Autowired makes test setup harder and
+  # hides dependency graphs. The Java template explicitly forbids it.
+  # Original Cut 8 regex `^\s*@Autowired\s*\n\s*(private|protected|public)\s`
+  # missed two real shapes that slipped past in zone-441433ca's DataSeeder.java:
+  #   1. same-line: `@Autowired private Foo foo;`
+  #   2. intervening annotation: `@Autowired\n@Qualifier("x")\nprivate Foo foo;`
+  # Fixed regex: any whitespace + zero-or-more intervening annotations between
+  # @Autowired and the access modifier; trailing `[=;]` anchors at field decl
+  # (NOT constructor/setter `(...)` body, which would be legitimate).
+  - regex: '^\s*@Autowired\b(?:\s*@\w+(?:\([^)]*\))?)*\s+(private|protected|public)\s+(?:final\s+|static\s+|volatile\s+|transient\s+)*[\w.<>?\[\],\s]+?\s+\w+\s*[=;]'
+    reason: "Use constructor injection, not field injection. The Java template explicitly forbids @Autowired on fields"
+    suggestion: "Make the field 'private final', remove @Autowired, and accept the dependency through the class constructor"
+  # LocalDateTime hallucination caught zone-a4dfc72b: model writes
+  # `t.plusMillis(N)` which doesn't exist. Cut 7 javac compile-check catches
+  # this too, but pattern reject is faster + gives a more useful suggestion.
+  - regex: '\.\s*plusMillis\s*\('
+    reason: "java.time.LocalDateTime / Instant / LocalTime have no plusMillis() method"
+    suggestion: "Use plusNanos(millis * 1_000_000) or plus(java.time.Duration.ofMillis(millis))"
+  # Dockerfile must not skip tests during the build phase. zone-441433ca's
+  # Dockerfile shipped `./gradlew build -x test` — production tests pass, the
+  # docker image was built around BROKEN test source (31 syntax errors), and
+  # the smoke gate had no idea because the Docker layer never tried to
+  # compile the test sources. -x test in the build image is a false-PASS
+  # accelerator. Force the model to either ship working tests or split the
+  # docker target so smoke runs against a code path that DID compile cleanly.
+  - regex: '(?m)^[^#\n]*\bgradlew?\b[^#\n]*(?:\s|^)-x\s+(test|check)\b'
+    reason: "Dockerfile/build skips Gradle tests with -x test (or -x check). Skipping tests in the Docker image hides test-compile failures and lets a broken deliverable produce a 'green' smoke run."
+    suggestion: "Remove '-x test' / '-x check'. If tests are slow, use a multi-stage Dockerfile where the builder stage runs `./gradlew build` (tests included) and the runtime stage copies the jar. If tests genuinely shouldn't run in this layer, fix the underlying test failures rather than hiding them."
+  # Cut D — spec-anchoring: hardcoded category-keyword dictionaries.
+  # zone-65140f60 ClassificationService had `categoryExamples.put("work",
+  # List.of("meeting", "project", "deadline", ...))` — exactly what the spec
+  # said NOT to do ("Auto-discover categories from data, not hardcoded").
+  # The model reaches for fixed dictionaries because that's the LLM's training-
+  # data prior; we have to forbid it physically. If your spec really wants
+  # fixed categories, this rule will mis-fire — but the canonical Java email-
+  # intel spec (and similar) wants TF-IDF / clustering with learned categories.
+  - regex: '\b(categoryExamples?|CATEGORY_KEYWORDS|categoryMap|CATEGORIES)\s*\.\s*put\s*\(\s*"[A-Za-z_]+"\s*,\s*(Arrays\.asList|List\.of|java\.util\.List\.of|Set\.of)\s*\('
+    reason: "Hardcoded category-keyword dictionary detected. If the spec asks for auto-discovery (TF-IDF, clustering, learning), this is a violation — categories must emerge from the data, not be enumerated in code."
+    suggestion: "Train a real TF-IDF/clustering model (weka, smile, commons-text) on the corpus. Categories come out of the model, not a static dictionary. If the spec asks for fixed categories instead, this rule doesn't apply — but verify against the spec text."
+# Project-wide gate (rely on compileJava for full classpath validation).
+syntax_check_project: "if [ -f gradlew ]; then chmod +x gradlew && ./gradlew compileJava -q 2>&1 | tail -40; else gradle compileJava -q 2>&1 | tail -40; fi"
+# cp-check config — gradle's daemon prints startup banners + dep-resolution
+# noise; with -q we suppress most of it but keep error/warning output.
+# strip_lines_matching cleans up the residual download/daemon chatter.
+clean_check_file:
+  command: 'cd "$(dirname "{file}")" && (while [ ! -f settings.gradle ] && [ ! -f settings.gradle.kts ] && [ ! -f build.gradle ] && [ "$PWD" != / ]; do cd ..; done; if [ -f gradlew ]; then chmod +x gradlew && ./gradlew compileJava -q 2>&1; else gradle compileJava -q 2>&1; fi)'
+  strip_lines_matching:
+    - "^Welcome to Gradle"
+    - "^Daemon will be"
+    - "^Starting a Gradle Daemon"
+    - "^Calculating task graph"
+    - "^Downloading "
+    - "^> Task :"
+  on_empty: "gradle compileJava: OK"
+  timeout_secs: 120
+# Required files — written by the scaffolding pass if missing.
+required_files:
+  - path: settings.gradle
+    template: |
+      rootProject.name = '{{project_name}}'
+
+  - path: build.gradle
+    template: |
+      plugins {
+          id 'java'
+          id 'application'
+      }
+
+      group = 'com.example'
+      version = '0.1.0'
+
+      java {
+          toolchain {
+              languageVersion = JavaLanguageVersion.of(21)
+          }
+      }
+
+      repositories {
+          mavenCentral()
+      }
+
+      dependencies {
+      }
+
+      application {
+          mainClass = 'com.example.Main'
+      }
+
+skeleton_fill_supported: true  # strict compiler enforces cross-file correctness
+
+# Runtime smoke — build + launch via docker-compose, then curl.
+# Java apps warm slowly (JVM + Spring init) so readiness loop runs 60s.
+# Phase A + Phase C MVPs (PLAN_QE_AGENTS.md): unit tests + UI render check.
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): the prior `./gradlew test` lane ran in
+  # bwrap with --unshare-net (Cut C.1), which blocked Gradle's plugin
+  # resolution from Gradle Plugin Repository. zone-4e5e0062 hit this
+  # 6× consecutive Smoke FAIL with a "Searched in the following
+  # repositories: Gradle Central Plugin Repository" stub error before
+  # the application even tried to start. Tests already ran via the
+  # dedicated test gate; running them AGAIN inside isolation just
+  # broke smoke for infrastructure reasons. The smoke lane is now
+  # docker-compose-only — the `docker compose up --build` step runs
+  # gradle build inside Docker's own network namespace, so dep
+  # resolution works regardless of bwrap's --unshare-net.
+  echo "=== SMOKE (Java) ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    for i in $(seq 1 60); do
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:8090/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP after ${i}s"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:8090/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    ROOT_HTML=$(curl -sS http://localhost:8090/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, dashboard likely empty"
+      fi
+    fi
+    for sub in /health /actuator /actuator/health /api /api/health; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:8090${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  elif [ -f gradlew ]; then
+    chmod +x gradlew && ./gradlew build -q --console=plain 2>&1 | tail -15 || exit 2
+  else
+    echo "NO_BUILD — no gradlew or compose file"
+    exit 2
+  fi
+
+# Lightweight structural check — runs inline in the coder gate chain.
+# When build.gradle declares `mainClass = '...'`, verify the source file
+# exists under src/main/java/ or src/main/kotlin/. Catches the
+# zone-ac1d4661 pattern where mainClass references a class the coder
+# never wrote at the canonical path.
+# Post-compile outcome check (audit 2026-05-11): verifies gradle compileJava
+# actually produced .class files, not just exited 0 with no source files.
+# Mirrors the rust empty-crate trap — gradle compileJava on an empty
+# src/main/java/ exits 0 with "no source files" but produces no artifact.
+compile_artifact_check: |
+  CLASSES_DIR=''
+  for d in build/classes/java/main build/classes/kotlin/main; do
+    if [ -d "$d" ] && [ -n "$(find $d -name '*.class' -print -quit 2>/dev/null)" ]; then
+      CLASSES_DIR="$d"; break
+    fi
+  done
+  if [ -n "$CLASSES_DIR" ]; then
+    count=$(find "$CLASSES_DIR" -name '*.class' | wc -l)
+    echo "ARTIFACT_OK $count .class files in $CLASSES_DIR"; exit 0
+  fi
+  echo "NO_BUILD_ARTIFACT — gradle compileJava reported success but no .class files were produced under build/classes/java/main (or build/classes/kotlin/main). This means there are no Java/Kotlin source files in src/main/java (or src/main/kotlin), only build configuration. Write the application source files (controllers, services, the @SpringBootApplication entry point, etc.) before completing."
+  exit 1
+
+structural_check: |
+  # Trailing tool-call envelope-leak check. zone-c7d09026 / zone-cb24b8ab
+  # surfaced the pattern: model writes valid file content then appends a
+  # JSON/XML envelope literal (e.g. `])}`, `"]\n)`, `</tool_call>`,
+  # `</function>`, `</parameter>`) at the end. structural_check used to
+  # validate front-matter only and never inspected the tail, so a project
+  # with project.godot ending in `])}` would smoke-PASS but fail to load.
+  # Pure tail inspection; language-agnostic pattern, per-toolchain file list.
+  for f in build.gradle build.gradle.kts settings.gradle settings.gradle.kts; do
+    if [ -f "$f" ]; then
+      last=$(tail -c 200 "$f" 2>/dev/null)
+      if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+        echo "ENVELOPE_LEAK — $f ends with a leaked tool-call envelope tail (e.g. ])}, \")], </tool_call>, </function>, </parameter>). The model emitted valid file content then appended a JSON/XML envelope literal. Rewrite $f and stop the content at its natural end-of-file (no envelope suffix)."
+        exit 4
+      fi
+    fi
+  done
+  GRADLE_FILE=''
+  for f in build.gradle build.gradle.kts; do
+    if [ -f "$f" ]; then GRADLE_FILE="$f"; break; fi
+  done
+  if [ -z "$GRADLE_FILE" ]; then echo 'SMOKE_OK no gradle file'; exit 0; fi
+  # zone-fcca099d / zone-0479d202 corruption catch: build.gradle is sometimes
+  # truncated Java source code instead of Gradle DSL (the run38-m1plus
+  # email-intel-java baseline is 399 bytes of mid-import Java). Without this
+  # check the smoke gate said 'SMOKE_OK no mainClass declared' for a file
+  # that gradle itself rejects with a parser error, hiding the real problem
+  # from every downstream gate. Pure shell — no gradle invocation needed.
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-z]' "$GRADLE_FILE" 2>/dev/null; then
+    echo "BUILD_GRADLE_CORRUPT — $GRADLE_FILE starts with a 'package ...' line, which is Java syntax not Gradle DSL. The build manifest must contain Gradle script (plugins, dependencies, repositories blocks). Rewrite $GRADLE_FILE."
+    exit 4
+  fi
+  if ! grep -qE 'plugins[[:space:]]*\{|apply[[:space:]]+plugin|repositories[[:space:]]*\{|dependencies[[:space:]]*\{' "$GRADLE_FILE" 2>/dev/null; then
+    echo "BUILD_GRADLE_THIN — $GRADLE_FILE contains none of: plugins {, apply plugin, repositories {, dependencies {. This is not a valid Gradle build file. Rewrite it with at minimum a plugins block declaring 'id \"java\"' (and 'id \"org.springframework.boot\"' for Spring Boot projects) and a repositories block."
+    exit 4
+  fi
+  MAIN=$(grep -E '^[[:space:]]*mainClass([[:space:]]*\.set)?[[:space:]]*[=(]' "$GRADLE_FILE" 2>/dev/null | head -1 | sed -E "s/.*['\"]([^'\"]+)['\"].*/\\1/" | sed -E 's/[[:space:]]+$//')
+  if [ -z "$MAIN" ]; then echo 'SMOKE_OK no mainClass declared'; exit 0; fi
+  REL=$(echo "$MAIN" | tr '.' '/')
+  for ext in java kt; do
+    CAND="src/main/$ext/${REL}.$ext"
+    if [ -f "$CAND" ]; then echo "SMOKE_OK mainClass=$MAIN at $CAND"; exit 0; fi
+  done
+  echo "MAIN_CLASS_MISSING — $GRADLE_FILE declares mainClass='$MAIN' but no source file exists at src/main/java/${REL}.java or src/main/kotlin/${REL}.kt. Either write the class file at the declared path, or update mainClass to reference an existing class"
+  exit 3
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "21"
+  dockerfile_base_builder: "gradle:jdk21"
+  dockerfile_base_runtime: "eclipse-temurin:21-jre"
+  web_framework: "Spring Boot"
+  web_framework_version: "3.5.x"
+  cli_framework: "picocli"
+  notes: "sourceCompatibility and targetCompatibility in build.gradle MUST match the JDK in the Dockerfile FROM line. Mismatch = build failure (e.g. jdk17 image cannot compile VERSION_21 source). Use spring-boot-starter-data-jpa with the DB your compose actually runs — do not wire sqlite-jdbc while compose spins up Postgres."
+

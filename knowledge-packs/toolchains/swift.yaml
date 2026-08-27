@@ -1,0 +1,95 @@
+# Swift — metadata-only. Swift toolchain install on Linux is complex;
+# rely on system Swift if available.
+name: swift
+version: "5.10+"
+triggers: ["swift", "swift/vapor", "ios", "macos"]
+source_extensions: [".swift"]
+config_files: ["Package.swift", "Package.resolved", ".gitignore",
+               "Info.plist", "*.xcodeproj", "*.xcworkspace"]
+install_command: "swift package resolve 2>&1 | tail -5"
+build_command: "swift build 2>&1 | tail -30"
+test_command: "swift test 2>&1 | tail -30"
+run_command: "swift run"
+# Syntax gate — swift build parses all sources; no cheap per-file option.
+syntax_check_project: "swift build 2>&1 | tail -30"
+
+skeleton_fill_supported: true  # strict compiler enforces cross-file correctness
+
+# Runtime smoke — Swift: Vapor web service on Linux, or CLI binary.
+# iOS/macOS greenfield is out of scope (requires Xcode/simulator).
+# Phase A + Phase C MVPs (PLAN_QE_AGENTS.md).
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (Swift) ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    PORT="${APP_PORT:-8090}"
+    for i in $(seq 1 45); do
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:${PORT}/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP after ${i}s"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:${PORT}/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    ROOT_HTML=$(curl -sS http://localhost:${PORT}/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, likely empty"
+      fi
+    fi
+    for sub in /api /health /api/health /hello; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:${PORT}${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  else
+    # CLI path — swift run --help
+    swift build 2>&1 | tail -10 || exit 2
+    swift run --skip-build -- --help 2>&1 | head -20 || true
+  fi
+
+structural_check: |
+  if [ ! -f Package.swift ]; then echo 'SMOKE_OK no Package.swift'; exit 0; fi
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  last=$(tail -c 200 Package.swift 2>/dev/null)
+  if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+    echo "ENVELOPE_LEAK — Package.swift ends with a leaked tool-call envelope tail. Rewrite Package.swift and stop at the natural end-of-content."
+    exit 4
+  fi
+  # Java-misnamed-as-Package.swift — see gradle.yaml's BUILD_GRADLE_CORRUPT.
+  # Swift uses `import PackageDescription`; Java's `package x.y;` is
+  # unambiguous corruption.
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' Package.swift 2>/dev/null; then
+    echo "PACKAGE_SWIFT_IS_JAVA — Package.swift starts with a Java 'package x.y;' line. This is not a Swift PM manifest. Rewrite Package.swift starting with: // swift-tools-version: 5.10\\nimport PackageDescription\\nlet package = Package(name: \"...\", ...)."
+    exit 4
+  fi
+  if ! grep -qE 'import[[:space:]]+PackageDescription' Package.swift 2>/dev/null; then
+    echo 'PACKAGE_SWIFT_CORRUPT — Package.swift does not import PackageDescription. Every Swift PM manifest must start with `// swift-tools-version: X.Y` and `import PackageDescription`. Rewrite Package.swift.'
+    exit 4
+  fi
+  if ! grep -qE 'let[[:space:]]+package[[:space:]]*=[[:space:]]*Package\(' Package.swift 2>/dev/null; then
+    echo 'PACKAGE_SWIFT_THIN — Package.swift contains no `let package = Package(...)` declaration. Rewrite with a complete Package definition.'
+    exit 4
+  fi
+  echo 'SMOKE_OK Package.swift parses'
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "Swift 6.0"
+  dockerfile_base_builder: "swift:6.0"
+  dockerfile_base_runtime: "swift:6.0-slim"
+  web_framework: "Vapor"
+  web_framework_version: "4.x"
+  cli_framework: "ArgumentParser"
+  notes: "Swift on Linux is for server workloads only. iOS/macOS targets require Xcode (out of scope for this Docker lane)."

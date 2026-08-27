@@ -1,0 +1,44 @@
+# gdtoolkit — provides gdparse for per-file GDScript syntax checks.
+# Isolated in a uv-managed venv under ~/.codezaiku/tools/ because modern
+# Debian/Ubuntu pip refuses `--user` installs on system Python
+# (externally-managed-environment / PEP 668).
+name: gdtoolkit
+version: "4.x"
+triggers: ["gdscript", "godot", "godot4"]
+# Same extensions as godot.yaml so SyntaxCheckRegistry picks up .gd.
+source_extensions: [".gd"]
+# Runs once per JVM when a matching language starts. Idempotent: uv venv
+# is a no-op if the venv exists, `uv pip install` is fast when already
+# satisfied. Bootstrap uv on first ever run via astral install script.
+setup_command: |
+  set -e
+  if ! command -v uv >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || true
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+  VENV="$HOME/.codezaiku/tools/gdtoolkit-venv"
+  uv venv --quiet "$VENV"
+  uv pip install --quiet --python "$VENV/bin/python" "gdtoolkit==4.*"
+  mkdir -p "$HOME/.codezaiku/tools/bin"
+  ln -sf "$VENV/bin/gdparse" "$HOME/.codezaiku/tools/bin/gdparse"
+# Defensive check: if gdparse isn't on PATH (setup_command failed or
+# not yet run), exit 0 silently. Prevents the false-positive infinite
+# loop seen before — no per-file check is better than a broken one.
+#
+# Also catches Godot-3 API patterns that gdparse 4.x accepts (syntactically
+# valid) but break at runtime in a Godot 4 project:
+#   - setget      → Godot 3 setter syntax (Godot 4: `var x: set = fn`)
+#   - JSON.print  → removed in Godot 4 (use JSON.stringify)
+#   - .instance() → renamed to .instantiate() in Godot 4
+#   - .new_from_data() → several 3→4 API renames
+# grep -qE returns 0 on match (bad), 1 on no match (good). `!` inverts so
+# the overall check exits non-zero when a deprecated pattern is found.
+syntax_check_file: |
+  if command -v gdparse >/dev/null 2>&1; then
+    gdparse {file} 2>&1 && \
+    ! grep -nE '\bsetget\b|\bJSON\.print\(|\.instance\(\)|\bconnect\([^,]+,[^,]+,\"' {file}
+  else
+    exit 0
+  fi
+
+skeleton_fill_supported: false  # parse-only / no cross-file compile check

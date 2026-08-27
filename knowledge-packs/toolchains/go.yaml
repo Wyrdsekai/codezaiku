@@ -1,0 +1,114 @@
+# Go — tarball install + metadata.
+# Latest stable as of 2026-04-17.
+name: go
+version: "1.26.2"
+triggers: ["go", "go/gin", "go/echo", "go/fiber", "go/chi"]
+source_extensions: [".go"]
+max_file_size: 50000
+config_files: ["go.mod", "go.sum", "go.work", ".gitignore"]
+url: "https://go.dev/dl/go1.26.2.linux-amd64.tar.gz"
+archive_format: tar.gz
+install_dir: "go-1.26.2"
+flatten: true
+# Tarball root is "go/"; after flatten the bin/go binary is at bin/go
+symlink: "bin/go"
+validation: "go version"
+install_command: "go mod download 2>&1 | tail -5"
+build_command: "go build ./... 2>&1 | tail -30"
+test_command: "go test ./... 2>&1 | tail -30"
+run_command: "go run ."
+# Syntax gates — gofmt -e parses without compiling.
+syntax_check_file: "gofmt -e {file} >/dev/null"
+syntax_check_project: "gofmt -e -l . 2>&1 | head -30"
+# cp-check config — gofmt -e is silent on success and emits clean
+# `path:line:col: <error>` on failure. No banner stripping needed.
+clean_check_file:
+  command: 'gofmt -e "{file}" >/dev/null 2>&1 || gofmt -e "{file}" 2>&1'
+  on_empty: "go gofmt: OK"
+  timeout_secs: 15
+# Required files — written by the scaffolding pass if missing.
+required_files:
+  - path: go.mod
+    template: |
+      module {{project_name}}
+
+      go 1.24
+
+skeleton_fill_supported: true  # strict compiler enforces cross-file correctness
+
+# Runtime smoke — Go: HTTP service (gin/echo/fiber/chi) or CLI.
+# Phase A + Phase C MVPs (PLAN_QE_AGENTS.md): unit tests + UI render check
+# for web services, binary smoke for CLIs.
+smoke_command: |
+  set -e
+  # Cut G.fix (2026-05-06): UNIT TESTS lane removed — redundant with the dedicated test gate, AND it ran outside Docker so bwrap --unshare-net broke its dep resolution. Tests have their own gate; smoke verifies BEHAVIOR (does the app boot + serve).
+  echo "=== SMOKE (Go) ==="
+  if [ -f docker-compose.yml ] || [ -f compose.yml ]; then
+    trap 'docker compose down -v --remove-orphans 2>/dev/null || true' EXIT
+    docker compose up -d --build 2>&1 | tail -10
+    for i in $(seq 1 30); do
+      if curl -sf -o /dev/null -w "%{http_code}" http://localhost:8090/ 2>/dev/null | grep -q "^[23]"; then
+        echo "APP_UP after ${i}s"; break
+      fi
+      sleep 1
+    done
+    echo "=== INDEX ==="
+    curl -sS -w "\\nHTTP=%{http_code}\\n" http://localhost:8090/ 2>&1 | tail -20
+    echo "=== UI RENDER ==="
+    ROOT_HTML=$(curl -sS http://localhost:8090/ 2>/dev/null || true)
+    if [ -n "$ROOT_HTML" ]; then
+      SECTIONS=$(echo "$ROOT_HTML" | grep -cE '<section|<main|<nav|<header|<article' || true)
+      HEADINGS=$(echo "$ROOT_HTML" | grep -cE '<h[1-6]' || true)
+      LINKS=$(echo "$ROOT_HTML" | grep -cE '<a\s' || true)
+      TEXT_LEN=$(echo "$ROOT_HTML" | wc -c)
+      echo "UI_RENDER sections=${SECTIONS} headings=${HEADINGS} links=${LINKS} bytes=${TEXT_LEN}"
+      if [ "$TEXT_LEN" -lt 500 ]; then
+        echo "UI_THIN — root HTML under 500 bytes, dashboard likely empty"
+      fi
+    fi
+    for sub in /health /api /api/health /ping /metrics; do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "http://localhost:8090${sub}" 2>/dev/null || echo "000")
+      if [ "$code" != "404" ] && [ "$code" != "000" ]; then
+        echo "SUBPATH ${sub} HTTP=${code}"
+      fi
+    done
+  else
+    # CLI path — build and exec --help
+    go build -o /tmp/__go_smoke_bin ./... 2>&1 | tail -10 || exit 2
+    if [ -x /tmp/__go_smoke_bin ]; then
+      /tmp/__go_smoke_bin --help 2>&1 | head -20 || true
+      rm -f /tmp/__go_smoke_bin
+    fi
+  fi
+
+# Lightweight structural check — symmetric to other language toolchains
+# (gradle/rust/python/node/godot). Catches go.mod containing non-Go content
+# or missing the required `module` declaration. Pure shell, sub-second.
+structural_check: |
+  if [ ! -f go.mod ]; then echo 'SMOKE_OK no go.mod'; exit 0; fi
+  # Trailing envelope-leak check (universal pattern; see gradle.yaml).
+  last=$(tail -c 200 go.mod 2>/dev/null)
+  if echo "$last" | grep -qE '\])\}|"\)\]|</tool_call>|</function>|</parameter>'; then
+    echo "ENVELOPE_LEAK — go.mod ends with a leaked tool-call envelope tail. Rewrite go.mod and stop at the natural end-of-content."
+    exit 4
+  fi
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-z][a-z0-9_.]*[[:space:]]*;' go.mod 2>/dev/null; then
+    echo 'GO_MOD_CORRUPT — go.mod starts with Java/C-style package syntax, not a `module` declaration. Rewrite go.mod with at minimum: module <name>\ngo <version>'
+    exit 4
+  fi
+  if ! grep -qE '^[[:space:]]*module[[:space:]]+[^[:space:]]+' go.mod 2>/dev/null; then
+    echo 'GO_MOD_INVALID — go.mod does not declare a module path. Every Go module needs `module <import-path>` on its own line. Rewrite go.mod with a proper module declaration.'
+    exit 4
+  fi
+  echo 'SMOKE_OK go.mod parses'
+
+# Framework recommendations — see python.yaml for rationale + update cadence.
+framework_recommendations:
+  last_audited: "2026-04-22"
+  language_version: "1.23+"
+  dockerfile_base_builder: "golang:1.23-alpine"
+  dockerfile_base_runtime: "alpine:3.20"
+  web_framework: "Gin or Echo"
+  web_framework_version: "gin 1.10+ / echo 4.12+"
+  cli_framework: "cobra or spf13/cli"
+  notes: "Use go modules (go.mod). For production, compile with CGO_ENABLED=0 for static binary; copy to alpine/scratch for minimal runtime image. Pin go version in go.mod."

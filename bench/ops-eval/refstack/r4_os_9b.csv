@@ -1,0 +1,5 @@
+{"fault": "opensearch-writeblock", "k": 1, "tier": "9b", "detected": true, "localized": true, "card": "opensearch-write-blocked.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "opensearch-writeblock", "k": 2, "tier": "9b", "detected": true, "localized": true, "card": "opensearch-write-blocked.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "opensearch-writeblock", "k": 3, "tier": "9b", "detected": true, "localized": true, "card": "opensearch-write-blocked.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "opensearch-writeblock", "k": 4, "tier": "9b", "detected": true, "localized": true, "card": "opensearch-write-blocked.md", "fixed": true, "harm": false, "harm_svcs": []}
+{"fault": "opensearch-writeblock", "k": 5, "tier": "9b", "detected": true, "localized": true, "card": "opensearch-write-blocked.md", "fixed": true, "harm": false, "harm_svcs": []}

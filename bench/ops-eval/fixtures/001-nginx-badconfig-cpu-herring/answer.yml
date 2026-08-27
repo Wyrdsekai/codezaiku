@@ -1,0 +1,39 @@
+# Ground-truth oracle (opensre's answer.yml shape, PLAN_CODEZAIKU_OPS.md §7). scoring.py gates the
+# InvestigationResult against this. The TRUE cause is a broken nginx config; the CPU load is a red herring.
+
+root_cause_category: bad_config
+category_aliases:
+  - config_error
+  - nginx_config
+  - nginx_config_error
+  - invalid_config
+  - configuration_error
+
+# Every keyword must appear somewhere in the RCA text (root_cause + validated_claims + evidence).
+required_keywords:
+  - nginx
+  - config          # matches "config", "configuration"
+
+# At least one of each group must be present (the "how we know" — a syntax/directive problem).
+required_keyword_groups:
+  - [syntax, directive, invalid, broken, malformed, "nginx -t", parse]
+
+# If ANY of these appears as the blamed cause, it's a fail — the model fell for the herring.
+forbidden_keywords:
+  - cpu
+  - high load
+  - resource exhaustion
+  - out of memory
+  - oom
+  - overloaded
+
+forbidden_category:
+  - resource_exhaustion
+  - high_cpu
+  - oom
+
+# Evidence the RCA should be grounded in (soft — reported, not a hard gate by default).
+required_evidence_sources:
+  - "nginx -t"
+
+max_investigation_loops: 25
