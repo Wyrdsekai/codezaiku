@@ -77,8 +77,14 @@ Release assets carry `SHA256SUMS` and a per-asset Sigstore bundle, `<asset>.sigs
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify codezaiku-X.Y.Z.tar.gz --repo Wyrdsekai/codezaiku
+gh attestation verify codezaiku-X.Y.Z.tar.gz --repo Wyrdsekai/codezaiku \
+  --predicate-type https://codezaiku.dev/attestation/release/v1
 ```
+
+**The `--predicate-type` is not optional.** `gh attestation verify` defaults to looking for SLSA
+build provenance, which we deliberately do not produce (see below), so leaving the flag off prints
+`No attestations found with predicate type: https://slsa.dev/provenance/v1` — and still exits `0`.
+A correct verification says `Verification succeeded` and names the workflow and tag that signed it.
 
 `gh attestation` needs **GitHub CLI 2.49 or newer**. An older `gh` reports `unknown command` with no hint why — check with `gh --version` before concluding the signature is bad.
 

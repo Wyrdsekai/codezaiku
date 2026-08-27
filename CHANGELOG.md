@@ -33,7 +33,7 @@ runs the acceptance checks on any host, and `PLATFORMS.md` carries the per-platf
 
 A platform-independent tarball, a Debian package and a container image, each listed in `SHA256SUMS`
 and signed after publication with a per-asset Sigstore bundle. Verify with
-`gh attestation verify <asset> --repo Wyrdsekai/codezaiku` (needs GitHub CLI 2.49+). The signature is an authenticity statement
+`gh attestation verify <asset> --repo Wyrdsekai/codezaiku --predicate-type https://codezaiku.dev/attestation/release/v1` (needs GitHub CLI 2.49+). The signature is an authenticity statement
 about bytes built and validated on real hardware — not build provenance from a CI runner. See
 [SECURITY.md](SECURITY.md).
 

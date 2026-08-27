@@ -17,7 +17,8 @@ name: Release
 # than it earned.
 #
 # Verification, from any machine with the GitHub CLI:
-#   gh attestation verify codezaiku-X.Y.Z.tar.gz --repo Wyrdsekai/codezaiku
+#   gh attestation verify codezaiku-X.Y.Z.tar.gz --repo Wyrdsekai/codezaiku \
+#     --predicate-type https://codezaiku.dev/attestation/release/v1
 #
 # Uses ONLY GitHub-authored actions (actions/*), so a repository Actions policy
 # can stay narrow.
