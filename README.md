@@ -195,37 +195,53 @@ are immutable; a fix ships as a new version, never as a re-upload.
 codezaiku help                                  # all commands, grouped by intent
 ```
 
-**Talk to it** — a conversation in one project, no host, no editor, no browser
+**Talk to it**
 
 ```bash
 codezaiku chat ~/myproject
 ```
 
-It asks before writing or running anything and shows the change first; answers you give can be
-remembered per command (`/trust` keeps them beyond the session). `/undo` steps back through its
-actions one at a time. Sessions persist — `/resume` reopens one, `/onboard` seeds a fresh one
-from it, and `codezaiku sessions export` is your backup. `/remember` puts a fact into PROJECT
-MEMORY, carried into every future session here (the model can save too — it asks first). If the
-project has a `FAMILIAR.md`, `CLAUDE.md` or `AGENTS.md`, those working agreements ride every
-turn. Long work doesn't hold the conversation hostage: it can start background tasks
-(`/tasks` lists them, you get told when they finish) and `delegate` self-contained work —
-coding or research — to a background sub-agent, optionally on a different model. Ask a question
-that needs outside facts and it researches with cited sources, in the languages you name — when
-a search backend is configured (see CONFIGURATION.md). `/cost` shows what a metered drive would
-bill. `/help` inside the chat lists everything.
+A coding assistant you talk to in your terminal — the same kind of tool as Claude Code, Codex
+CLI or aider, except the model behind it is yours to choose: one running on your own hardware,
+or a hosted API. You type what you want — "why does the login test fail?", "add a retry to the
+uploader", "find out how other projects handle this" — and it reads your code, makes changes,
+runs commands, or searches the web, then reports back. You steer it turn by turn.
 
-The same conversation is available as an OpenAI-compatible endpoint — `codezaiku v1 ~/myproject`
-serves `/v1/chat/completions` with read-only tools (that wire cannot ask permission, so nothing
-that needs it is offered); point Open WebUI at it and the browser is the GUI.
+By default it asks before changing or running anything, and shows you the exact change first.
+You answer once, or "always" for that command. `/undo` reverses what it did, step by step.
+Conversations are saved and can be resumed later, and `/remember` keeps a fact available in
+every future conversation in that project. `/help` inside the chat lists everything else —
+background tasks, delegating work to a second agent, switching models, cost tracking.
 
-**Research a question** — one loop, or a fan-out with a critic
+`codezaiku v1 ~/myproject` serves the same assistant as an OpenAI-compatible API
+(`/v1/chat/completions`), so a chat UI like Open WebUI can be the front end. Over that wire it
+can only read, never change anything — an API cannot ask you for permission, so it is not given
+anything that would need it.
+
+**Research a question**
 
 ```bash
-codezaiku research "your question" broad        # one loop: search, read, synthesize
-codezaiku research "your question" fan          # decompose -> parallel sub-researchers ->
-                                                #   a critic decides if coverage is enough ->
-                                                #   synthesis. Slower, much stronger on breadth.
+codezaiku research "your question" broad
+codezaiku research "your question" fan
 ```
+
+It searches the web, reads pages, and writes an answer that cites its sources. `broad` is one
+researcher working alone. `fan` splits the question into parts, researches them in parallel, has
+a critic check whether the coverage is actually sufficient, and then writes the combined answer
+— slower, and much better on questions with many parts.
+
+**Search comes from a backend you configure — there is none out of the box.** Two options:
+
+```bash
+codezaiku config set CODEZAIKU_BRAVE_KEY <key>        # recommended: Brave Search API
+codezaiku config set CODEZAIKU_SEARXNG http://host:8888   # or: your own SearXNG instance
+```
+
+The [Brave Search API](https://brave.com/search/api/) has a free tier (2,000 queries/month) and
+gives markedly better results — a search tool is only as good as what it searches. SearXNG is
+fully self-hosted and needs no account, but it aggregates public engines that rate-limit under
+sustained use. With both configured, Brave is used first and SearXNG is the fallback. Setting
+either one is also what enables web search inside `chat`.
 
 **Work on a codebase**
 
