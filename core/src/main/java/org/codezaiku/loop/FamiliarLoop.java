@@ -252,6 +252,9 @@ public final class FamiliarLoop {
     static final int MAX_CONSECUTIVE_DRIVE_FAILURES = 8;
     private boolean mutatingCallRan = false;   // any write_file/edit_file/shell this run
     private boolean falseWriteBounced = false; // the chat false-write bounce fires once
+    private boolean webToolRan = false;        // any web_search/web_fetch this run
+    private boolean citationBounced = false;   // the chat citation bounce fires once
+    private boolean delegateNudged = false;    // the turn-economy suggestion fires once
     private boolean proseAnswerNext = false;   // next turn is tool_choice="none"; its prose IS the answer
     // EPILOGUE (research): when the DEADLINE turn's forced task_done arrives without the artifact the
     // question demands, the normal artifact bounce can't fire (no turns left) and the run used to end with
@@ -1762,6 +1765,20 @@ public final class FamiliarLoop {
         try {
         for (int turn = 1; turn <= maxTurns + epilogueTurns; turn++) {
             turnNow = turn;
+            // TURN-ECONOMY NUDGE (chat, once): a conversational turn that reaches 15 loop-turns
+            // has become a build task. Measured on the first real 0.2.0 session (2026-08-31): a
+            // "write a testing harness" ask ran 56 interactive turns that delegate would have
+            // carried in the background. A suggestion, never an interception — deep legitimate
+            // work continues; the model just learns the door exists mid-task.
+            if (chatMode && !delegateNudged && turn == 15) {
+                delegateNudged = true;
+                history.addObject().put("role", "user").put("content",
+                        "[harness note] This turn has grown into a sizeable task. If the REMAINING "
+                        + "work is self-contained, consider calling delegate with the full "
+                        + "remaining task and ending this turn with a status reply — the "
+                        + "conversation continues while the work runs. If you are close to done "
+                        + "or the work needs this conversation's context, simply continue.");
+            }
             if (cancelled.getAsBoolean()) {
                 log.info("  ↳ cancelled by the host at turn {}", turn);
                 return new Result(false, "cancelled by the host after " + (turn - 1) + " turns", turn);
@@ -2085,6 +2102,9 @@ public final class FamiliarLoop {
                 if (!control && ("write_file".equals(name) || "edit_file".equals(name)
                         || "shell".equals(name))) {
                     mutatingCallRan = true;   // ground truth for the chat false-write bounce
+                }
+                if (!control && ("web_search".equals(name) || "web_fetch".equals(name))) {
+                    webToolRan = true;        // ground truth for the chat citation bounce
                 }
                 String sig = spinKey(name, args, argsRaw);
                 int spins = control ? 0 : callCounts.merge(sig, 1, Integer::sum);
@@ -2444,6 +2464,23 @@ public final class FamiliarLoop {
                                 + "turn — the file does not exist. Either create it now with write_file "
                                 + "and then call task_done, or call task_done with the reply corrected "
                                 + "to not claim a file was written.");
+                        break;
+                    }
+                    // CHAT CITATION BOUNCE: the turn RESEARCHED (web tools ran — ground truth)
+                    // and the reply carries no source URL. Measured on the first real dolores ask
+                    // (2026-08-31): 9 searches, correct standards cited, zero attribution — the
+                    // person cannot tell researched fact from weights-knowledge. The register's
+                    // "findings WITH sources" line lost to synthesis pressure, as prompt-level
+                    // asks do; this is the mechanical backstop (the SearchClaw gate, made ours).
+                    if (chatMode && !citationBounced && webToolRan && turn < maxTurns
+                            && !args.path("summary").asText("").matches("(?s).*https?://.*")) {
+                        citationBounced = true;
+                        log.info("  ↳ task_done after web research with zero source URLs → one bounce");
+                        history.addObject().put("role", "user").put("content",
+                                "Your reply used web research but cites no sources. Call task_done "
+                                + "again with the reply ending in a short SOURCES list — the URLs "
+                                + "you actually used, one per line. Claims you knew without "
+                                + "research need no source; claims from the research do.");
                         break;
                     }
                     // EPILOGUE: the DEADLINE turn's forced task_done arrived without the artifact — the
@@ -2845,7 +2882,9 @@ public final class FamiliarLoop {
                 the person asks for it. When it asks you to build or change something, act with tools.
                 When it asks a question whose answer needs outside facts, research it: web_search and
                 web_fetch for a focused lookup, or delegate with kind=research for a broad question —
-                and give your findings WITH the source URLs. When the person says to build what the
+                and give your findings WITH the source URLs. When they name languages or regions for
+                the research, write some queries IN those languages — English queries surface the
+                English literature only. When the person says to build what the
                 conversation has decided, compose the complete task from the DECISIONS and notes in
                 your context — every constraint they stated — and implement it, or delegate it when
                 it is large and self-contained. When their request conflicts with a recorded
@@ -2853,7 +2892,9 @@ public final class FamiliarLoop {
                 the conflict plainly at the start of your reply — then do what they ask; they
                 decide, but never silently. When a durable fact surfaces — a stated preference, a
                 trap that cost real time, a decision with lasting scope — offer it to the remember
-                tool so future sessions start knowing it.
+                tool so future sessions start knowing it. Scratch and debug files you create for
+                yourself go under .codezaiku/scratch/ and are cleaned up before the turn ends —
+                the person's project root stays theirs.
                 """
                 : """
                 You are a coding familiar. You build and repair real software by calling tools.

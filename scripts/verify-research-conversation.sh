@@ -49,6 +49,16 @@ grep -qE 'https?://[a-zA-Z0-9./_-]+' "$WORK/turn.txt" \
 [ -z "$(find "$PROJ" -name '*.java' -o -name 'pom.xml' -o -name '*.gradle' 2>/dev/null)" ] \
     && ok "research turn wrote no code" || bad "research turn wrote no code" "$(ls "$PROJ")"
 
+echo "== 1b. language-directed research (the JA-query check) and citations"
+say "Also find me one or two JAPANESE-language articles or papers about JSON parsing performance - search in Japanese, and give the URLs."
+LOGF=$(ls "$CODEZAIKU_CHAT_DIR"/*/logs/*.log 2>/dev/null | tail -1)
+if [ -n "$LOGF" ] && grep -aoP '(?<=query":")[^"]*' "$LOGF" 2>/dev/null | grep -qP '[\x{3040}-\x{30ff}\x{4e00}-\x{9fff}]'; then
+    ok "issued queries in Japanese"
+else
+    bad "issued queries in Japanese" "all queries were Latin-script (run log: $LOGF)"
+fi
+grep -qE 'https?://' "$WORK/turn.txt" && ok "sources cited (citation bounce holds)"     || bad "sources cited" "$(tail -3 "$WORK/turn.txt" | head -2)"
+
 echo "== 2. judgment over the findings"
 say "We care most about minimal dependencies and a small jar. In one short paragraph: which one, and why?"
 grep -qiE 'gson|jackson' "$WORK/turn.txt" \

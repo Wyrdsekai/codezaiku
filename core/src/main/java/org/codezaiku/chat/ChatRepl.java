@@ -358,6 +358,7 @@ public final class ChatRepl {
                 io.println("    /undo [n]                        step back n agent actions (default 1)");
                 io.println("    /diff · /test                    what changed · run the test suite");
                 io.println("    /tasks                           background tasks (it can start them; you get told)");
+                io.println("    /cost                            tokens this session (what a metered drive bills)");
                 io.println("    /commit [msg]                    stage and commit, after showing the command");
                 io.println("    /model [url|name] [id]           show or switch the drive (probes first)");
                 io.println("  SESSIONS");
@@ -393,6 +394,16 @@ public final class ChatRepl {
                 String m = memory.recall();
                 io.println(m.isEmpty() ? "    no project memory yet — /remember <fact> starts it"
                         : m.stripTrailing());
+            }
+            case "/cost" -> {
+                long pt = org.codezaiku.drive.DriveClient.SESSION_PROMPT_TOKENS.get();
+                long ct = org.codezaiku.drive.DriveClient.SESSION_COMPLETION_TOKENS.get();
+                if (pt + ct == 0) {
+                    io.println("    no token usage reported yet (local drives report it too — after the first turn)");
+                } else {
+                    io.println(String.format("    this session: %,d prompt + %,d completion = %,d tokens", pt, ct, pt + ct));
+                    io.println("    (a metered drive bills these; the run log's 'usage ←' lines are the per-call record)");
+                }
             }
             case "/tasks" -> {
                 var all = tasks.all();

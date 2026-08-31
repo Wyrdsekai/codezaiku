@@ -109,6 +109,23 @@ public final class DriveClient {
         return "";
     }
 
+    /** Process-lifetime token counters, for /cost on metered drives. Static on purpose: a chat
+     *  session swaps DriveClient instances on /model, and the person's question is "what has this
+     *  SESSION spent", not "this client object". */
+    public static final java.util.concurrent.atomic.AtomicLong SESSION_PROMPT_TOKENS =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong SESSION_COMPLETION_TOKENS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Per-request HTTP timeout. Five minutes suits every drive we had — until a 744B with
+     *  CPU-resident experts needed 10-20 min per long generation and every call "failed" at
+     *  exactly 300s (measured 2026-08-31: 8 identical 5-minute-spaced failures ended the run).
+     *  CODEZAIKU_DRIVE_TIMEOUT (seconds) raises it for slow drives. */
+    private static Duration driveTimeout() {
+        int s = org.codezaiku.Config.getInt("CODEZAIKU_DRIVE_TIMEOUT", 300);
+        return Duration.ofSeconds(Math.max(30, s));
+    }
+
     /** Context window from the live server: /props → default_generation_settings.n_ctx. */
     /** Used when no server will tell us. Deliberately small: guessing LOW costs an early compaction,
      *  guessing HIGH overflows the window mid-run, and only one of those is recoverable. */
@@ -371,7 +388,7 @@ public final class DriveClient {
                     messages.size(), payload.length(), maxTokens,
                     tools == null ? 0 : tools.size(), toolChoice);
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
-                    .timeout(Duration.ofMinutes(5))
+                    .timeout(driveTimeout())
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
             // Retry a 5xx: llama.cpp (--jinja) returns HTTP 500 when the MODEL emits a malformed tool call
@@ -412,6 +429,8 @@ public final class DriveClient {
                 log.info("usage ← prompt {} completion {} total {}",
                         u.path("prompt_tokens").asInt(), u.path("completion_tokens").asInt(),
                         u.path("total_tokens").asInt());
+                SESSION_PROMPT_TOKENS.addAndGet(u.path("prompt_tokens").asLong(0));
+                SESSION_COMPLETION_TOKENS.addAndGet(u.path("completion_tokens").asLong(0));
             }
             return (ObjectNode) msg;
         } catch (RuntimeException e) {
@@ -439,7 +458,7 @@ public final class DriveClient {
         body.put("stream", false);
         try {
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
-                    .timeout(Duration.ofMinutes(5)).header("Content-Type", "application/json")
+                    .timeout(driveTimeout()).header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
             HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() != 200) {
@@ -530,7 +549,7 @@ public final class DriveClient {
             body.put("temperature", 0.7);
             body.put("stream", false);
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
-                    .timeout(Duration.ofMinutes(5)).header("Content-Type", "application/json")
+                    .timeout(driveTimeout()).header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
             HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() != 200) {
@@ -604,7 +623,7 @@ public final class DriveClient {
         if (sink == null) return null;
         try {
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
-                    .timeout(Duration.ofMinutes(5))
+                    .timeout(driveTimeout())
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
             HttpResponse<java.io.InputStream> resp =

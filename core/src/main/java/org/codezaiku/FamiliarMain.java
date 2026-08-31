@@ -2560,7 +2560,9 @@ public final class FamiliarMain {
                     "Decompose this research question into 3-8 SELF-CONTAINED sub-questions that "
                     + "could each be researched independently by someone who sees nothing else. "
                     + "Cover every facet; where the question asks the same facts about many items, "
-                    + "group items into a few sub-questions rather than one each. Answer with a "
+                    + "group items into a few sub-questions rather than one each. When the question "
+                    + "names languages or regions, include language-specific sub-questions whose "
+                    + "queries should be written in that language. Answer with a "
                     + "JSON array of strings and nothing else.\n\nQUESTION:\n" + question);
             String raw = drive.classify(msgs, 1200);
             var arr = json.readTree(raw.substring(raw.indexOf('['), raw.lastIndexOf(']') + 1));

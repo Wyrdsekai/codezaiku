@@ -38,6 +38,8 @@ The chat surface, orchestration, and a research capability that compounds.
   immutable and verify only with the old `codezaiku.dev` type — see SECURITY.md.
 - Platform validation: the chat conversation battery passes 11/11 on Linux and macOS against a
   live model; Windows native validated end-to-end (7/7).
+- Known gap: on macOS, ctrl-C turn-cancellation is unverified when stdin is a pipe (the signal
+  is consumed without stopping the turn); interactive terminal use is the supported path there.
 
 ## 0.1.1 — fixes
 
