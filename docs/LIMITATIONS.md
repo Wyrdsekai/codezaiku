@@ -218,3 +218,16 @@ Included because they are the reason to trust the rest:
 The pattern is consistent enough to be the project's main lesson: **the dominant failure mode is a broken
 instrument, not a weak model.** Before believing a number, ask what would look identical if the
 instrument were broken, then check that by hand.
+
+
+## Chat (0.2.0)
+
+- **macOS: ctrl-C turn-cancellation is unverified when stdin is a pipe** — the signal is consumed
+  without stopping the turn. Interactive terminal use is the supported path on macOS.
+- **`codezaiku v1` cannot ask permission** — the wire has no mid-turn callback, so it serves
+  read-only tools by design. Anything that writes or runs belongs in the terminal chat.
+- **`/undo` cannot cover background work** — a `run_background` or `delegate` step mutates after
+  its turn ends, and the undo report says PARTIAL for any range containing one rather than
+  promising a rewind it cannot deliver.
+- **Web research needs a configured backend** — with neither `CODEZAIKU_SEARXNG` nor
+  `CODEZAIKU_BRAVE_KEY` set, chat has no web tools and will say so rather than invent sources.

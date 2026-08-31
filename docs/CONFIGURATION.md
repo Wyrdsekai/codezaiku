@@ -166,6 +166,31 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 
 ---
 
+## Chat, research and hosted drives (0.2.0)
+
+| key | what it does |
+|---|---|
+| `CODEZAIKU_CHAT_MODE` | Default consent mode for `chat`: `plan` · `ask` (default) · `auto-edit` · `yolo`. |
+| `CODEZAIKU_CHAT_MAX_TURNS` | Loop-turn cap per chat turn for unattended runs; `0` = unlimited (the default — interactively, YOU are the cap). |
+| `CODEZAIKU_CHAT_DIR` | Where sessions, project memory and the undo journal live (default `~/.codezaiku/chat`). |
+| `CODEZAIKU_UNDO_DEPTH` | How many agent steps `/undo` can walk back (default 10, or the turn cap if higher). |
+| `CODEZAIKU_SEARXNG` | SearXNG endpoint for `web_search`. Setting it (or the Brave key) is what puts web tools into chat. |
+| `CODEZAIKU_BRAVE_KEY` | Brave Search API key — first-choice search backend when set; SearXNG is the fallback on any failure. |
+| `CODEZAIKU_RESEARCH_WORKERS` / `_WORKER_TURNS` / `_ROUNDS` | Fan-out research: parallel sub-researchers (4), their turn budget (14), critic rounds (2). |
+| `CODEZAIKU_DELEGATE_DRIVE` / `CODEZAIKU_DELEGATE_MODEL` | Sub-agents from `delegate` run HERE instead of the chat's drive — frontier judgment, local labor. |
+| `CODEZAIKU_MCP_SERVERS` | `name=command;name2=command2` — spawns MCP stdio servers whose tools join chat as `mcp_<server>_<tool>`, consent-gated per call. |
+| `CODEZAIKU_V1_PORT` | Port for `codezaiku v1` (default 7071). |
+| `CODEZAIKU_TEMP` | Sampling temperature override; `none` omits the field (some hosted models reject any temperature). |
+| `CODEZAIKU_DRIVE_TIMEOUT` | Per-request HTTP timeout in seconds (default 300). Raise for drives with very long generations. |
+| `CODEZAIKU_DRIVE_TEMPLATE_KWARGS` | JSON object merged into every request's `chat_template_kwargs` — e.g. `{"enable_thinking":false}` for engines with no server-side reasoning control. |
+| `CODEZAIKU_CTX` | Force the context window when a server does not report one (`/v1/models` `context_length` is read automatically). |
+
+A hosted drive is just `CODEZAIKU_DRIVE=https://api.anthropic.com` (no path) plus
+`CODEZAIKU_MODEL` and `CODEZAIKU_API_KEY`. Per-response token usage is logged (`usage ←` lines;
+`/cost` in chat totals them), and a failing endpoint stops the run after 8 consecutive errors.
+
+---
+
 ## Experiment flags
 
 These exist to *measure* the system, not to run it, and several intentionally make it worse. They are

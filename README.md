@@ -195,6 +195,38 @@ are immutable; a fix ships as a new version, never as a re-upload.
 codezaiku help                                  # all commands, grouped by intent
 ```
 
+**Talk to it** — a conversation in one project, no host, no editor, no browser
+
+```bash
+codezaiku chat ~/myproject
+```
+
+It asks before writing or running anything and shows the change first; answers you give can be
+remembered per command (`/trust` keeps them beyond the session). `/undo` steps back through its
+actions one at a time. Sessions persist — `/resume` reopens one, `/onboard` seeds a fresh one
+from it, and `codezaiku sessions export` is your backup. `/remember` puts a fact into PROJECT
+MEMORY, carried into every future session here (the model can save too — it asks first). If the
+project has a `FAMILIAR.md`, `CLAUDE.md` or `AGENTS.md`, those working agreements ride every
+turn. Long work doesn't hold the conversation hostage: it can start background tasks
+(`/tasks` lists them, you get told when they finish) and `delegate` self-contained work —
+coding or research — to a background sub-agent, optionally on a different model. Ask a question
+that needs outside facts and it researches with cited sources, in the languages you name — when
+a search backend is configured (see CONFIGURATION.md). `/cost` shows what a metered drive would
+bill. `/help` inside the chat lists everything.
+
+The same conversation is available as an OpenAI-compatible endpoint — `codezaiku v1 ~/myproject`
+serves `/v1/chat/completions` with read-only tools (that wire cannot ask permission, so nothing
+that needs it is offered); point Open WebUI at it and the browser is the GUI.
+
+**Research a question** — one loop, or a fan-out with a critic
+
+```bash
+codezaiku research "your question" broad        # one loop: search, read, synthesize
+codezaiku research "your question" fan          # decompose -> parallel sub-researchers ->
+                                                #   a critic decides if coverage is enough ->
+                                                #   synthesis. Slower, much stronger on breadth.
+```
+
 **Work on a codebase**
 
 ```bash
