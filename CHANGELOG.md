@@ -3,6 +3,42 @@
 Notable changes. This project follows [semantic versioning](https://semver.org/) loosely: while at
 0.x, minor versions may change behaviour.
 
+## 0.2.0 — the conversation release
+
+The chat surface, orchestration, and a research capability that compounds.
+
+- **`codezaiku chat`** — a conversation in one project: it asks before writing or running
+  anything (showing the change first), remembers what you allow (`/trust`), steps back through
+  its own actions (`/undo`, per-step journal), and keeps sessions you can `/resume`, `/onboard`
+  from, or hand off. Streaming replies; thinking hidden unless you ask (`/thinking`).
+- **Project memory** — `/remember` carries facts into every future session here; the model can
+  save too, and asks first. Working agreements: the project's `FAMILIAR.md`/`CLAUDE.md` rides
+  every turn. Conflicts with recorded decisions are said out loud, never silently overridden.
+- **Background work and delegation** — `run_background` keeps long commands out of the
+  conversation's way (`/tasks`, completion notices); `delegate` hands a self-contained task —
+  coding or research — to a background sub-agent, optionally on a different model
+  (`CODEZAIKU_DELEGATE_DRIVE`).
+- **Research that fans out** — `codezaiku research <q> fan` decomposes a question, researches
+  sub-questions in parallel with fresh contexts, lets a critic decide whether coverage is
+  sufficient, then synthesizes. Measured on WideSearch: 0.171 → 0.314 (local model), 0.728
+  (hosted frontier model), same harness.
+- **Web search backends** — Brave Search API first when `CODEZAIKU_BRAVE_KEY` is set, SearXNG
+  (`CODEZAIKU_SEARXNG`) as fallback; web tools join chat when either is configured.
+- **OpenAI-compatible façade** — `codezaiku v1` serves the chat as `/v1/chat/completions`
+  (read-only tools by design: that wire cannot ask permission). Point Open WebUI at it.
+- **MCP client** — `CODEZAIKU_MCP_SERVERS` makes other processes' MCP tools callable from chat,
+  consent-gated per call.
+- **Sessions as archives** — `codezaiku sessions export|import` (backup/restore; import never
+  overwrites without `--force`).
+- **Hosted drives** — `CODEZAIKU_DRIVE=https://api.anthropic.com` (+ `CODEZAIKU_MODEL`,
+  `CODEZAIKU_API_KEY`, `CODEZAIKU_TEMP=none`) runs any surface on a hosted model; per-response
+  token usage is logged; a failing endpoint stops the run after 8 consecutive errors instead of
+  retrying forever.
+- **Attestation predicate moved to `codezaiku.org`** (a domain we own). 0.1.0 and 0.1.1 are
+  immutable and verify only with the old `codezaiku.dev` type — see SECURITY.md.
+- Platform validation: the chat conversation battery passes 11/11 on Linux and macOS against a
+  live model; Windows native validated end-to-end (7/7).
+
 ## 0.1.1 — fixes
 
 - **`run --text` accepts `@<file>` and `-`.** On Windows every argument crosses cmd.exe, which

@@ -265,6 +265,7 @@ def main():
     ap.add_argument("--judge", default=None,
                     help="OpenAI-compatible base URL for the llm_judge columns (e.g. http://${CP_HOST}:8201)")
     ap.add_argument("--out", default=os.path.expanduser("~/.codezaiku/bench/widesearch"))
+    ap.add_argument("--mode", default="broad", help="research mode: broad | depth | fan")
     a = ap.parse_args()
     global JUDGE_URL
     JUDGE_URL = a.judge.rstrip("/") if a.judge else None
@@ -309,7 +310,7 @@ def main():
         pathlib.Path(env["CODEZAIKU_RESEARCH_POOL"]).unlink(missing_ok=True)
         t0 = time.time()
         p = subprocess.run(["timeout", "-k", "30", str(a.timeout), "java", "-cp", cp,
-                            "org.codezaiku.FamiliarMain", "research", "@" + str(qf), "broad",
+                            "org.codezaiku.FamiliarMain", "research", "@" + str(qf), a.mode,
                             a.drive, str(a.turns)],
                            cwd=work, env=env, capture_output=True, text=True)
         body = p.stdout.split("=== RESEARCH ===", 1)[1] if "=== RESEARCH ===" in p.stdout else ""

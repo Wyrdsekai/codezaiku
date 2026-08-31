@@ -13,6 +13,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VERSION="${CODEZAIKU_VERSION:-$(cat "$REPO_ROOT/VERSION" 2>/dev/null || echo 0.1.1)}"
+# The version lives in three places (VERSION, build.gradle.kts, FamiliarMain.VERSION) and the
+# 0.2.0 build shipped a deb stamped 0.1.1 because only one had been bumped. Refuse the mismatch.
+SRC_V=$(grep -o 'VERSION = "[0-9.]*"' "$REPO_ROOT/core/src/main/java/org/codezaiku/FamiliarMain.java" | grep -o '[0-9.]*')
+if [ -n "$SRC_V" ] && [ "$SRC_V" != "$VERSION" ]; then
+  echo "[deb] REFUSING: packaging version $VERSION != FamiliarMain.VERSION $SRC_V" >&2
+  exit 1
+fi
 PKG="codezaiku_${VERSION}_all"
 DEB_ROOT="$REPO_ROOT/build/deb/$PKG"
 OUT_DIR="$REPO_ROOT/build/deb"

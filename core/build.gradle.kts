@@ -1,5 +1,3 @@
-val pekkoVersion: String by extra
-val pekkoScalaSuffix: String by extra
 val jacksonVersion: String by extra
 
 plugins {
@@ -8,13 +6,15 @@ plugins {
 }
 
 dependencies {
-    // Pekko typed actors — the loop runs as a typed actor system.
-    api("org.apache.pekko:pekko-actor-typed${pekkoScalaSuffix}:${pekkoVersion}")
-    implementation("org.apache.pekko:pekko-serialization-jackson${pekkoScalaSuffix}:${pekkoVersion}")
-
-    // Jackson — build/parse the OpenAI-compatible chat JSON for the :8200 drive.
-    // jackson-databind comes transitively via pekko-serialization-jackson; pin it explicit.
+    // Jackson — build/parse the OpenAI-compatible chat JSON for the drive. Direct, not
+    // transitive: it used to arrive via pekko-serialization-jackson, and when pekko went
+    // this pin is what kept it.
     implementation("com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}")
+
+    // JLine — line editing and history for `codezaiku chat`. One jar, no transitives, and the
+    // same version the sibling project's CLI already uses. `chat` degrades to a plain reader when
+    // stdin is a pipe, so this is for the interactive case only.
+    implementation("org.jline:jline:4.0.4")
 
     // Apache Lucene — read the framework-knowledge Library index (BM25 + HNSW dense).
     // 10.4.0 matches the on-disk codec (Lucene104) of ~/.codezaiku/ocean/library.
@@ -24,7 +24,6 @@ dependencies {
 
     // HTTP client is java.net.http (JDK built-in) — no dependency.
 
-    testImplementation("org.apache.pekko:pekko-actor-testkit-typed${pekkoScalaSuffix}:${pekkoVersion}")
     testImplementation("org.junit.jupiter:junit-jupiter:5.12.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

@@ -141,8 +141,11 @@ RULES: list[tuple[str, str, re.Pattern, str]] = [
      "private key material"),
     ("aws-key", "HIGH", re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AWS access key id"),
     ("bearer-token", "HIGH",
-     re.compile(r"\b(?:sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,})"),
-     "API token (OpenAI / GitHub / Slack shape)"),
+     re.compile(r"\b(?:sk-[A-Za-z0-9]{20,}|sk-ant-[A-Za-z0-9-]{30,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,})"),
+     # sk-ant added 2026-08-30: the POSITIVE CONTROL planted an Anthropic-shaped key and the old
+     # pattern missed it — hyphens in `sk-ant-api03-` break `[A-Za-z0-9]{20,}`. The exact key
+     # shape this project actually uses was the one shape the rule could not see.
+     "API token (OpenAI / Anthropic / GitHub / Slack shape)"),
     ("hf-token", "HIGH", re.compile(r"\bhf_[A-Za-z0-9]{30,}\b"),
      "HuggingFace access token"),
     ("assigned-credential", "HIGH",

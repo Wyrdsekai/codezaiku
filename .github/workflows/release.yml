@@ -18,7 +18,7 @@ name: Release
 #
 # Verification, from any machine with the GitHub CLI:
 #   gh attestation verify codezaiku-X.Y.Z.tar.gz --repo Wyrdsekai/codezaiku \
-#     --predicate-type https://codezaiku.dev/attestation/release/v1
+#     --predicate-type https://codezaiku.org/attestation/release/v1
 #
 # Uses ONLY GitHub-authored actions (actions/*), so a repository Actions policy
 # can stay narrow.
@@ -111,7 +111,7 @@ jobs:
         uses: actions/attest@v3
         with:
           subject-path: assets/${{ steps.asset.outputs.file }}
-          predicate-type: 'https://codezaiku.dev/attestation/release/v1'
+          predicate-type: 'https://codezaiku.org/attestation/release/v1'
           predicate: >-
             {"tag": "${{ steps.tag.outputs.tag }}",
              "checksumSource": "release SHA256SUMS, verified pre-attestation",

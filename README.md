@@ -177,7 +177,7 @@ Every release asset ships with `SHA256SUMS` and a Sigstore bundle (`<asset>.sigs
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
 gh attestation verify codezaiku-0.1.1.tar.gz --repo Wyrdsekai/codezaiku \
-  --predicate-type https://codezaiku.dev/attestation/release/v1
+  --predicate-type https://codezaiku.org/attestation/release/v1
 ```
 
 `gh attestation` needs **GitHub CLI 2.49 or newer**. An older `gh` reports `unknown command` with no hint why — check with `gh --version` before concluding the signature is bad.

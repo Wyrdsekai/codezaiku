@@ -1,14 +1,15 @@
-// Root build — Pekko 1.4.0, Jackson 2.21.1, Java 21 toolchain, trimmed to what the
-// familiar loop's spine needs.
-val pekkoVersion = "1.4.0"
-val pekkoScalaSuffix = "_2.13"
+// Root build — Jackson 2.21.1, Java 21 floor, trimmed to what the familiar loop's spine
+// actually needs. Pekko was in here as the loop's "typed actor system" and had already
+// stopped being imported by a single source file; it and the Scala runtime it drags in
+// were 13MB of a 28MB distribution. Removed 2026-08-27 after checking that the built
+// launcher still runs, not just that the tests still pass.
 val jacksonVersion = "2.21.1"
 
 subprojects {
     apply(plugin = "java")
 
     group = "org.codezaiku"
-    version = "0.1.1"
+    version = "0.2.0"
 
     // 21 is the FLOOR the code needs — the docs, `codezaiku doctor` and the .deb dependency all say
     // "21 or newer". Expressing that as `toolchain { languageVersion = 21 }` did not say it: a Gradle
@@ -28,8 +29,6 @@ subprojects {
         mavenCentral()
     }
 
-    extra["pekkoVersion"] = pekkoVersion
-    extra["pekkoScalaSuffix"] = pekkoScalaSuffix
     extra["jacksonVersion"] = jacksonVersion
 
     dependencies {

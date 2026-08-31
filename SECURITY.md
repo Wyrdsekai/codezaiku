@@ -78,6 +78,13 @@ Release assets carry `SHA256SUMS` and a per-asset Sigstore bundle, `<asset>.sigs
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
 gh attestation verify codezaiku-X.Y.Z.tar.gz --repo Wyrdsekai/codezaiku \
+  --predicate-type https://codezaiku.org/attestation/release/v1
+```
+
+For **0.1.0 and 0.1.1 only** (immutable, signed before the predicate moved to a domain we own),
+use the original type — these two versions verify with it permanently:
+
+```
   --predicate-type https://codezaiku.dev/attestation/release/v1
 ```
 

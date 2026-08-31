@@ -29,7 +29,12 @@ cd "$REPO_ROOT"
 
 CP_CACHE="$REPO_ROOT/.codezaiku-cp"
 GRADLE="./gradlew"
-JAVA_OPTS="${CODEZAIKU_JAVA_OPTS:---add-opens java.base/java.lang=ALL-UNNAMED}"
+# Both flags, matching what core/build.gradle.kts gives the RELEASED launcher. The
+# --enable-native-access one was missing here, so the dev launcher printed four Lucene
+# warnings the shipped one does not — and printed them AFTER the banner, in the middle of a
+# conversation. A dev launcher that behaves differently from the real one is how a defect
+# gets found by a user instead of by us.
+JAVA_OPTS="${CODEZAIKU_JAVA_OPTS:---add-opens java.base/java.lang=ALL-UNNAMED --enable-native-access=ALL-UNNAMED}"
 
 die() { echo "codezaiku: $*" >&2; exit 1; }
 

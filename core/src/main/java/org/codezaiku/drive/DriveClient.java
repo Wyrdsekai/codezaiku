@@ -129,6 +129,12 @@ public final class DriveClient {
             return n;
         }
 
+        n = fromModelsContextLength();
+        if (n != null) {
+            log.info("context window {} (from /v1/models context_length — FreeToken/vLLM style)", n);
+            return n;
+        }
+
         // Only degrade when a server ANSWERED but does not serve these endpoints. An unreachable
         // drive must still fail here, immediately and by name.
         //
@@ -145,6 +151,28 @@ public final class DriveClient {
         log.warn("no server reported a context window at {} — assuming {}. Set CODEZAIKU_CTX if your "
                 + "server's window differs; too small only costs an early compaction.", baseUrl, FALLBACK_CTX);
         return FALLBACK_CTX;
+    }
+
+    /**
+     * FreeToken/vLLM-family servers put the window in {@code /v1/models} as {@code context_length}
+     * (or {@code max_model_len}). NOTE the caveat from {@link #contextWindow}: this is the MODEL's
+     * maximum, which for a long-context model can be far beyond what the KV cache actually holds —
+     * so it is capped at 131072 here, and CODEZAIKU_CTX remains the operator override. Added
+     * 2026-08-29 after FreeToken fell through to the 8192 fallback and strangled a whole battery
+     * run (out_budget 553, compaction every turn) while serving a 262k model.
+     */
+    private Integer fromModelsContextLength() {
+        try {
+            HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/models")))
+                    .timeout(Duration.ofSeconds(5)).GET().build();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) return null;
+            JsonNode m = json.readTree(resp.body()).path("data").path(0);
+            int n = m.path("context_length").asInt(m.path("max_model_len").asInt(0));
+            return n > 0 ? Math.min(n, 131072) : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** Did anything answer at all? Any HTTP status counts — a 404 is a live server with another API. */
@@ -209,6 +237,45 @@ public final class DriveClient {
      * {@code tool_calls} when tools were offered). The caller appends it to the conversation
      * verbatim and executes the tool calls.
      */
+    /**
+     * Where streamed prose goes, when streaming is on. Null (the default) means nobody is watching
+     * and requests stay non-streaming.
+     *
+     * <p>Streaming is opt-in twice: {@code CODEZAIKU_STREAM} must be truthy AND a sink must be set.
+     * Config alone is not enough because most callers — `run`, MCP, the batteries — have no screen,
+     * and parsing SSE for nobody is pure risk. A sink alone is not enough because the phone and the
+     * chat want the same binary to behave identically until the config says otherwise. The loop and
+     * every existing call site are untouched: the streamed request is reassembled into exactly the
+     * message shape the non-streaming path returns, tool-call deltas included, so downstream code
+     * cannot tell which path ran.
+     */
+    private static volatile java.util.function.Consumer<String> onDelta;
+    private static volatile java.util.function.Consumer<String> onThink;
+
+    public static void streamTo(java.util.function.Consumer<String> sink) { streamTo(sink, sink); }
+
+    /**
+     * Separate channels for the reply and the thinking. They are different voices: the reply is the
+     * model talking TO the person, the reasoning is it talking to itself — and the operator, watching
+     * both arrive in identical text, read the second as the injected-prompt bug all over again. The
+     * renderer decides how the inner voice looks (dimmed, in a terminal); this layer only keeps the
+     * two from arriving indistinguishable.
+     */
+    public static void streamTo(java.util.function.Consumer<String> sink,
+                                java.util.function.Consumer<String> thinking) {
+        onDelta = sink;
+        onThink = sink == null ? null : thinking;
+    }
+
+    private static boolean streamingOn() {
+        String v = org.codezaiku.Config.get("CODEZAIKU_STREAM", "");
+        return onDelta != null && !v.isBlank() && !v.equalsIgnoreCase("off")
+                && !v.equalsIgnoreCase("false") && !v.equals("0");
+    }
+
+    // Whether thinking is SHOWN is the renderer's decision, not this layer's: it owns the screen
+    // and can change its mind mid-session (/thinking). This layer only keeps the channels apart.
+
     public ObjectNode chat(ArrayNode messages, ArrayNode tools, int maxTokens) {
         return chat(messages, tools, maxTokens, "required");
     }
@@ -255,12 +322,50 @@ public final class DriveClient {
             body.put("tool_choice", toolChoice);
         }
         body.put("max_tokens", maxTokens);
-        body.put("temperature", temperature); // 0.7 for the coding loop (greedy degrades it, RESET §10.4);
-                                              // ops remediation passes 0.0 to follow a fix procedure exactly
-        if (noThink) body.putObject("chat_template_kwargs").put("enable_thinking", false);
-        body.put("stream", false);
+        // CODEZAIKU_TEMP=none omits the field entirely — claude-fable-5 400s on ANY temperature
+        // ("deprecated for this model", measured 2026-08-29); a number overrides the caller's
+        // choice for engines whose default sampling is better left alone.
+        String tempCfg = org.codezaiku.Config.get("CODEZAIKU_TEMP");
+        if ("none".equalsIgnoreCase(tempCfg)) {
+            // omitted
+        } else if (tempCfg != null && !tempCfg.isBlank()) {
+            body.put("temperature", Double.parseDouble(tempCfg));
+        } else {
+            body.put("temperature", temperature); // 0.7 for the coding loop (greedy degrades it, RESET §10.4);
+                                                  // ops remediation passes 0.0 to follow a fix procedure exactly
+        }
+        // Operator-set template kwargs, merged into every request. This is the per-drive twin of
+        // llama.cpp's --chat-template-kwargs: cz-chat runs the 27B with reasoning_effort=low at the
+        // CONTAINER, but an engine with no such flag (FreeToken 0.1.2) leaves a reasoning model
+        // thinking at full length through every loop turn — measured 2026-08-29: the same weights
+        // spent a 25-turn budget mid-write. An explicit noThink turn still wins the merge.
+        String tk = org.codezaiku.Config.get("CODEZAIKU_DRIVE_TEMPLATE_KWARGS");
+        if (tk != null && !tk.isBlank()) {
+            try {
+                com.fasterxml.jackson.databind.JsonNode kw = json.readTree(tk);
+                if (kw.isObject()) body.set("chat_template_kwargs", kw.deepCopy());
+            } catch (Exception e) {
+                throw new IllegalStateException(
+                        "CODEZAIKU_DRIVE_TEMPLATE_KWARGS is not a JSON object: " + tk);
+            }
+        }
+        if (noThink) {
+            ObjectNode kw = body.has("chat_template_kwargs")
+                    ? (ObjectNode) body.get("chat_template_kwargs")
+                    : body.putObject("chat_template_kwargs");
+            kw.put("enable_thinking", false);
+        }
+        body.put("stream", streamingOn());
         try {
             String payload = json.writeValueAsString(body);
+            if (streamingOn()) {
+                ObjectNode streamed = chatStreaming(payload);
+                if (streamed != null) return streamed;
+                // A failed stream falls through to the plain request rather than failing the turn:
+                // streaming is presentation, and presentation must never cost an answer.
+                body.put("stream", false);
+                payload = json.writeValueAsString(body);
+            }
             // Log the REAL outgoing request shape so we never have to infer which knob applied (L11).
             log.info("drive → {} msgs, {} req-chars, max_tokens={}, tools={}, tool_choice={}",
                     messages.size(), payload.length(), maxTokens,
@@ -295,9 +400,18 @@ public final class DriveClient {
                 }
                 throw new IllegalStateException("drive HTTP " + resp.statusCode() + ": " + resp.body());
             }
-            JsonNode msg = json.readTree(resp.body()).path("choices").path(0).path("message");
+            JsonNode parsed = json.readTree(resp.body());
+            JsonNode msg = parsed.path("choices").path(0).path("message");
             if (!msg.isObject()) {
                 throw new IllegalStateException("no choices[0].message in response: " + resp.body());
+            }
+            // Usage, when the server reports it. On a metered drive this line IS the meter:
+            // grep 'usage ←' over a run log and sum. Local llama.cpp reports it too — harmless.
+            JsonNode u = parsed.path("usage");
+            if (u.isObject()) {
+                log.info("usage ← prompt {} completion {} total {}",
+                        u.path("prompt_tokens").asInt(), u.path("completion_tokens").asInt(),
+                        u.path("total_tokens").asInt());
             }
             return (ObjectNode) msg;
         } catch (RuntimeException e) {
@@ -472,5 +586,166 @@ public final class DriveClient {
         fn.put("name", name);
         fn.put("arguments", argsStr);
         return out;
+    }
+
+    /**
+     * One streamed chat request, reassembled into the same {@code choices[0].message} object the
+     * non-streaming path returns. Null on any failure — the caller falls back to a plain request.
+     *
+     * <p>The fiddly part is tool calls: the OpenAI stream format delivers them as DELTAS — a first
+     * chunk carrying {@code index}, {@code id} and the function {@code name}, then chunks each
+     * carrying a fragment of {@code arguments} — and the fragments are raw string pieces of a JSON
+     * document, split anywhere. They are concatenated per index and only parsed by whoever consumes
+     * the final message, exactly as with the non-streamed shape. Prose deltas go to the sink as they
+     * arrive; tool-call deltas do not, because half a JSON argument is noise on a screen.
+     */
+    private ObjectNode chatStreaming(String payload) {
+        var sink = onDelta;
+        if (sink == null) return null;
+        try {
+            HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
+                    .timeout(Duration.ofMinutes(5))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
+            HttpResponse<java.io.InputStream> resp =
+                    http.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            if (resp.statusCode() != 200) return null;
+            try (var reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(resp.body(), java.nio.charset.StandardCharsets.UTF_8))) {
+                var content = new StringBuilder();
+                var toolNames = new java.util.TreeMap<Integer, String>();
+                var toolIds = new java.util.TreeMap<Integer, String>();
+                var toolArgs = new java.util.TreeMap<Integer, StringBuilder>();
+                var summaries = new java.util.TreeMap<Integer, SummaryStream>();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (!line.startsWith("data:")) continue;
+                    String data = line.substring(5).strip();
+                    if (data.equals("[DONE]")) break;
+                    JsonNode delta = json.readTree(data).path("choices").path(0).path("delta");
+                    String piece = delta.path("content").asText(null);
+                    if (piece != null && !piece.isEmpty()) {
+                        content.append(piece);
+                        sink.accept(piece);
+                    }
+                    // Reasoning models (gemma under --jinja, the 27B) think out loud in
+                    // reasoning_content before the tool call — verified against the live server,
+                    // where an entire turn's visible streaming WAS the reasoning. It goes to the
+                    // sink so the person watches the model think, but never into the message:
+                    // downstream must see exactly the non-streamed shape, which drops reasoning.
+                    String think = delta.path("reasoning_content").asText(null);
+                    if (think != null && !think.isEmpty()) {
+                        var t = onThink;
+                        (t != null ? t : sink).accept(think);
+                    }
+                    for (JsonNode tc : delta.path("tool_calls")) {
+                        int idx = tc.path("index").asInt(0);
+                        if (tc.hasNonNull("id")) toolIds.put(idx, tc.get("id").asText());
+                        JsonNode fn = tc.path("function");
+                        if (fn.hasNonNull("name")) toolNames.put(idx, fn.get("name").asText());
+                        if (fn.hasNonNull("arguments")) {
+                            String frag = fn.get("arguments").asText();
+                            toolArgs.computeIfAbsent(idx, k -> new StringBuilder()).append(frag);
+                            // The loop runs with tool_choice=required, so the model NEVER produces
+                            // plain content — measured on the first live streaming run, where a
+                            // whole turn streamed and the screen showed nothing. The prose a person
+                            // actually reads is the summary argument of the finishing tool, so THAT
+                            // is what streams: decoded incrementally out of the JSON fragments,
+                            // which split anywhere, including mid-escape.
+                            String name = toolNames.get(idx);
+                            if ("task_done".equals(name) || "task_blocked".equals(name)) {
+                                summaries.computeIfAbsent(idx,
+                                                k -> new SummaryStream("task_done".equals(name)
+                                                        ? "summary" : "reason", sink))
+                                        .feed(frag);
+                            }
+                        }
+                    }
+                }
+                ObjectNode msg = json.createObjectNode();
+                msg.put("role", "assistant");
+                msg.put("content", content.toString());
+                if (!toolNames.isEmpty()) {
+                    var arr = msg.putArray("tool_calls");
+                    toolNames.forEach((idx, name) -> {
+                        var one = arr.addObject();
+                        one.put("id", toolIds.getOrDefault(idx, "call_" + idx));
+                        one.put("type", "function");
+                        var fn = one.putObject("function");
+                        fn.put("name", name);
+                        fn.put("arguments", toolArgs.getOrDefault(idx, new StringBuilder()).toString());
+                    });
+                }
+                return msg;
+            }
+        } catch (Exception e) {
+            log.warn("streaming failed ({}), falling back to a plain request", e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * Streams ONE string field's value out of a JSON object that arrives in arbitrary fragments.
+     *
+     * <p>Looks for {@code "<field>"}, then the colon, then the opening quote, then emits decoded
+     * characters until the unescaped closing quote. Fragments split anywhere — inside the key,
+     * inside an escape, inside a {@code \\u} sequence — because that is how tool-call deltas
+     * actually arrive. Unknown escapes pass through as their literal character; a malformed tail is
+     * simply not emitted, since the fully reassembled arguments are parsed downstream anyway and
+     * this exists only so a person watches the answer appear instead of a silent turn.
+     */
+    static final class SummaryStream {
+        private final String needle;
+        private final java.util.function.Consumer<String> sink;
+        private final StringBuilder window = new StringBuilder();
+        private int state = 0;         // 0=looking for key, 1=looking for opening quote, 2=in value, 3=done
+        private boolean escaping = false;
+        private int uLeft = 0;
+        private final StringBuilder uHex = new StringBuilder();
+
+        SummaryStream(String field, java.util.function.Consumer<String> sink) {
+            this.needle = "\"" + field + "\"";
+            this.sink = sink;
+        }
+
+        void feed(String fragment) {
+            for (int i = 0; i < fragment.length() && state != 3; i++) {
+                char c = fragment.charAt(i);
+                switch (state) {
+                    case 0 -> {
+                        window.append(c);
+                        if (window.length() > needle.length()) window.deleteCharAt(0);
+                        if (window.toString().equals(needle)) state = 1;
+                    }
+                    case 1 -> { if (c == '"') state = 2; }
+                    case 2 -> {
+                        if (uLeft > 0) {
+                            uHex.append(c);
+                            if (--uLeft == 0) {
+                                try { sink.accept(String.valueOf((char) Integer.parseInt(uHex.toString(), 16))); }
+                                catch (NumberFormatException ignored) { }
+                                uHex.setLength(0);
+                            }
+                        } else if (escaping) {
+                            escaping = false;
+                            switch (c) {
+                                case 'n' -> sink.accept("\n");
+                                case 't' -> sink.accept("\t");
+                                case 'r' -> { }
+                                case 'u' -> uLeft = 4;
+                                default -> sink.accept(String.valueOf(c));
+                            }
+                        } else if (c == '\\') {
+                            escaping = true;
+                        } else if (c == '"') {
+                            state = 3;
+                        } else {
+                            sink.accept(String.valueOf(c));
+                        }
+                    }
+                    default -> { }
+                }
+            }
+        }
     }
 }

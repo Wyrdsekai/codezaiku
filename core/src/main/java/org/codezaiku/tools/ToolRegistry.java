@@ -142,13 +142,19 @@ public final class ToolRegistry {
         PathScope scope = new PathScope(projectRoot);
         ToolRegistry reg = new ToolRegistry().scope(scope)
                 .add(new ReadFileTool(scope))
+                .add(new SearchCodeTool(scope))
                 .add(new ReadDepSourceTool(projectRoot))
                 .add(new WriteFileTool(scope))
                 .add(new EditFileTool(scope, lsp))
                 .add(new ShellTool(scope))
                 .add(new TaskDoneTool())
                 .add(new TaskBlockedTool());
-        if (lsp != null) reg.add(new ReplaceSymbolTool(scope, lsp));
+        if (lsp != null) {
+            reg.add(new ReplaceSymbolTool(scope, lsp));
+            // Only when a server actually started: an advertised tool that always answers
+            // "unavailable" teaches the model to stop calling tools.
+            reg.add(new FindSymbolTool(scope, lsp));
+        }
         return reg;
     }
 
@@ -159,12 +165,15 @@ public final class ToolRegistry {
      */
     public static ToolRegistry readOnly(Path projectRoot, LspClient lsp) {
         PathScope scope = new PathScope(projectRoot);
-        return new ToolRegistry().scope(scope)
+        ToolRegistry reg = new ToolRegistry().scope(scope)
                 .add(new ReadFileTool(scope))
+                .add(new SearchCodeTool(scope))
                 .add(new ReadDepSourceTool(projectRoot))
                 .add(new ShellTool(scope, true))   // read-only: no file-mutating commands
                 .add(new TaskDoneTool())
                 .add(new TaskBlockedTool());
+        if (lsp != null) reg.add(new FindSymbolTool(scope, lsp));
+        return reg;
     }
 
     /**

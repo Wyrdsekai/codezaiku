@@ -110,7 +110,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.1.1";
+    public static final String VERSION = "0.2.0";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -288,6 +288,128 @@ public final class FamiliarMain {
             RunVerb.main(Arrays.copyOfRange(args, 1, args.length));
             return;
         }
+        // CHAT — the standalone surface. Every other verb is one-shot and every integration
+        // surface assumes a host in front of it; this is the one you can sit down at.
+        //
+        // You do not pick a mode before speaking. The agent has its tools and the harness stops to
+        // ask before it writes or runs anything — the shape Claude Code and Codex settled on, and
+        // the documented purpose of ToolRegistry.Listener#permit: an EXTERNAL authority exercising
+        // consent it already holds, which is a different thing from the harness overruling a model.
+        if (args.length >= 1 && args[0].equals("chat")) {
+          try {
+            Path root = args.length >= 2 && !args[1].startsWith("--") ? Path.of(args[1]) : Path.of(".");
+            var mode = org.codezaiku.chat.ChatConsent.Mode.fromConfig(
+                    flag(args, "--mode", Config.get("CODEZAIKU_CHAT_MODE")));
+            // UNLIMITED by default. The old cap of 8 was defending against a problem that no
+            // longer exists: it dated from before ctrl-C could stop a turn and before anything
+            // streamed, when a stuck turn was ten silent minutes with no way out. In chat the
+            // person IS the cap — they are watching the turn and can end it with one key — and
+            // the operator hit the ceiling mid-fix on the first real work-shaped ask ("why can we not
+            // do infinite?"). A number here still matters for UNATTENDED runs (pipes, scripts),
+            // which is what --max-turns and CODEZAIKU_CHAT_MAX_TURNS remain for; 0 means no cap.
+            int turns = Integer.parseInt(flag(args, "--max-turns",
+                    Config.get("CODEZAIKU_CHAT_MAX_TURNS", "0")));
+            if (turns <= 0) turns = 1_000_000;   // "unlimited": far past any real conversation,
+                                                 // small enough that + epilogue cannot overflow
+            try {
+                System.exit(new org.codezaiku.chat.ChatRepl(
+                        root, flag(args, "--drive", DEFAULT_DRIVE), MODEL, mode, turns,
+                        flag(args, "--from", null)).run());
+            } catch (IOException e) {
+                System.err.println("chat: could not open a terminal: " + e.getMessage());
+                System.exit(1);
+            }
+          } catch (IllegalArgumentException e) {
+            System.err.println("codezaiku chat: " + e.getMessage());
+            System.err.println("usage: codezaiku chat [project] [--mode ask] [--drive URL] [--max-turns 8]");
+            System.exit(2);
+          }
+        }
+        // SESSIONS — the chat store as an archive: list, export (= backup), import (= restore).
+        // The store was designed to make this a file walk; the verbs just say what happened.
+        if (args.length >= 2 && args[0].equals("sessions")) {
+            try {
+                String sub = args[1];
+                Path root = args.length >= 3 && !args[2].startsWith("--") ? Path.of(args[2])
+                        : (sub.equals("import") ? Path.of(".") : Path.of("."));
+                if (sub.equals("import") && args.length >= 3 && !args[2].startsWith("--")) {
+                    // import's positional arg is the ARCHIVE; an optional project follows it.
+                    root = args.length >= 4 && !args[3].startsWith("--") ? Path.of(args[3]) : Path.of(".");
+                }
+                Path store = org.codezaiku.chat.ChatSession.storeDir(root.toAbsolutePath().normalize());
+                switch (sub) {
+                    case "list" -> {
+                        var rows = org.codezaiku.chat.ChatSession.list(root);
+                        if (rows.isEmpty()) { System.out.println("no sessions for " + root.toAbsolutePath().normalize()); return; }
+                        for (String[] r : rows) System.out.println(r[0] + "  " + r[1]);
+                    }
+                    case "export" -> {
+                        Path out = Path.of(flag(args, "--out",
+                                org.codezaiku.chat.SessionArchive.defaultOut(root).toString()));
+                        var names = org.codezaiku.chat.SessionArchive.export(store, out,
+                                root.toAbsolutePath().normalize().toString());
+                        System.out.println("exported " + names.size() + " file(s) -> " + out);
+                    }
+                    case "import" -> {
+                        if (args.length < 3 || args[2].startsWith("--")) {
+                            System.err.println("usage: codezaiku sessions import <archive.zip> [project] [--force]");
+                            System.exit(2);
+                        }
+                        boolean force = java.util.Arrays.asList(args).contains("--force");
+                        var r = org.codezaiku.chat.SessionArchive.importInto(Path.of(args[2]), store, force);
+                        System.out.println("restored " + r.restored().size() + " file(s) into " + store);
+                        if (!r.skipped().isEmpty()) {
+                            System.out.println("skipped " + r.skipped().size()
+                                    + " already-present file(s) — --force overwrites:");
+                            r.skipped().forEach(n -> System.out.println("  " + n));
+                        }
+                    }
+                    default -> {
+                        System.err.println("usage: codezaiku sessions <list|export|import> ...");
+                        System.exit(2);
+                    }
+                }
+                return;
+            } catch (Exception e) {
+                System.err.println("sessions " + args[1] + " failed: " + e.getMessage());
+                System.exit(1);
+            }
+        }
+        // V1 — front end #2: OpenAI-compatible /v1/chat/completions over one project, so Open
+        // WebUI (or any OpenAI client) is the GUI. Pinned to the READ rung by the protocol's own
+        // shape: no mid-turn callback exists, so no approval prompt can render, so no tool that
+        // would need one is in the registry (V1Server's javadoc carries the argument).
+        if (args.length >= 1 && args[0].equals("v1")) {
+            try {
+                Path root = args.length >= 2 && !args[1].startsWith("--") ? Path.of(args[1]) : Path.of(".");
+                int port = Integer.parseInt(flag(args, "--port", Config.get("CODEZAIKU_V1_PORT", "7071")));
+                String host = flag(args, "--host", "127.0.0.1");   // loopback: no auth exists here
+                int turns = Integer.parseInt(flag(args, "--max-turns", "25"));
+                new org.codezaiku.chat.V1Server(root, flag(args, "--drive", DEFAULT_DRIVE), MODEL, turns)
+                        .start(host, port);
+                System.out.println("v1: OpenAI-compatible chat on http://" + host + ":" + port
+                        + "/v1  —  project " + root.toAbsolutePath().normalize()
+                        + "  rung=read (read-only tools; the protocol cannot ask permission)");
+                Thread.currentThread().join();
+            } catch (NumberFormatException e) {
+                System.err.println("codezaiku v1: not a number: " + e.getMessage());
+                System.exit(2);
+            } catch (Exception e) {
+                System.err.println("v1 server failed: " + e);
+                System.exit(1);
+            }
+        }
+        // REVERSE — a repo, backwards: the single conversational prompt someone would have typed
+        // to vibe-code this project from scratch. GitReverse's idea (a Next.js app over five cloud
+        // providers) rebuilt as one verb over what this harness already owns: ProjectFacts for the
+        // shape, the tree, the README, and the local drive for the words. Beyond the party trick it
+        // is a FIXTURE GENERATOR: repo -> prompt -> feed the prompt back to the coding loop -> diff
+        // against the real repo is a self-grading greenfield eval.
+        if (args.length >= 1 && args[0].equals("reverse")) {
+            Path root = args.length >= 2 && !args[1].startsWith("--") ? Path.of(args[1]) : Path.of(".");
+            System.exit(reverse(root.toAbsolutePath().normalize(),
+                    flag(args, "--drive", DEFAULT_DRIVE)));
+        }
         // `code` is the name the usage text, the README and the MCP tool all use; `loop` is the
         // original. Both dispatch here — the help promised an alias the dispatch did not accept.
         if (args.length >= 3 && (args[0].equals("loop") || args[0].equals("code"))) {
@@ -382,7 +504,9 @@ public final class FamiliarMain {
             String mode = args.length >= 3 ? args[2] : "broad";
             String baseUrl = driveArg(args, 3);
             int maxTurns = args.length >= 5 ? Integer.parseInt(args[4]) : 30;
-            System.out.println("\n=== RESEARCH ===\n" + research(question, mode, baseUrl, maxTurns).summary());
+            System.out.println("\n=== RESEARCH ===\n" + ("fan".equalsIgnoreCase(mode)
+                    ? researchFan(question, baseUrl, maxTurns)
+                    : research(question, mode, baseUrl, maxTurns)).summary());
             System.exit(0);
         }
         if (args.length >= 2 && args[0].equals("investigate")) {
@@ -594,6 +718,77 @@ public final class FamiliarMain {
         return (args.length > idx && !args[idx].isBlank()) ? args[idx] : DEFAULT_DRIVE;
     }
 
+    /**
+     * The reverse prompt: what a person would have typed to get this repo. Context is deliberately
+     * shallow — a depth-1 tree, the README's head, the detected shape — because the point is the
+     * prompt someone types BEFORE the code exists, and deep source detail leaks the answer into
+     * the question.
+     */
+    static int reverse(Path root, String driveUrl) {
+        if (!Files.isDirectory(root)) {
+            System.err.println("reverse: not a directory: " + root);
+            return 2;
+        }
+        StringBuilder ctx = new StringBuilder();
+        ctx.append("language: ").append(org.codezaiku.shape.ProjectFacts.language(root)).append('\n');
+        ctx.append("top-level entries:\n");
+        try (var st = Files.list(root)) {
+            st.map(x -> x.getFileName().toString())
+              .filter(n -> !n.startsWith(".") && !n.equals("build") && !n.equals("node_modules"))
+              .sorted().limit(40)
+              .forEach(n -> ctx.append("  ").append(n).append('\n'));
+        } catch (IOException e) {
+            System.err.println("reverse: cannot list " + root + ": " + e.getMessage());
+            return 2;
+        }
+        for (String rd : new String[]{"README.md", "README", "readme.md"}) {
+            Path f = root.resolve(rd);
+            if (Files.isRegularFile(f)) {
+                try {
+                    String txt = Files.readString(f);
+                    ctx.append("README (head):\n")
+                       .append(txt, 0, Math.min(txt.length(), 4000)).append('\n');
+                } catch (IOException ignored) { }
+                break;
+            }
+        }
+        var drive = new DriveClient(driveUrl, MODEL);
+        var msgs = drive.json().createArrayNode();
+        msgs.addObject().put("role", "system").put("content",
+                "You turn an existing software project into the single prompt its author would have "
+                + "typed to an AI coding agent to build it from scratch. Write ONE short, "
+                + "conversational request in the first person — the features and constraints that "
+                + "matter, nothing else. Never mention that a repository, README or existing code "
+                + "exists; write as if the project does not yet.");
+        msgs.addObject().put("role", "user").put("content", ctx.toString());
+        String prompt = drive.classify(msgs, 700);
+        if (prompt == null || prompt.isBlank()) {
+            System.err.println("reverse: the drive returned nothing — is a model server at " + driveUrl + "?");
+            return 1;
+        }
+        System.out.println(prompt.strip());
+        return 0;
+    }
+
+    /**
+     * {@code --name value} from argv, or {@code def} when the flag is absent.
+     *
+     * <p>A flag present with NO value is an error, not a silent fallback. `--drive` with nothing
+     * after it used to quietly mean "use localhost:8200", so a typed-but-incomplete command looked
+     * like it had worked and then failed later against a server the user had not asked for. Saying
+     * so costs one line and saves the confusion.
+     */
+    static String flag(String[] args, String name, String def) {
+        for (int i = 0; i < args.length; i++) {
+            if (!args[i].equals(name)) continue;
+            if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+                throw new IllegalArgumentException(name + " needs a value");
+            }
+            return args[i + 1];
+        }
+        return def;
+    }
+
     private static void usage() {
         System.err.println("""
             codezaiku — a harness for driving small local models through real work
@@ -602,12 +797,29 @@ public final class FamiliarMain {
               codezaiku <command> [args]        every command takes the model server as an
                                                 optional trailing argument (default: %s)
 
+            CHAT — sit down and talk to it (no host, no editor, no browser)
+              chat [project] [--mode ask] [--drive URL] [--from ID] [--max-turns N]
+                                                a conversation in one project. Just talk — it asks
+                                                before writing or running anything, and remembers
+                                                what you allow. Modes: plan (never acts) ·
+                                                ask (default) · auto-edit · yolo (never asks).
+              v1 [project] [--port 7071] [--host 127.0.0.1] [--drive URL]
+                                                the same conversation as an OpenAI-compatible
+                                                /v1/chat/completions endpoint (Open WebUI is the
+                                                GUI). Read-only tools: this wire cannot ask
+                                                permission, so nothing that needs it is offered.
+              sessions list|export|import [project] [--out F] [--force]
+                                                the chat store as an archive: export is backup,
+                                                import is restore (never overwrites unless --force).
+
             CODING — edit and maintain a project
               code|loop <project> <goal|@file> [drive] [maxTurns]
                                                 work on a project until the goal is met
               decompose <project> <goal|@file> [drive] [maxTurns]
                                                 same, with an explicit TODO the loop tracks
               review <project> [gitRef] [drive] read-only code review -> findings, no edits
+              reverse [project] [--drive URL]   the repo, backwards: the one prompt that would
+                                                have vibe-coded it from scratch
 
             OPERATIONS — keep a stack healthy
               fix <scope> [ceiling] [incident]  diagnose and repair. scope: <compose-project>,
@@ -1916,7 +2128,7 @@ public final class FamiliarMain {
     }
 
     /** The framework-knowledge Library index dir (the Lucene `library` collection). */
-    static Path libraryIndexDir() {
+    public static Path libraryIndexDir() {
         String env = Config.get("CODEZAIKU_OCEAN_DIR");
         Path ocean = (env != null && !env.isBlank()) ? Path.of(env)
                 : Config.home().resolve("ocean");
@@ -2321,6 +2533,101 @@ public final class FamiliarMain {
      * queries, skim many sources, report options/comparisons/consensus. {@code depth}: few queries, read the
      * best sources thoroughly, answer one narrow question with cited evidence. Read-only + web tools.
      */
+    /**
+     * FAN-OUT research: decompose → parallel workers with fresh contexts → a critic that owns the
+     * stop decision → synthesis. The lever the 2026-07 "harness levers exhausted" verdict could not
+     * pull, because it was measured under one sequential loop: breadth questions (WideSearch's
+     * whole shape) ground one context through facet after facet, each paying for all the others'
+     * history. Here each sub-question gets its OWN loop and window (the deep-research-harness
+     * shape, reviewed 2026-08-29), the fan-out is deterministic code — one worker per open
+     * sub-question, never model-decided — and another round happens only when the CRITIC says
+     * coverage is missing, not when the generator feels done (the held-out-grader lesson, applied
+     * at runtime).
+     */
+    public static FamiliarLoop.Result researchFan(String question, String baseUrl, int maxTurns) {
+        var drive = new DriveClient(baseUrl, MODEL);
+        int workers = Config.getInt("CODEZAIKU_RESEARCH_WORKERS", 4);
+        int workerTurns = Config.getInt("CODEZAIKU_RESEARCH_WORKER_TURNS", 14);
+        int maxRounds = Config.getInt("CODEZAIKU_RESEARCH_ROUNDS", 2);
+        var json = new ObjectMapper();
+
+        // 1. Decompose — one deterministic call, JSON out. On any parse failure the question
+        //    itself is the single sub-question and this degrades to depth-research + synthesis.
+        java.util.List<String> open = new java.util.ArrayList<>();
+        try {
+            var msgs = json.createArrayNode();
+            msgs.addObject().put("role", "user").put("content",
+                    "Decompose this research question into 3-8 SELF-CONTAINED sub-questions that "
+                    + "could each be researched independently by someone who sees nothing else. "
+                    + "Cover every facet; where the question asks the same facts about many items, "
+                    + "group items into a few sub-questions rather than one each. Answer with a "
+                    + "JSON array of strings and nothing else.\n\nQUESTION:\n" + question);
+            String raw = drive.classify(msgs, 1200);
+            var arr = json.readTree(raw.substring(raw.indexOf('['), raw.lastIndexOf(']') + 1));
+            for (var q : arr) if (q.isTextual() && !q.asText().isBlank()) open.add(q.asText());
+        } catch (Exception e) {
+            System.err.println("fan: decompose unparseable — degrading to single sub-question");
+        }
+        if (open.isEmpty()) open.add(question);
+        System.err.println("fan: " + open.size() + " sub-questions, " + workers + " workers");
+
+        var findings = new java.util.ArrayList<String>();
+        for (int round = 1; round <= maxRounds && !open.isEmpty(); round++) {
+            // 2. Parallel workers — fresh depth-loop per sub-question. The pool caps concurrency;
+            //    a worker that dies contributes an honest "unavailable" line, not silence.
+            var pool = java.util.concurrent.Executors.newFixedThreadPool(Math.min(workers, open.size()));
+            var futures = new java.util.ArrayList<java.util.concurrent.Future<String>>();
+            for (String sub : open) {
+                futures.add(pool.submit(() -> {
+                    try {
+                        var r = research(sub + "\n\nEnd your answer with the URLs of the sources "
+                                + "you actually used, one per line.", "depth", baseUrl, workerTurns);
+                        String sum = r.summary() == null ? "" : r.summary();
+                        return "SUB-QUESTION: " + sub + "\nFINDINGS:\n"
+                                + (sum.length() > 3500 ? sum.substring(0, 3500) + " …[truncated]" : sum);
+                    } catch (Exception e) {
+                        return "SUB-QUESTION: " + sub + "\nFINDINGS: unavailable (worker failed: "
+                                + e.getMessage() + ")";
+                    }
+                }));
+            }
+            pool.shutdown();
+            for (var f : futures) {
+                try { findings.add(f.get(30, java.util.concurrent.TimeUnit.MINUTES)); }
+                catch (Exception e) { findings.add("SUB-QUESTION: (timed out)\nFINDINGS: unavailable"); }
+            }
+            open.clear();
+            if (round == maxRounds) break;
+
+            // 3. The critic — no tools, and ITS verdict decides another round, not the workers'.
+            try {
+                var msgs = json.createArrayNode();
+                msgs.addObject().put("role", "user").put("content",
+                        "You are reviewing research coverage, not writing the answer.\n\nQUESTION:\n"
+                        + question + "\n\nFINDINGS SO FAR:\n" + String.join("\n\n", findings)
+                        + "\n\nIs this enough to answer the question COMPLETELY? Answer with JSON "
+                        + "only: {\"sufficient\": true} or {\"sufficient\": false, \"missing\": "
+                        + "[\"<sub-question>\", ...]} (at most 4, each self-contained).");
+                String raw = drive.classify(msgs, 800);
+                var v = json.readTree(raw.substring(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+                if (!v.path("sufficient").asBoolean(true)) {
+                    for (var q : v.path("missing")) if (q.isTextual()) open.add(q.asText());
+                    System.err.println("fan: critic wants " + open.size() + " more (round " + (round + 1) + ")");
+                }
+            } catch (Exception e) {
+                System.err.println("fan: critic unparseable — stopping rounds");
+            }
+        }
+
+        // 4. Synthesis — the normal research loop, seeded with the findings as its notes. Tools
+        //    stay available for verifying a doubtful cell, but the work is assembly.
+        String synthGoal = question
+                + "\n\nRESEARCH NOTES already gathered by parallel sub-investigations (treat as "
+                + "your own notes; verify only what looks doubtful, then ASSEMBLE the complete "
+                + "answer):\n\n" + String.join("\n\n", findings);
+        return research(synthGoal, "broad", baseUrl, Math.min(maxTurns, 15));
+    }
+
     public static FamiliarLoop.Result research(String question, String mode, String baseUrl, int maxTurns) {
         boolean broad = !"depth".equalsIgnoreCase(mode);
         String shape = broad

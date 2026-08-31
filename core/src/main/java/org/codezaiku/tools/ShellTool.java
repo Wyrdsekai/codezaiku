@@ -108,6 +108,21 @@ public final class ShellTool implements Tool {
         return cmd != null && GIT_WRITE.matcher(cmd).find();
     }
 
+    /**
+     * True if {@code cmd} only READS — the same judgement read-only mode enforces at
+     * {@link #execute}, exposed so a consent layer can decide whether to interrupt for it.
+     *
+     * <p>One pattern, two callers, on purpose. A separate list of "safe commands" in the chat layer
+     * would drift from what the tool actually refuses, and the direction it drifts in is the
+     * dangerous one: asking about something harmless is an annoyance, while staying silent about
+     * something this tool would have blocked is a hole.
+     *
+     * <p>A blank or absent command is NOT read-only — an unknown shape is treated as mutating.
+     */
+    public static boolean isReadOnly(String cmd) {
+        return cmd != null && !cmd.isBlank() && !RO_WRITE.matcher(cmd).find();
+    }
+
     // Commands that MODIFY files — refused in read-only mode (a review/investigate must not touch
     // the code). Allows redirects to /dev/null, /tmp/, and fd-dups (2>&1); blocks writes to project files.
     private static final Pattern RO_WRITE = Pattern.compile(

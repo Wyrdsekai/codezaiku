@@ -177,6 +177,34 @@ public final class FamiliarLoop {
         return this;
     }
     /**
+     * CHAT mode: a person is on the other end, and one {@code task_done} ends the turn.
+     *
+     * <p>Fourth instance of the disease {@link #research()}, {@link #report()} and
+     * {@link #artifact()} carry, and the worst-mannered of the four. The self-verify reflection is
+     * injected as a user-role message, so in a conversation the model attributes it to the PERSON —
+     * measured live, first real planning chat: the operator asked one question; the model answered it well
+     * and called {@code task_done} at turn 3; the reflection then injected the coding-verification
+     * protocol, and the model responded <i>"the user has provided a massive, highly specific
+     * verification protocol"</i>, apologised to the operator for instructions never sent, burned
+     * three more turns re-reading files it had already read, and finally manufactured a
+     * {@code gradle init} nobody asked for — leaving a person at an approval prompt for an action
+     * with no author.
+     *
+     * <p>In chat the human IS the verifier: they are looking at the answer, and the next thing they
+     * type is the reflection. The deadline turn stays on — a turn that ends with nothing said is
+     * still the worst outcome.
+     */
+    public FamiliarLoop chat() {
+        this.selfVerifyOn = false;
+        this.driveGate = false;
+        this.bootGate = false;
+        this.deadlineTurn = true;
+        this.chatMode = true;
+        return this;
+    }
+    private boolean chatMode = false;
+
+    /**
      * ARTIFACT mode: the deliverable is a single named file, and there is nothing to verify beyond
      * its existence and content.
      *
@@ -216,6 +244,14 @@ public final class FamiliarLoop {
         return this;
     }
     private boolean researchBlockBounced = false;
+    private int consecutiveDriveFailures = 0;  // reset on any successful drive call
+    /** Consecutive drive failures before the run stops instead of retrying. A failing endpoint
+     *  under "unlimited turns" is an unbounded tight retry loop — measured 2026-08-29: a
+     *  misconfigured HOSTED drive 404'd and the loop spun 2,600+ turns in seconds. Against a
+     *  paid API that pattern is a money pump; against any drive it is noise. */
+    static final int MAX_CONSECUTIVE_DRIVE_FAILURES = 8;
+    private boolean mutatingCallRan = false;   // any write_file/edit_file/shell this run
+    private boolean falseWriteBounced = false; // the chat false-write bounce fires once
     private boolean proseAnswerNext = false;   // next turn is tool_choice="none"; its prose IS the answer
     // EPILOGUE (research): when the DEADLINE turn's forced task_done arrives without the artifact the
     // question demands, the normal artifact bounce can't fire (no turns left) and the run used to end with
@@ -1701,10 +1737,27 @@ public final class FamiliarLoop {
         // The growing conversation: the action/observation transcript. The pinned ground truth
         // (instructions + current shape + goal) is regenerated into a fresh system message each turn.
         ArrayNode history = j.createArrayNode();
+        // The kickoff names what finishing MEANS, and that differs by deliverable. The coding form
+        // says "met and verified (build + tests pass)" — for a conversational turn that goal can
+        // never be met by talking, so a model told to work toward it concludes it must implement.
+        // Measured live, twice: asked to DISCUSS a plan, the model asked excellent clarifying
+        // questions, then said "since I cannot wait, I will make a reasonable assumption", answered
+        // its own questions, and started writing entity classes into the host repository. The chat
+        // kickoff makes the reply itself the deliverable, and open questions the way a turn ends.
         history.addObject().put("role", "user")
-                .put("content", "Begin. Work toward the goal using the tools. When it is met and you have "
-                        + "verified it (build + your own tests pass), call task_done."
-                        + (multiConcern ? planRequestInstruction() : ""));
+                .put("content", chatMode
+                        ? "This is one turn of a conversation; the person replies after it. Your "
+                          + "deliverable THIS TURN is your reply — an answer, a plan, or the "
+                          + "questions you need answered. Deliver exactly what was asked and then "
+                          + "finish the turn: when the person asks for a plan, the plan IS the "
+                          + "deliverable, and implementing it is the NEXT turn's work, after they "
+                          + "have read it. Use tools only where the reply needs "
+                          + "them. When the reply is ready, call task_done with the FULL reply as "
+                          + "the summary. Anything you still need from the person belongs in the "
+                          + "reply as a question — asking and finishing the turn IS completing it."
+                        : "Begin. Work toward the goal using the tools. When it is met and you have "
+                          + "verified it (build + your own tests pass), call task_done."
+                          + (multiConcern ? planRequestInstruction() : ""));
 
         try {
         for (int turn = 1; turn <= maxTurns + epilogueTurns; turn++) {
@@ -1926,6 +1979,16 @@ public final class FamiliarLoop {
                             + "Use a model server with a bigger window, set CODEZAIKU_CTX to the real one, "
                             + "or run against a narrower directory.", turn);
                 }
+                if (++consecutiveDriveFailures >= MAX_CONSECUTIVE_DRIVE_FAILURES) {
+                    log.error("turn {}: {} consecutive drive failures — the endpoint is not serving "
+                            + "this request shape. Stopping instead of retrying forever. Last: {}",
+                            turn, consecutiveDriveFailures, e.getMessage());
+                    return new Result(false, org.codezaiku.run.ResultDocument.UNRECOVERABLE
+                            + " the drive failed " + consecutiveDriveFailures + " times in a row ("
+                            + String.valueOf(e.getMessage()).replaceAll("\s+", " ")
+                            + "). Check CODEZAIKU_DRIVE — for hosted APIs the base URL takes no "
+                            + "path (use https://api.anthropic.com, not .../v1).", turn);
+                }
                 log.warn("turn {}: drive call failed — nudging and continuing: {}", turn, e.getMessage());
                 // DISTINGUISH the two failure modes. llama.cpp's tool-call parser CRASHES on an oversized
                 // argument (a write_file with a big content blob — a whole data fixture, a long file): the
@@ -1950,6 +2013,7 @@ public final class FamiliarLoop {
                 continue;
             }
             history.add(assistant);
+            consecutiveDriveFailures = 0;
             observePlan(assistant.path("content").asText("")); // parse the plan (orientation only)
 
             if (proseAnswerTurn) {
@@ -1973,9 +2037,24 @@ public final class FamiliarLoop {
 
             if (planTurn) {
                 // Intentionally prose-only — the plan is now parsed; switch to execution next turn.
-                log.info("  ↳ planning turn → {} steps parsed; executing", planSteps.size());
-                history.addObject().put("role", "user")
-                        .put("content", "Now execute the plan — start with step 1, using the tools.");
+                //
+                // EXCEPT in chat. This line was the plan-restraint bug the conversation battery
+                // kept failing on THREE models identically (2026-08-29): after the person said
+                // "write ONLY PLAN.md — no code", the models wrote a prose plan here — and then
+                // THIS instruction ordered them to execute it. Three K=3 prompt-lever flips all
+                // failed because the pressure was never in the prompts; it was this harness line.
+                // In chat the person is the executor's trigger: hand the turn back to what THEY
+                // asked for, and let implementation wait for the turn where they ask.
+                log.info("  ↳ planning turn → {} steps parsed; {}", planSteps.size(),
+                        chatMode ? "chat: back to the ask" : "executing");
+                history.addObject().put("role", "user").put("content", chatMode
+                        ? "That is the plan. Now finish THIS turn in order: FIRST, when the "
+                          + "message asked for the plan in a file, create that file with "
+                          + "write_file and the full plan as its content. THEN call task_done "
+                          + "with the plan as the reply. (task_done reports what already "
+                          + "happened — a file only exists after a write_file call succeeds.) "
+                          + "Start building only if the message asked you to build."
+                        : "Now execute the plan — start with step 1, using the tools.");
                 continue;
             }
 
@@ -1989,6 +2068,7 @@ public final class FamiliarLoop {
                 continue;
             }
 
+            int batchStart = history.size();
             for (var call : calls) {
                 String name = call.path("function").path("name").asText();
                 String id = call.path("id").asText();
@@ -2002,6 +2082,10 @@ public final class FamiliarLoop {
                 // SAME command forever (curl a dead port 283×, pip install 291×). Block the duplicate to
                 // force a different action. task_done is exempt (model decides done).
                 boolean control = TaskDoneTool.NAME.equals(name) || TaskBlockedTool.NAME.equals(name);
+                if (!control && ("write_file".equals(name) || "edit_file".equals(name)
+                        || "shell".equals(name))) {
+                    mutatingCallRan = true;   // ground truth for the chat false-write bounce
+                }
                 String sig = spinKey(name, args, argsRaw);
                 int spins = control ? 0 : callCounts.merge(sig, 1, Integer::sum);
                 String spinReframe = null; // contextual recovery to push once, after the tool result
@@ -2343,6 +2427,25 @@ public final class FamiliarLoop {
                 }
 
                 if (TaskDoneTool.NAME.equals(name)) {
+                    // CHAT FALSE-WRITE BOUNCE: the summary claims a file was written, and the run's
+                    // own ledger says nothing that can write ever ran. Measured 2026-08-29 (plan
+                    // flips 4-5, K=3 each): after the chat planning turn the 27B answered "Wrote
+                    // PLAN.md with the full plan" having called ONLY task_done — the person would
+                    // read a confident claim about a file that does not exist. Machine-computed
+                    // evidence outranks the model's account: bounce once with the fact, and let the
+                    // model either do the write or drop the claim. Same family as the findings and
+                    // artifact bounces below — it asks the model to use the door it was given.
+                    if (chatMode && !falseWriteBounced && !mutatingCallRan && turn < maxTurns
+                            && observationClaimsWrite(args.path("summary").asText(""))) {
+                        falseWriteBounced = true;
+                        log.info("  ↳ task_done claims a write; no mutating tool ran → one bounce");
+                        history.addObject().put("role", "user").put("content",
+                                "Your reply says a file was written, but no file-writing tool ran this "
+                                + "turn — the file does not exist. Either create it now with write_file "
+                                + "and then call task_done, or call task_done with the reply corrected "
+                                + "to not claim a file was written.");
+                        break;
+                    }
                     // EPILOGUE: the DEADLINE turn's forced task_done arrived without the artifact — the
                     // normal bounce below has no turn left to act in, so the run used to ship a status
                     // description instead of the table (ws_en_028 regression: 40 turns of gathering, zero
@@ -2677,6 +2780,31 @@ public final class FamiliarLoop {
                     return new Result(false, "task_blocked: " + observation, turn);
                 }
             }
+            // PROTOCOL REPAIR, one site instead of twenty-eight: every path inside the loop above
+            // may interject a user-role message (nudges, reframes, library pushes), and in a
+            // PARALLEL tool batch that lands BETWEEN tool responses. llama.cpp tolerates it;
+            // Anthropic's compat layer refuses the whole request ("assistant message with
+            // 'tool_calls' must be followed by tool messages") — measured 2026-08-29: a 4-write
+            // fable-5 turn wedged the run at turn 6 and every later request 400'd on the same
+            // history. Stable-partition what the batch appended: tool responses first (their
+            // original order), then the interjections (theirs).
+            if (history.size() > batchStart) {
+                var batch = new java.util.ArrayList<JsonNode>();
+                for (int bi = batchStart; bi < history.size(); bi++) batch.add(history.get(bi));
+                boolean mixed = false;
+                for (int bi = 1; bi < batch.size(); bi++) {
+                    if ("tool".equals(batch.get(bi).path("role").asText())
+                            && !"tool".equals(batch.get(bi - 1).path("role").asText())) {
+                        mixed = true;
+                        break;
+                    }
+                }
+                if (mixed) {
+                    while (history.size() > batchStart) history.remove(history.size() - 1);
+                    for (JsonNode m : batch) if ("tool".equals(m.path("role").asText())) history.add(m);
+                    for (JsonNode m : batch) if (!"tool".equals(m.path("role").asText())) history.add(m);
+                }
+            }
         }
         restoreBestGreen();      // capped run: if it hit green then thrashed, ship the green state
         restoreBestArtifact();   // capped run: still ship the best adapter, not the last thrash
@@ -2692,12 +2820,54 @@ public final class FamiliarLoop {
         }
     }
 
+    /** Does this summary tell the person a file was created? Conservative on purpose: a named
+     *  file with an extension next to a write-verb. Misses cost nothing (no bounce); false
+     *  positives cost one bounce turn. */
+    static boolean observationClaimsWrite(String summary) {
+        return java.util.regex.Pattern.compile(
+                "(?i)\\b(wrote|created|saved|written to|added)\\b[^.\\n]{0,40}?\\b[\\w][\\w./-]*\\.[A-Za-z]{1,6}\\b")
+                .matcher(summary).find();
+    }
+
     private String systemPrompt() {
-        return """
+        // In CHAT the mission line changes, and it must change HERE: the opening "make every
+        // message a tool call that does real work" out-shouts any later kickoff. Measured
+        // 2026-08-29: with only a user-role kickoff amendment, three different models asked to
+        // "write ONLY PLAN.md — no code" built and tested the whole service (the battery's plan
+        // trio, identical fails on all three). The rules below stay: they govern HOW to act on
+        // the turns where acting is what was asked.
+        String mission = chatMode
+                ? """
+                You are a coding familiar in a conversation with a person. This turn's deliverable is
+                your REPLY — an answer, a plan, cited findings, or the questions you need answered.
+                Match the work to the ask: do exactly what THIS message asks and finish the turn. When
+                it asks for a plan or an opinion, produce that and stop — code is written on the turn
+                the person asks for it. When it asks you to build or change something, act with tools.
+                When it asks a question whose answer needs outside facts, research it: web_search and
+                web_fetch for a focused lookup, or delegate with kind=research for a broad question —
+                and give your findings WITH the source URLs. When the person says to build what the
+                conversation has decided, compose the complete task from the DECISIONS and notes in
+                your context — every constraint they stated — and implement it, or delegate it when
+                it is large and self-contained. When their request conflicts with a recorded
+                decision, a project memory, a working agreement, or evidence you have seen, SAY
+                the conflict plainly at the start of your reply — then do what they ask; they
+                decide, but never silently. When a durable fact surfaces — a stated preference, a
+                trap that cost real time, a decision with lasting scope — offer it to the remember
+                tool so future sessions start knowing it.
+                """
+                : """
                 You are a coding familiar. You build and repair real software by calling tools.
                 Act with tools — make every message a tool call that does real work on disk or runs a real command.
-
-                Rules:
+                """;
+        // The rules below are all implementation pressure ("verify your own work", "write the
+        // tests"). Right for a goal-shaped run; in chat they must apply only to the turns that
+        // ask for code — left unscoped they overrode BOTH mission variants above: K=3 measured,
+        // "write ONLY PLAN.md" still produced a tested FastAPI app every time.
+        String rulesHeader = chatMode
+                ? "\nRules for turns where the person asked you to build or change code (a turn "
+                  + "that asks for a plan, an answer or an opinion is finished by REPLYING):\n"
+                : "\nRules:\n";
+        return mission + rulesHeader + """
                 - Use paths RELATIVE to the project root, where the build runs and every shell command
                   starts. Keep the WHOLE app in ONE directory tree and build from there: by default the
                   project root and the standard source layout for your stack. When the spec names a delivery

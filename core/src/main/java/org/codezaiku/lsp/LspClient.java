@@ -238,6 +238,68 @@ public final class LspClient implements AutoCloseable {
         }
     }
 
+    /** One code location, 0-based line, from a definition/references answer. */
+    public record Loc(String path, int line) {
+    }
+
+    /**
+     * Where the symbol at {@code line:character} (0-based) is defined, via
+     * {@code textDocument/definition} — and {@link #references} via {@code textDocument/references}.
+     * Both are implemented by every mainstream language server, same as documentSymbol above, so
+     * they are language-general by construction. Empty list when unavailable, never an error: nav
+     * is an assist, and a missing language server must not cost a turn.
+     *
+     * <p>Built because sourcebot made the gap visible: IDE-grade code nav was its headline feature,
+     * and this client had the whole transport for it with nothing wired on top — the same
+     * door-with-no-corridor shape the wyrdsekai access audit found.
+     */
+    public List<Loc> definition(Path file, String text, int line, int character) {
+        return locate("textDocument/definition", file, text, line, character, false);
+    }
+
+    /** Everywhere the symbol at {@code line:character} is used. Includes the declaration. */
+    public List<Loc> references(Path file, String text, int line, int character) {
+        return locate("textDocument/references", file, text, line, character, true);
+    }
+
+    private List<Loc> locate(String method, Path file, String text, int line, int character,
+                             boolean includeDecl) {
+        if (dead) return List.of();
+        if (!started) start();
+        if (!started) return List.of();
+        String fileUri = uri(file.toAbsolutePath().normalize());
+        try {
+            int ver = versions.merge(fileUri, 1, Integer::sum);
+            if (ver == 1) didOpen(fileUri, text);
+            else didChange(fileUri, ver, text);
+            ObjectNode params = J.createObjectNode();
+            params.putObject("textDocument").put("uri", fileUri);
+            params.putObject("position").put("line", line).put("character", character);
+            if (includeDecl) params.putObject("context").put("includeDeclaration", true);
+            String id = request(method, params);
+            JsonNode resp = await(id, 20_000);
+            if (resp == null) return List.of();
+            List<Loc> out = new ArrayList<>();
+            JsonNode result = resp.path("result");
+            // Location | Location[] | LocationLink[] — servers use all three shapes.
+            if (result.isObject()) collectLoc(result, out);
+            else for (JsonNode n : result) collectLoc(n, out);
+            return out;
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    private static void collectLoc(JsonNode n, List<Loc> out) {
+        String u = n.hasNonNull("uri") ? n.get("uri").asText()
+                : n.path("targetUri").asText(null);
+        JsonNode range = n.has("range") ? n.path("range") : n.path("targetRange");
+        int line = range.path("start").path("line").asInt(-1);
+        if (u != null && u.startsWith("file://") && line >= 0) {
+            out.add(new Loc(u.substring("file://".length()), line));
+        }
+    }
+
     // Handles both shapes: DocumentSymbol (hierarchical, .range + .children) and SymbolInformation
     // (flat, .location.range). Recurses children so nested methods are reachable.
     private static void collectSymbols(JsonNode node, List<Sym> out) {

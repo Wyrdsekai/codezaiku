@@ -48,6 +48,45 @@ public final class WebSearchTool implements Tool {
         return (e == null || e.isBlank()) ? "http://localhost:8888" : e.replaceAll("/+$", "");
     }
 
+    /**
+     * Brave Search API, first choice when a key is configured. Measured reason (2026-08-29,
+     * first probe of each backend, same query): SearXNG's surviving free engine put spam at
+     * ranks 1-2 with brave/ddg/startpage rate-limited or CAPTCHA'd; the Brave API returned the
+     * paper, the official site and the dataset as its top three. Falls back to SearXNG on ANY
+     * failure — a search tool that dies with its billing dies at the worst moment.
+     * Returns null when Brave is unconfigured or unusable, and the caller falls through.
+     */
+    private String braveSearch(String query, int limit) {
+        String key = Config.get("CODEZAIKU_BRAVE_KEY");
+        if (key == null || key.isBlank()) return null;
+        try {
+            HttpResponse<String> resp = HTTP.send(HttpRequest.newBuilder(URI.create(
+                            "https://api.search.brave.com/res/v1/web/search?count="
+                            + Math.min(limit, 20) + "&q="
+                            + URLEncoder.encode(query, StandardCharsets.UTF_8)))
+                    .timeout(Duration.ofSeconds(20))
+                    .header("Accept", "application/json")
+                    .header("X-Subscription-Token", key.strip())
+                    .GET().build(), HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) return null;   // 401/429/5xx → SearXNG carries on
+            JsonNode rs = M.readTree(resp.body()).path("web").path("results");
+            if (!rs.isArray() || rs.isEmpty()) return null;
+            StringBuilder sb = new StringBuilder("results for \"" + query + "\":\n");
+            for (int i = 0; i < rs.size() && i < limit; i++) {
+                JsonNode r = rs.get(i);
+                String desc = r.path("description").asText("").replaceAll("<[^>]+>", "")
+                        .replaceAll("\\s+", " ").strip();
+                if (desc.length() > 240) desc = desc.substring(0, 240) + "…";
+                sb.append(i + 1).append(". ").append(r.path("title").asText("")).append('\n')
+                  .append("   ").append(r.path("url").asText("")).append('\n');
+                if (!desc.isEmpty()) sb.append("   ").append(desc).append('\n');
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     @Override public String name() { return "web_search"; }
 
     @Override public String description() {
@@ -87,6 +126,17 @@ public final class WebSearchTool implements Tool {
             return "ALREADY SEARCHED: you already ran this exact query; its results are above in your history. "
                     + "Use a DIFFERENT query, web_fetch one of the results you have not read yet, or write your "
                     + "answer and call task_done.";
+        String brave = braveSearch(query, limit);
+        if (brave != null) {
+            if (!sweepNoted && looksBatched(query)) {
+                sweepNoted = true;
+                brave += "\nNOTE: this query names several distinct items at once — engines require ALL "
+                        + "terms, so batched queries surface homepages, not data. Search for ONE page "
+                        + "listing all the items (\"list of …\" / \"comparison of …\"), or query ONE "
+                        + "item at a time.";
+            }
+            return brave;
+        }
         String url = endpoint() + "/search?format=json&q=" + URLEncoder.encode(query, StandardCharsets.UTF_8);
         JsonNode body = null;
         // The free upstream engines rate-limit under sustained load, and SearXNG then SUSPENDS them —
