@@ -39,6 +39,18 @@ public final class McpServer {
 
     private McpServer() { }
 
+    /** Only tools whose name passes this are listed or callable; null = all. Set by `librarian mcp`. */
+    private static volatile java.util.function.Predicate<String> toolFilter = null;
+
+    /** Restrict every entry point (stdio and the daemon's /rpc) to the tools {@code filter} admits. */
+    public static void setToolFilter(java.util.function.Predicate<String> filter) { toolFilter = filter; }
+
+    /** Serve MCP over stdio with only the tools {@code filter} admits — `codezaiku librarian mcp`. */
+    public static void serveStdio(java.util.function.Predicate<String> filter) throws Exception {
+        toolFilter = filter;
+        serveStdio();
+    }
+
     /** Serve MCP over stdio until stdin closes. */
     public static void serveStdio() throws Exception {
         PrintStream protocol = System.out;          // protocol owns the real stdout
@@ -50,30 +62,39 @@ public final class McpServer {
             if (line.isBlank()) continue;
             JsonNode req;
             try { req = M.readTree(line); } catch (Exception e) { continue; }
-            JsonNode id = req.get("id");
-            if (id == null || id.isNull()) continue;   // JSON-RPC notification -> no reply
-            String method = req.path("method").asText("");
-            ObjectNode env = M.createObjectNode();
-            env.put("jsonrpc", "2.0");
-            env.set("id", id);
-            try {
-                env.set("result", handle(method, req.path("params")));
-            } catch (RpcError e) {
-                env.set("error", rpcError(e.code, e.getMessage()));
-            } catch (Exception e) {
-                env.set("error", rpcError(-32603, "internal error: " + e));
-            }
+            ObjectNode env = envelopeFor(req);
+            if (env == null) continue;   // JSON-RPC notification -> no reply
             protocol.println(M.writeValueAsString(env));
             protocol.flush();
         }
     }
 
-    private static JsonNode handle(String method, JsonNode params) {
+    /** One request → its JSON-RPC envelope (result or error), or null for a notification. */
+    public static ObjectNode envelopeFor(JsonNode req) {
+        JsonNode id = req.get("id");
+        if (id == null || id.isNull()) return null;
+        String method = req.path("method").asText("");
+        ObjectNode env = M.createObjectNode();
+        env.put("jsonrpc", "2.0");
+        env.set("id", id);
+        try {
+            env.set("result", handle(method, req.path("params")));
+        } catch (RpcError e) {
+            env.set("error", rpcError(e.code, e.getMessage(), e.data));
+        } catch (Exception e) {
+            env.set("error", rpcError(-32603, "internal error: " + e));
+        }
+        return env;
+    }
+
+    static JsonNode handle(String method, JsonNode params) {
         switch (method) {
             case "initialize": {
                 ObjectNode r = M.createObjectNode();
                 r.put("protocolVersion", PROTOCOL_VERSION);
-                r.set("capabilities", M.createObjectNode().<ObjectNode>set("tools", M.createObjectNode()));
+                ObjectNode caps = M.createObjectNode();
+                caps.set("tools", M.createObjectNode());
+                r.set("capabilities", caps);
                 ObjectNode info = M.createObjectNode();
                 info.put("name", "codezaiku");
                 info.put("version", "0.1");
@@ -94,6 +115,16 @@ public final class McpServer {
     }
 
     private static JsonNode toolsList() {
+        ArrayNode all = allTools();
+        if (toolFilter == null) { ObjectNode r = M.createObjectNode(); r.set("tools", all); return r; }
+        ArrayNode kept = M.createArrayNode();
+        for (JsonNode t : all) if (toolFilter.test(t.get("name").asText())) kept.add(t);
+        ObjectNode r = M.createObjectNode();
+        r.set("tools", kept);
+        return r;
+    }
+
+    private static ArrayNode allTools() {
         ArrayNode tools = M.createArrayNode();
         tools.add(tool("code",
                 "Run CodeZaiku's coding familiar on an existing project: it reads the codebase, edits files, "
@@ -194,13 +225,12 @@ public final class McpServer {
                 + "the job is done/failed.",
                 schema(new String[]{"jobId"},
                         prop("jobId", "string", "The job id returned when a tool was submitted with async:true."))));
-        ObjectNode r = M.createObjectNode();
-        r.set("tools", tools);
-        return r;
+        return tools;
     }
 
     private static JsonNode toolsCall(JsonNode params) {
         String name = params.path("name").asText("");
+        if (toolFilter != null && !toolFilter.test(name)) throw new RpcError(-32601, "unknown tool: " + name);
         JsonNode args = params.path("arguments");
         if ("job_status".equals(name)) return jobStatus(args);
         // ASYNC mode ({"async": true}): submit the (minutes-long) work to a background job and return a job id
@@ -278,8 +308,8 @@ public final class McpServer {
                     String mode = args.path("mode").asText("broad");
                     int maxTurns = args.path("maxTurns").asInt(30);
                     String drive = args.path("drive").asText(DEFAULT_DRIVE);
-                    return new JobRegistry.ToolResult(
-                            FamiliarMain.research(question, mode, drive, maxTurns).summary(), false);
+                    var res = FamiliarMain.research(question, mode, drive, maxTurns);
+                    return new JobRegistry.ToolResult(res.summary(), false);
                 }
                 case "research_memory": {
                     String q = args.hasNonNull("query") ? args.get("query").asText() : null;
@@ -325,6 +355,16 @@ public final class McpServer {
             case DONE -> toolContent("status: done (" + secs + "s)\n\n" + j.result(), j.isError());
             case FAILED -> toolContent("status: failed (" + secs + "s)\n\n" + j.result(), true);
         };
+    }
+
+
+    private static ObjectNode arrayProp(String name, String description) {
+        ObjectNode spec = M.createObjectNode();
+        spec.put("type", "array");
+        spec.put("description", description);
+        ObjectNode wrap = M.createObjectNode();
+        wrap.set(name, spec);
+        return wrap;
     }
 
     private static JsonNode toolContent(String text, boolean isError) {
@@ -375,15 +415,20 @@ public final class McpServer {
         return v.asText();
     }
 
-    private static ObjectNode rpcError(int code, String message) {
+    private static ObjectNode rpcError(int code, String message) { return rpcError(code, message, null); }
+
+    private static ObjectNode rpcError(int code, String message, String dataCode) {
         ObjectNode e = M.createObjectNode();
         e.put("code", code);
         e.put("message", message);
+        if (dataCode != null) e.putObject("data").put("code", dataCode);
         return e;
     }
 
     private static final class RpcError extends RuntimeException {
         final int code;
-        RpcError(int code, String msg) { super(msg); this.code = code; }
+        final String data;   // the library protocol's stable string code, or null
+        RpcError(int code, String msg) { this(code, msg, null); }
+        RpcError(int code, String msg, String data) { super(msg); this.code = code; this.data = data; }
     }
 }

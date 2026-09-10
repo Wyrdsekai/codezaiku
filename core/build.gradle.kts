@@ -10,6 +10,8 @@ dependencies {
     // transitive: it used to arrive via pekko-serialization-jackson, and when pekko went
     // this pin is what kept it.
     implementation("com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}")
+    // ResearchZosho, the research library, over HTTP: the published client, transport and types only
+    implementation("org.researchzosho:client:0.1.0")
 
     // JLine — line editing and history for `codezaiku chat`. One jar, no transitives, and the
     // same version the sibling project's CLI already uses. `chat` degrades to a plain reader when
@@ -21,6 +23,13 @@ dependencies {
     implementation("org.apache.lucene:lucene-core:10.4.0")
     implementation("org.apache.lucene:lucene-analysis-common:10.4.0")
     implementation("org.apache.lucene:lucene-queryparser:10.4.0")
+
+    // Apache PDFBox — PDF → text for web_fetch, the library's raw tier and `librarian add`.
+    // Pure Java, so it works on all three platforms without poppler/pdftotext on PATH (the
+    // household rule). the operator 2026-09-01: "pdf-to-text is an absolute" — two JA academic papers
+    // on the keigo shelf were found and could not be read. The other document formats (DOCX,
+    // PPTX, ODT, EPUB) are zip+XML and need no library — see tools/DocText.
+    implementation("org.apache.pdfbox:pdfbox:3.0.8")
 
     // HTTP client is java.net.http (JDK built-in) — no dependency.
 
@@ -57,6 +66,11 @@ tasks.test {
     // short-circuits it, so a test can build a loop offline. No test depends on the resolution
     // itself; anything that did would set its own value.
     environment("CODEZAIKU_CTX", "8192")
+    // The suite must never read the developer's household config: with CODEZAIKU_EMBED set in
+    // ~/.codezaiku/config, index tests reached the live embedder (2026-09-02). Explicitly off.
+    environment("CODEZAIKU_EMBED", "off")
+    environment("CODEZAIKU_RERANK", "off")
+    environment("CODEZAIKU_ENRICH", "both")
 }
 
 application {

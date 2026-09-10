@@ -117,6 +117,22 @@ public final class FamiliarLoop {
         return this;
     }
 
+    private BooleanSupplier finishEarly = () -> false;
+    private static final int FINISH_EARLY_MIN_TURN = 4;
+
+    /**
+     * THE STOP RULE's hook (search controller, second half): when {@code check} says the search
+     * is exhausted — no marginal gain, per the steerer — the loop brings the DEADLINE TURN
+     * forward: only task_done is offered, so the turn is spent writing the answer instead of
+     * opening one more page. Same mechanism the last turn already uses; nothing the model wanted
+     * is rejected — the exam ends when the patch is empty, not when the clock runs out. Never
+     * before turn {@value #FINISH_EARLY_MIN_TURN}, so a thin first sweep cannot end a run.
+     */
+    public FamiliarLoop finishEarlyIf(BooleanSupplier check) {
+        if (check != null) this.finishEarly = check;
+        return this;
+    }
+
     // ── PLAN ANCHOR (smallcode plan-then-execute) ──────────────────────────────────────────────────
     // No separate planner LLM call (that was brittle — a malformed JSON array aborted the whole run with
     // "PLAN FAILED"). Instead, for a multi-concern task we ask the model to emit a numbered PLAN in its
@@ -1960,7 +1976,10 @@ public final class FamiliarLoop {
             // dominant SimpleQA failure: 21/30 baseline runs produced nothing). On the last turn the only
             // tool offered is task_done, so the turn spends itself writing the answer instead of opening one
             // more page. Nothing the model wanted to do is rejected — the exam is simply over.
-            ArrayNode turnTools = (deadlineTurn && turn >= maxTurns) ? onlyTaskDone(toolSchemas) : toolSchemas;
+            boolean exhausted = deadlineTurn && turn >= FINISH_EARLY_MIN_TURN && turn < maxTurns
+                    && finishEarly.getAsBoolean();
+            if (exhausted) log.info("search exhausted (no marginal gain) → finishing turn brought forward at {}/{}", turn, maxTurns);
+            ArrayNode turnTools = (deadlineTurn && (turn >= maxTurns || exhausted)) ? onlyTaskDone(toolSchemas) : toolSchemas;
             ObjectNode assistant;
             // Last line of defence: never SEND a request that cannot fit. Compaction is a threshold
             // (70%) and the pinned block is budgeted, but a single large observation lands after both

@@ -53,12 +53,20 @@ def graded(answer_line: str, gold: str) -> bool:
     return g in a or a in g
 
 
+KNOB = "gapreflect"
+
+
 def run_one(q: str, arm: str, cp: str, drive: str, turns: int, workdir: pathlib.Path, timeout: int):
     qf = workdir / "question.txt"
     qf.write_text(q + ANSWER_TAIL, encoding="utf-8")
     env = dict(os.environ)
+    # --knob names WHAT the arms toggle: gapreflect (the 2026-07 A/B) or steer (the search
+    # controller, 2026-09: steerer notes + the exhausted-stop; CODEZAIKU_SEARCH_STEER=off).
     if arm == "off":
-        env["CODEZAIKU_GAPREFLECT"] = "off"
+        if KNOB == "steer":
+            env["CODEZAIKU_SEARCH_STEER"] = "off"
+        else:
+            env["CODEZAIKU_GAPREFLECT"] = "off"
     else:
         env.pop("CODEZAIKU_GAPREFLECT", None)
     # POOL ISOLATION: a shared research memory pool would carry arm A's harvested findings into arm B
@@ -66,7 +74,7 @@ def run_one(q: str, arm: str, cp: str, drive: str, turns: int, workdir: pathlib.
     # gap-reflection loop alone.
     env["CODEZAIKU_RESEARCH_POOL"] = str(workdir / f"pool-{arm}.jsonl")
     pathlib.Path(env["CODEZAIKU_RESEARCH_POOL"]).unlink(missing_ok=True)
-    cmd = ["timeout", "-k", "30", str(timeout), "java", "-cp", cp,
+    cmd = ["timeout", "-k", "30", str(timeout), os.environ.get("CODEZAIKU_JAVA", "java"), "-cp", cp,
            "org.codezaiku.FamiliarMain", "research", "@" + str(qf), "depth", drive, str(turns)]
     t0 = time.time()
     p = subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True)
@@ -100,6 +108,8 @@ def main():
     ap.add_argument("--drive", default="http://localhost:8200")
     ap.add_argument("--timeout", type=int, default=900, help="hard per-run wall clock (seconds)")
     ap.add_argument("--arms", default="off,on")
+    ap.add_argument("--knob", default="gapreflect", choices=["gapreflect", "steer"],
+                    help="what the arms toggle: gapreflect (2026-07) | steer (the search controller)")
     ap.add_argument("--pace", type=float, default=8.0,
                     help="seconds between runs — back-to-back runs rate-limit the free search upstreams")
     ap.add_argument("--cp", default=None, help="java classpath (default: ./gradlew :core:printCp)")
@@ -118,6 +128,8 @@ def main():
 
     results = []
     pace = a.pace
+    global KNOB
+    KNOB = a.knob
     for arm in a.arms.split(","):
         for i, row in enumerate(sample):
             q, gold = row["problem"], row["answer"]

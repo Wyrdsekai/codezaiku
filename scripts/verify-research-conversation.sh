@@ -57,6 +57,13 @@ if [ -n "$LOGF" ] && grep -aoP '(?<=query":")[^"]*' "$LOGF" 2>/dev/null | grep -
 else
     bad "issued queries in Japanese" "all queries were Latin-script (run log: $LOGF)"
 fi
+# BOTH sides (the operator, 2026-09-01: ): the session must have searched in English too — bilingual
+# research means both scripts appear across the session's queries, not a wholesale switch.
+if [ -n "$LOGF" ] && grep -aoP '(?<=query":")[^"]*' "$LOGF" 2>/dev/null | grep -qP '^[\x00-\x7f]+$'; then
+    ok "issued queries in English as well (bilingual, not switched)"
+else
+    bad "issued queries in English as well" "no ASCII-only query found (run log: $LOGF)"
+fi
 grep -qE 'https?://' "$WORK/turn.txt" && ok "sources cited (citation bounce holds)"     || bad "sources cited" "$(tail -3 "$WORK/turn.txt" | head -2)"
 
 echo "== 2. judgment over the findings"

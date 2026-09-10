@@ -329,6 +329,27 @@ A stdio MCP server (JSON-RPC 2.0) exposing every surface — coding, ops, securi
 tools. Use this when you want more than coding. Configure it in your host as a stdio MCP service with
 command `codezaiku` and args `["mcp"]`.
 
+**In Claude Code, register it per project, not per user.** The coding familiar belongs to a project;
+sessions elsewhere should not carry its tools. From inside the project:
+
+```bash
+claude mcp add --scope project codezaiku -- codezaiku mcp
+```
+
+which writes a `.mcp.json` next to the code that you can commit:
+
+```json
+{ "mcpServers": { "codezaiku": { "command": "codezaiku", "args": ["mcp"] } } }
+```
+
+The ops tools (`fix`, `serve`, `watch`, `investigate`) obey the authority ladder and default to
+`propose`: a session can diagnose and suggest, and nothing is restarted unless you raised the
+authority yourself (`codezaiku config set ops.authority guarded`).
+
+The research library, ResearchZosho, is a separate program with its own MCP server, and that one
+does belong at user scope — every session should be able to ask the shelves. Its setup registers it
+(`codezaiku install researchzosho`, or `researchzosho setup`); see researchzosho.org.
+
 ---
 
 ## 7. Operational notes

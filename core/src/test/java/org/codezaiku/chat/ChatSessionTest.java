@@ -14,6 +14,11 @@ import org.junit.jupiter.api.io.TempDir;
  */
 class ChatSessionTest {
 
+    // Restore, never clear: clearProperty("user.home") DELETES the JVM's real home for every
+    // test that runs after this class in the same JVM (caught 2026-09-01 — LibraryStore.open()
+    // NPE'd in a test that never touched sessions). Tests that fake home put the truth back.
+    private static final String REAL_HOME = System.getProperty("user.home");
+
     private ChatSession session(Path root) {
         return ChatSession.start(root, "add retry handling to the client");
     }
@@ -114,7 +119,7 @@ class ChatSessionTest {
             assertThat(Files.exists(s.stateFile())).isFalse();
             assertThat(Files.exists(s.transcriptFile())).isFalse();
         } finally {
-            System.clearProperty("user.home");
+            System.setProperty("user.home", REAL_HOME);
         }
     }
 
@@ -139,7 +144,7 @@ class ChatSessionTest {
             back.unnote("deploy target is staging-eu-3, owner is payments");
             assertThat(back.notes()).isEmpty();
         } finally {
-            System.clearProperty("user.home");
+            System.setProperty("user.home", REAL_HOME);
         }
     }
 
@@ -171,7 +176,7 @@ class ChatSessionTest {
             assertThat(b.pending()).containsExactlyElementsOf(a.pending());
             assertThat(b.files()).containsExactlyInAnyOrderElementsOf(a.files());
         } finally {
-            System.clearProperty("user.home");
+            System.setProperty("user.home", REAL_HOME);
         }
     }
 
@@ -181,7 +186,7 @@ class ChatSessionTest {
         try {
             assertThat(ChatSession.load(root, "2026-01-01-nope")).isEmpty();
         } finally {
-            System.clearProperty("user.home");
+            System.setProperty("user.home", REAL_HOME);
         }
     }
 
@@ -200,7 +205,7 @@ class ChatSessionTest {
             assertThat(all.get(0)[1]).isEqualTo("newer one");
             assertThat(all.get(0)[2]).isEqualTo("2");
         } finally {
-            System.clearProperty("user.home");
+            System.setProperty("user.home", REAL_HOME);
         }
     }
 
@@ -228,7 +233,7 @@ class ChatSessionTest {
             // And the source is untouched — it stays a readable record of where things ended.
             assertThat(ChatSession.load(root, old.id())).isPresent();
         } finally {
-            System.clearProperty("user.home");
+            System.setProperty("user.home", REAL_HOME);
         }
     }
 
@@ -246,7 +251,7 @@ class ChatSessionTest {
                     .contains("cap retries at 3")                     // the state
                     .contains("chat --from " + s.id());               // how to pick it up
         } finally {
-            System.clearProperty("user.home");
+            System.setProperty("user.home", REAL_HOME);
         }
     }
 
@@ -261,7 +266,7 @@ class ChatSessionTest {
             s.writeHandoff("note");
             assertThat(ChatSession.list(root)).hasSize(1);
         } finally {
-            System.clearProperty("user.home");
+            System.setProperty("user.home", REAL_HOME);
         }
     }
 
@@ -277,7 +282,7 @@ class ChatSessionTest {
             s.save();
             s.log("user", "hello");                      // must not throw
         } finally {
-            System.clearProperty("user.home");
+            System.setProperty("user.home", REAL_HOME);
         }
     }
 }

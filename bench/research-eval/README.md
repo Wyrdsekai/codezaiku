@@ -89,3 +89,62 @@ outcomes; the assumed mechanism (degraded upstreams) does not appear in the logs
 needs equal generous ceilings at the FAN level (the shipping mode): queued, not run. What today
 supports: Brave's result QUALITY is visibly better at rank 1-3 (measured at first probe); no
 F1 claim either way yet.
+
+
+## The search controller on WideSearch (2026-09-02) — NULL result, said plainly
+
+The steerer (near-repeat/host-overlap nudges naming one axis to move on) + the stop rule
+(exhausted search brings the deadline turn forward), measured on the SAME 13-task fan slice,
+same 27B, same 3600s ceiling as the 0.314 baseline (`~/.codezaiku/bench/widesearch-steer-2026-09-02`,
+stopped at 11/13 — the last two could not change the verdict):
+
+| | baseline (same 11 tasks) | with controller |
+|---|---|---|
+| mean item-F1 | 0.286 | 0.284 |
+| wins / losses (>0.05) | — | 3 / 3 |
+| timeouts at 3600s | 5 | 5 |
+
+The steerer fired 100 times across the slice; **the stop rule fired zero times** — every run reports
+`0 after saturation`, because breadth tasks keep reaching new hosts and never saturate. So this
+measured the nudges alone, and on WideSearch they do not move item-F1 (ws_en_065 0.61→1.00 and
+ws_en_018 0.63→0.45 are the noise floor, not a story). The stop rule's habitat is DEPTH questions;
+WideSearch cannot exercise it. Next: the SimpleQA A/B with `--knob steer`.
+
+## The search controller on SimpleQA (2026-09-02) — 27B: equal accuracy, leaner runs
+
+`simpleqa_ab.py --knob steer` (arms differ ONLY by CODEZAIKU_SEARCH_STEER), n=30, 24 turns, the 27B,
+artifacts `~/.codezaiku/bench/simpleqa-steer-2026-09-02/`:
+
+| arm | correct | concluded | searches/run | fetches/run | secs/run |
+|---|---|---|---|---|---|
+| off | 28/30 | 30/30 | 2.77 | 3.50 | 123 |
+| on  | 28/30 | 30/30 | 2.37 | 2.93 | 103 |
+
+Fisher p = 1.0; **zero discordant pairs** — the two arms got the same 28 right and the same 2 wrong
+(both misses are answer-line format: `May 2, 2000` vs gold `2 May 2000`, `29 megapixels` vs `29MP`).
+The stop rule fired ZERO times in 60 runs: the 27B answers in 2-3 searches and concludes on its own;
+saturation needs six zero-gain queries in a row and these runs never issue six. What is left is the
+steerer's nudges: ~15% fewer searches, ~16% fewer fetches, ~16% less wall time at equal accuracy —
+a throughput effect, one sample per question, worth believing only if it repeats. The literature's
+77-94% wasted-episode figure does not describe this model at this budget. Next: the same A/B on a
+9B (the wyrdsekai persona fine-tune, thinking off) — the weak-drive population where over-search
+should actually occur.
+
+## The search controller on SimpleQA (2026-09-02) — 9B: null again
+
+Same A/B on `wyrdsekai-3.5-9b-v5` (a wyrdsekai persona fine-tune of Qwen3.5-9B, thinking OFF),
+the model box, :8212, artifacts `~/.codezaiku/bench/simpleqa-steer-9b-2026-09-02/`:
+
+| arm | correct | searches/run | fetches/run | secs/run |
+|---|---|---|---|---|
+| off | 27/30 | 1.90 | 5.23 | 25 |
+| on  | 26/30 | 2.23 | 4.37 | 24 |
+
+Fisher p = 1.0; five discordant pairs split 2/3 — noise. The stop rule fired zero times in 60 runs
+here too. The surprise is the 9B itself: 90% on this slice at ~25s a run, against 9/30 for a 9B in
+July — the loop (deadline turn, give-up rule, citation discipline) moved a 9B from flailing to
+disciplined without any controller. **Verdict across both drives: the over-search population the
+literature measures (77-94% wasted episodes) is not our population; the loop had already removed
+it. The controller stays as cheap hygiene and is NOT claimed.** A positive flip would need a
+budget or a task shape where saturation actually occurs — none of WideSearch, SimpleQA-27B or
+SimpleQA-9B produced one.

@@ -11,7 +11,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import org.codezaiku.Config;
 
@@ -24,6 +26,71 @@ import org.codezaiku.Config;
  * {@code json} in its {@code search.formats}.
  */
 public final class WebSearchTool implements Tool {
+
+    /** Session-wide count of degraded-backend events — the acquisitions gate diffs this around a
+     *  run to judge the run's SUBSTRATE (a refused draft names infrastructure, not the model).
+     *  Same pattern as DriveClient's SESSION_*_TOKENS. Shared across parallel fan workers on
+     *  purpose: the gate judges the whole run's substrate, not one worker's. */
+    public static final java.util.concurrent.atomic.AtomicInteger DEGRADED_EVENTS =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** Which backend answered, session-wide; and searches that found no backend at all. */
+    public static final java.util.concurrent.atomic.AtomicInteger BRAVE_USED = new java.util.concurrent.atomic.AtomicInteger(),
+            SEARXNG_USED = new java.util.concurrent.atomic.AtomicInteger(), FALLBACK_USED = new java.util.concurrent.atomic.AtomicInteger(),
+            UNREACHABLE = new java.util.concurrent.atomic.AtomicInteger();
+    private static volatile long searxDownAt;
+
+    /** The built-in fallback (Wikipedia plus Crossref and OpenAlex; no key, no install) is on unless CODEZAIKU_FALLBACK_SEARCH=off. */
+    public static boolean fallbackOn() {
+        String v = Config.get("CODEZAIKU_FALLBACK_SEARCH");
+        return v == null || !(v.equalsIgnoreCase("off") || v.equalsIgnoreCase("false") || v.equals("0"));
+    }
+
+    /**
+     * The fallback when Brave is not configured and SearXNG does not answer: Wikipedia's search in the query's
+     * language, then papers from Crossref and OpenAlex. Reference pages and the literature, not the whole web;
+     * chosen over scraping a public engine, which a home box measured as challenged on the second query (2026-09-09).
+     */
+    String fallbackSearch(String query, int limit) {
+        if (!fallbackOn()) return null;
+        List<String[]> rows = new ArrayList<>();
+        try {
+            String wiki = "en";
+            for (int i = 0; i < query.length(); i++) {
+                Character.UnicodeScript sc = Character.UnicodeScript.of(query.codePointAt(i));
+                if (sc == Character.UnicodeScript.HIRAGANA || sc == Character.UnicodeScript.KATAKANA) { wiki = "ja"; break; }
+                if (sc == Character.UnicodeScript.HANGUL) { wiki = "ko"; break; }
+                if (sc == Character.UnicodeScript.HAN) wiki = "zh";
+            }
+            HttpResponse<String> resp = HTTP.send(HttpRequest.newBuilder(URI.create("https://" + wiki + ".wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit="
+                            + Math.min(limit, 20) + "&srsearch=" + URLEncoder.encode(query, StandardCharsets.UTF_8)))
+                    .timeout(Duration.ofSeconds(20)).header("User-Agent", ScholarSearch.UA).header("Accept", "application/json").GET().build(), HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() == 200) {
+                for (JsonNode h : M.readTree(resp.body()).path("query").path("search")) {
+                    String title = h.path("title").asText("");
+                    if (title.isEmpty()) continue;
+                    String url = "https://" + wiki + ".wikipedia.org/wiki/" + URLEncoder.encode(title.replace(' ', '_'), StandardCharsets.UTF_8).replace("+", "%20").replace("%2F", "/").replace("%3A", ":").replace("%28", "(").replace("%29", ")").replace("%2C", ",");
+                    String snippet = h.path("snippet").asText("").replaceAll("<[^>]+>", "").replace("&amp;", "&").replace("&quot;", "\"").replace("&#039;", "'").replaceAll("\\s+", " ").strip();
+                    rows.add(new String[]{title, url, snippet});
+                }
+            }
+        } catch (Exception ignored) { }
+        int half = Math.max(2, limit / 2);
+        if (rows.size() > half) rows = new ArrayList<>(rows.subList(0, half));
+        for (ScholarSearch.Row r : ScholarSearch.merged(query, limit)) rows.add(new String[]{r.title(), r.url(), r.snippet()});
+        if (rows.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder("results for \"" + query + "\" (built-in fallback: Wikipedia, then papers from Crossref and OpenAlex: no web engine is configured; follow the pages' references for primary sources):\n");
+        int shown = 0;
+        for (String[] r : rows) {
+            if (shown >= limit) break;
+            shown++;
+            sb.append(shown).append(". ").append(r[0]).append('\n').append("   ").append(r[1]).append('\n');
+            if (!r[2].isEmpty()) sb.append("   ").append(r[2]).append('\n');
+        }
+        FALLBACK_USED.incrementAndGet();
+        return sb.toString();
+    }
+
     private static final ObjectMapper M = new ObjectMapper();
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
@@ -31,6 +98,23 @@ public final class WebSearchTool implements Tool {
 
     // Repetition guard (see WebFetchTool): don't let a fixating model re-run the identical query.
     private final Set<String> queried = new HashSet<>();
+    private final SearchSteer steer = new SearchSteer();
+
+    /** The steerer, for the loop's early-finish hook and the run summary. */
+    public SearchSteer steer() { return steer; }
+
+    /** The question, so the steerer can name the language axis. */
+    public WebSearchTool focus(String question) {
+        steer.focus(question);
+        return this;
+    }
+
+    /** Append the steerer's note (if any) to a formatted result; hosts parsed from its url lines. */
+    private String steered(String query, String result) {
+        var urls = new java.util.ArrayList<String>();
+        for (String line : result.split("\n")) if (line.startsWith("   http")) urls.add(line.strip());
+        return result + steer.observe(query, urls);
+    }
     // One strategy note per run (sparse — over-injection dilutes a weak model's attention).
     private boolean sweepNoted = false;
 
@@ -128,14 +212,19 @@ public final class WebSearchTool implements Tool {
                     + "answer and call task_done.";
         String brave = braveSearch(query, limit);
         if (brave != null) {
+            BRAVE_USED.incrementAndGet();
             if (!sweepNoted && looksBatched(query)) {
                 sweepNoted = true;
-                brave += "\nNOTE: this query names several distinct items at once — engines require ALL "
+                brave += "\nNOTE: this query names several distinct items at once: engines require ALL "
                         + "terms, so batched queries surface homepages, not data. Search for ONE page "
                         + "listing all the items (\"list of …\" / \"comparison of …\"), or query ONE "
                         + "item at a time.";
             }
-            return brave;
+            return steered(query, brave);
+        }
+        if (System.currentTimeMillis() - searxDownAt < 60_000) {   // SearXNG failed a minute ago: the fallback first, not 30 s of waiting
+            String fb = fallbackSearch(query, limit);
+            if (fb != null) return steered(query, fb);
         }
         String url = endpoint() + "/search?format=json&q=" + URLEncoder.encode(query, StandardCharsets.UTF_8);
         JsonNode body = null;
@@ -149,7 +238,11 @@ public final class WebSearchTool implements Tool {
                         .timeout(Duration.ofSeconds(30)).header("Accept", "application/json").GET().build(),
                         HttpResponse.BodyHandlers.ofString());
             } catch (Exception e) {
+                searxDownAt = System.currentTimeMillis();
+                String fb = fallbackSearch(query, limit);
+                if (fb != null) return steered(query, fb);
                 queried.remove(query.strip().toLowerCase());   // a failed search must stay retryable
+                UNREACHABLE.incrementAndGet();
                 return "ERROR: search backend unreachable at " + endpoint() + " (" + e + "). Is the SearXNG "
                         + "container running (docker start codezaiku-searxng)?";
             }
@@ -167,17 +260,22 @@ public final class WebSearchTool implements Tool {
         }
         JsonNode results = body.path("results");
         if (!results.isArray() || results.isEmpty()) {
+            String fb = fallbackSearch(query, limit);
+            if (fb != null) return steered(query, fb);
             // A failed search must not burn its slot in the repetition guard — the query was never answered.
             queried.remove(query.strip().toLowerCase());
             String down = degradedEngines(body);
-            if (!down.isEmpty())
-                return "SEARCH BACKEND DEGRADED — no results came back because the upstream engines are "
+            if (!down.isEmpty()) {
+                DEGRADED_EVENTS.incrementAndGet();
+                return "SEARCH BACKEND DEGRADED: no results came back because the upstream engines are "
                         + "currently rate-limited or blocked (" + down + "). This is a TRANSIENT infrastructure "
                         + "problem, not evidence that the information does not exist: do NOT conclude the answer "
                         + "is unavailable and do NOT answer from memory. Try a different phrasing, or fetch a "
                         + "likely source URL directly with web_fetch (e.g. the relevant Wikipedia page).";
+            }
             return "no results for: " + query;
         }
+        SEARXNG_USED.incrementAndGet();
         StringBuilder sb = new StringBuilder("results for \"" + query + "\":\n");
         for (int i = 0; i < results.size() && i < limit; i++) {
             JsonNode r = results.get(i);
@@ -189,10 +287,10 @@ public final class WebSearchTool implements Tool {
         }
         if (!sweepNoted && looksBatched(query)) {
             sweepNoted = true;
-            sb.append("\nNOTE: this query names several distinct items at once — engines require ALL terms, "
+            sb.append("\nNOTE: this query names several distinct items at once: engines require ALL terms, "
                     + "so batched queries surface homepages, not data. Search for ONE page listing all the "
                     + "items (\"list of …\" / \"comparison of …\"), or query ONE item at a time.");
         }
-        return sb.toString();
+        return steered(query, sb.toString());
     }
 }

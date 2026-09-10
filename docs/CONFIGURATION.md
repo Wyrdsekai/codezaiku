@@ -133,6 +133,9 @@ export CODEZAIKU_OPS_AUDIT=$HOME/.codezaiku/audit.jsonl
 | Variable | Default | Notes |
 |---|---|---|
 | `CODEZAIKU_RESEARCH_POOL` | `~/.codezaiku/research/findings.jsonl` | Accumulated findings. **Use a separate pool per experiment arm** — a shared pool carries one arm's findings into another and invalidates the comparison. |
+| `CODEZAIKU_LIBRARIAN_URL` | `http://127.0.0.1:4649` | Where ResearchZosho's daemon answers. The chat pushes what the library holds into each turn, `/librarian` asks it, `/research go` files runs with it. Without a daemon, none of that happens and the research memory is what you have. `CODEZAIKU_LIBRARIAN_PORT` changes only the port. |
+| `CODEZAIKU_LIBRARIAN_TOKEN` | — | A write token for the daemon, needed to file research runs from the chat. `codezaiku install researchzosho` makes one; by hand: `researchzosho reader token did:key:local-codezaiku` after `researchzosho reader allow did:key:local-codezaiku write codezaiku`. |
+| `CODEZAIKU_UPDATE` | `check` | `check`: `doctor` and the chat say when a newer CodeZaiku is released. `auto`: a chat swaps a newer release in at its start, for the next start (tarball installs only; a Debian install uses apt). `off`. `codezaiku update now` does it by hand. |
 | `CODEZAIKU_GAPREFLECT` | on | Gap-reflection loop. Measured *unproven* (see LIMITATIONS.md); left on because it shows no harm. |
 
 ## Driving CodeZaiku from another program
@@ -155,7 +158,7 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 | `CODEZAIKU_DISTILLER_MODEL` | `default` | The `model` field sent to that endpoint. |
 | `CODEZAIKU_READ_CAP` | `12000` | Chars a single `read_file` may return. Above it the tool returns the file's first lines for structure and asks the model to `grep -n` then read a range. **Measured, not guessed**: against a 30k cap this was ~24% cheaper in tokens at identical task success, because a large file enters the conversation once and is then re-sent on every later turn. See LIMITATIONS.md. |
 | `CODEZAIKU_FAMILIAR_MEMORY_DIR` | `~/.codezaiku/familiar-memory` | Where per-project conventions are kept. |
-| `CODEZAIKU_OCEAN_DIR` | auto | Location of the library/embedding index. |
+| `CODEZAIKU_OCEAN_DIR` | auto | Location of the knowledge library's search index (Lucene, words only; no embedding model). |
 
 ## Remote and container targets
 
@@ -176,6 +179,9 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 | `CODEZAIKU_UNDO_DEPTH` | How many agent steps `/undo` can walk back (default 10, or the turn cap if higher). |
 | `CODEZAIKU_SEARXNG` | SearXNG endpoint for `web_search`. Setting it (or the Brave key) is what puts web tools into chat. |
 | `CODEZAIKU_BRAVE_KEY` | Brave Search API key — first-choice search backend when set; SearXNG is the fallback on any failure. |
+| `CODEZAIKU_FALLBACK_SEARCH` | `on` — when neither Brave nor SearXNG answers, `web_search` uses Wikipedia plus Crossref and OpenAlex (reference pages and papers by DOI). `off` disables it. `scholar_search`, the literature by DOI, is offered in every research run regardless. |
+| `CODEZAIKU_FETCH_PRIVATE` | `deny` refuses `web_fetch` of private-network addresses. Loopback, link-local, unspecified, multicast and the hosts of your own drive, embedder, reranker and search backend are always refused, at every redirect hop. |
+| `CODEZAIKU_FETCH_MAX_BYTES` | The largest document `web_fetch` reads (default 25 MB); the body and its decompression are capped. |
 | `CODEZAIKU_RESEARCH_WORKERS` / `_WORKER_TURNS` / `_ROUNDS` | Fan-out research: parallel sub-researchers (4), their turn budget (14), critic rounds (2). |
 | `CODEZAIKU_DELEGATE_DRIVE` / `CODEZAIKU_DELEGATE_MODEL` | Sub-agents from `delegate` run HERE instead of the chat's drive — frontier judgment, local labor. |
 | `CODEZAIKU_MCP_SERVERS` | `name=command;name2=command2` — spawns MCP stdio servers whose tools join chat as `mcp_<server>_<tool>`, consent-gated per call. |

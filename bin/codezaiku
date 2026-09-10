@@ -13,6 +13,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export CODEZAIKU_LAUNCHER="$REPO_ROOT/bin/codezaiku"   # `librarian service install` runs THIS launcher as the service
 
 # The caller's directory is ARGUMENT DATA, not just where we happened to be standing: `run` treats
 # the working directory AS the workspace, and every relative path a user types — `code ./repo`,
@@ -38,7 +39,11 @@ JAVA_OPTS="${CODEZAIKU_JAVA_OPTS:---add-opens java.base/java.lang=ALL-UNNAMED --
 
 die() { echo "codezaiku: $*" >&2; exit 1; }
 
-command -v java >/dev/null 2>&1 || die "java not found — CodeZaiku needs a JDK 21+ on PATH"
+# CODEZAIKU_JAVA: an explicit JVM binary. Also the defense on a SHARED box: a sibling session's
+# `pkill java` matches the process NAME, so a symlink to the JDK named without "java" (e.g.
+# cz-jvm) keeps a long research run alive through someone else's sweep (2026-09-02, twice).
+JAVA_BIN="${CODEZAIKU_JAVA:-java}"
+command -v "$JAVA_BIN" >/dev/null 2>&1 || die "$JAVA_BIN not found — CodeZaiku needs a JDK 21+ on PATH (or CODEZAIKU_JAVA)"
 
 # Rebuild when any source/resource is newer than the cached classpath, when the cache is
 # missing, or when the cache no longer points anywhere real. `find -newer` is cheap next to
@@ -71,4 +76,4 @@ fi
 
 CP="$(cat "$CP_CACHE")"
 cd "$CALLER_PWD"
-exec java $JAVA_OPTS -cp "$CP" org.codezaiku.FamiliarMain "$@"
+exec "$JAVA_BIN" $JAVA_OPTS -cp "$CP" org.codezaiku.FamiliarMain "$@"

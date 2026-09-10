@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://codezaiku.org/img/emblem-dark-512.png">
-  <img alt="" src="https://codezaiku.org/img/emblem-512.png" width="190">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/emblem-dark-512.png">
+  <img alt="" src="docs/brand/emblem-512.png" width="190">
 </picture>
 
 # CodeZaiku
@@ -230,7 +230,10 @@ researcher working alone. `fan` splits the question into parts, researches them 
 a critic check whether the coverage is actually sufficient, and then writes the combined answer
 — slower, and much better on questions with many parts.
 
-**Search comes from a backend you configure — there is none out of the box.** Two options:
+**Search works out of the box, and works better with a backend you configure.** Without one, `web_search`
+falls back to Wikipedia plus the scholarly literature (Crossref and OpenAlex): reference pages and papers by
+DOI, not the whole web. Every research run also has `scholar_search`, the literature by DOI, whatever the
+backend. For the whole web, two options, the first recommended:
 
 ```bash
 codezaiku config set CODEZAIKU_BRAVE_KEY <key>        # recommended: Brave Search API
@@ -242,6 +245,18 @@ gives markedly better results — a search tool is only as good as what it searc
 fully self-hosted and needs no account, but it aggregates public engines that rate-limit under
 sustained use. With both configured, Brave is used first and SearXNG is the fallback. Setting
 either one is also what enables web search inside `chat`.
+
+What a research run finds is kept. The research memory in `~/.codezaiku/research` holds each
+finding with its source, and the next run on a related question starts from it instead of from
+zero. That is the built-in tier: it works with nothing else installed.
+
+For real research, the kind that takes hours and comes back with a report you can check, there is
+[ResearchZosho](https://researchzosho.org), a separate program from the same family. `codezaiku
+install researchzosho` fetches it, verifies it and runs its setup. From then on the chat's
+`/research` files runs with it, `/librarian` asks what it holds, and what it holds is pushed into
+every turn. The questions in the research memory are handed to it as open questions. `codezaiku doctor`
+and the chat say when a newer ResearchZosho is released; `codezaiku install researchzosho` updates it, and
+the library and settings stay.
 
 **Work on a codebase**
 

@@ -68,6 +68,21 @@ final class Doctor {
             drive = probe.ok();
             driveDetail = probe.detail();
         }
+        // this program's own release against the latest
+        String czLatest = SelfUpdate.latestCached();
+        boolean czNewer = czLatest != null && ResearchZoshoInstall.compareVersions(czLatest, FamiliarMain.VERSION) > 0;
+        checks.add(new Check("codezaiku " + FamiliarMain.VERSION + (czNewer ? " (" + czLatest + " is available)" : czLatest == null ? "" : " (the latest)"), false, !czNewer, czNewer ? czLatest + " is available" : "", czNewer ? SelfUpdate.howToUpdate() : ""));
+        // ResearchZosho, the research library, is a separate program: say whether it is here, whether its daemon answers, and whether a newer release exists
+        String rzHave = org.codezaiku.ResearchZoshoInstall.installedVersion();
+        if (rzHave == null) {
+            checks.add(new Check("researchzosho (the research library)", false, false, "not installed; research keeps its findings in the research memory only", "codezaiku install researchzosho"));
+        } else {
+            boolean answers = org.codezaiku.research.LibraryBridge.answers();
+            String latest = org.codezaiku.ResearchZoshoInstall.latestCached();
+            boolean newer = latest != null && org.codezaiku.ResearchZoshoInstall.compareVersions(latest, rzHave) > 0;
+            checks.add(new Check("researchzosho " + rzHave + (answers ? ", daemon answering at " + org.codezaiku.research.LibraryBridge.url() : ", daemon not answering at " + org.codezaiku.research.LibraryBridge.url()),
+                    false, !newer, newer ? latest + " is available" : "", newer ? "codezaiku install researchzosho  (updates it; the library and settings stay)" : answers ? "" : "researchzosho service install, or researchzosho serve"));
+        }
         checks.add(new Check("model server at " + driveUrl, true, drive,
                 drive ? "" : driveDetail.isEmpty() ? "nothing answered /v1/models" : driveDetail,
                 "start any OpenAI-compatible server, e.g.\n"

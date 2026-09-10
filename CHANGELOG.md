@@ -3,6 +3,23 @@
 Notable changes. This project follows [semantic versioning](https://semver.org/) loosely: while at
 0.x, minor versions may change behaviour.
 
+## 0.3.0
+
+Added
+- Chat: `/research <topic>` builds a research brief in conversation; `/research go` files the run; `/research status` and `/research read` follow it. A finished run is announced once in the next chat.
+- Research memory: `codezaiku research` keeps its findings with sources in `~/.codezaiku/research`; later runs on related questions start from it. Works with nothing else installed.
+- `codezaiku install researchzosho`: downloads the ResearchZosho release, verifies it, runs its setup, connects the chat (write token, research memory questions handed over). Updates an existing install in place. `/setup librarian` in chat does the same.
+- `codezaiku doctor` and the chat banner report when a newer ResearchZosho is released.
+- `codezaiku update [now | auto on|off]`: install the latest CodeZaiku release in place (checksum-verified; tarball installs). `CODEZAIKU_UPDATE=auto` lets a chat do it at its start. `doctor` reports a newer CodeZaiku.
+- `web_search` fallback: Wikipedia plus Crossref and OpenAlex when neither Brave nor SearXNG answers. `CODEZAIKU_FALLBACK_SEARCH=off` disables it.
+- `scholar_search` tool (Crossref and OpenAlex, results by DOI) in every research run.
+- `web_fetch` refuses loopback, link-local, unspecified and multicast addresses and the service's own hosts (`CODEZAIKU_FETCH_PRIVATE`, `CODEZAIKU_FETCH_MAX_BYTES`).
+
+Changed
+- ResearchZosho is a separate program (https://researchzosho.org). The copy that shipped inside CodeZaiku is removed. `codezaiku librarian …` runs the installed `researchzosho`. CodeZaiku talks to it over HTTP with the published client.
+- The `library_*` tools and library resources are removed from CodeZaiku's MCP server. ResearchZosho has its own MCP server.
+- CI and release workflows use GitHub-owned actions only.
+
 ## 0.2.0 — the conversation release
 
 The chat surface, orchestration, and a research capability that compounds.

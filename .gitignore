@@ -83,3 +83,7 @@ bench/ops-eval/authstack/.env
 site/install
 site/install.ps1
 .codeplane-cp
+
+# release artifacts built at the root by docs/RELEASING.md step 5; attached to the release, never committed
+/codezaiku-*.tar.gz
+/SHA256SUMS

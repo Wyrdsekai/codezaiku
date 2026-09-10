@@ -14,16 +14,22 @@ Every command goes through `bash -lc`.
 
 ### Acceptance run, all platforms, same day and same model server
 
-`scripts/verify-platform.sh` against one 9B drive, one fixture version, all four runs the same day:
+`scripts/verify-platform.sh` for 0.3.0 (2026-09-09), the 0.3.0 tarball on each box, one 27B model
+server, all runs the same day:
 
 | Platform | passed | failed | skipped |
 |---|---|---|---|
 | Linux (reference) | 19 | 0 | 0 |
 | macOS 26.5 arm64 | 19 | 0 | 0 |
-| WSL2 (Ubuntu 26.04) | 19 | 0 | 0 |
 | Windows 11 native | 17 | 0 | 1 |
+| WSL2 (Ubuntu 26.04) | 19 | 0 | 0 (0.2.0 run; not re-run for 0.3.0) |
 
-**No failures on any platform.** Linux, macOS and WSL2 are at exact parity, with nothing skipped.
+The macOS run reached the model server through an ssh tunnel to `127.0.0.1`: macOS's local-network
+permission blocks a JVM started over ssh from reaching another machine on the LAN, and a tunnel is
+the documented way round it (below). The Debian package was installed and run on a second Linux
+machine before publishing.
+
+**No failures on any platform.** Linux and macOS are at exact parity, with nothing skipped.
 Windows runs one check fewer because its single skip — cancellation reporting — covers three
 assertions the other platforms make: a killed run is not delivered a SIGTERM there, so there is
 nothing for them to assert. That limitation is described under Windows below.

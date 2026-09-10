@@ -110,7 +110,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.2.0";
+    public static final String VERSION = "0.3.0";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -150,6 +150,20 @@ public final class FamiliarMain {
             // Write a starter config so settings live in a file that can be reviewed and shared,
             // rather than in whatever the last shell happened to export.
             System.exit(writeStarterConfig(args.length >= 2 && args[1].equals("--force")));
+        }
+        if (args.length >= 1 && args[0].equals("update")) {
+            String op = args.length >= 2 ? args[1] : "status";
+            switch (op) {
+                case "status" -> { System.out.print(SelfUpdate.status()); System.exit(0); }
+                case "now" -> { var o = SelfUpdate.now(args.length >= 3 ? args[2] : null, System.out); System.out.println(o.note()); System.exit(o.updated() ? 0 : 1); }
+                case "auto" -> {
+                    if (args.length < 3 || !(args[2].equals("on") || args[2].equals("off"))) { System.err.println("usage: codezaiku update auto on|off"); System.exit(2); }
+                    try { Config.set("CODEZAIKU_UPDATE", args[2].equals("on") ? "auto" : "check"); } catch (Exception e) { System.err.println("could not save: " + e.getMessage()); System.exit(1); }
+                    System.out.println(args[2].equals("on") ? "auto-update is on: a chat swaps a newer release in at its start, for the next start" : "auto-update is off: doctor and the chat say when a newer release exists; codezaiku update now installs it");
+                    System.exit(0);
+                }
+                default -> { System.err.println("usage: codezaiku update [status | now [version] | auto on|off]"); System.exit(2); }
+            }
         }
         if (args.length >= 1 && args[0].equals("doctor")) {
             // "why doesn't this work yet" — checks the model server and every optional component,
@@ -498,15 +512,27 @@ public final class FamiliarMain {
             writeSarif(lastReviewFindings);
             System.exit(0);
         }
+        if (args.length >= 2 && args[0].equals("install") && args[1].equalsIgnoreCase("researchzosho")) {
+            // The door to the sibling: fetch the release, check it, put it on the path, hand over to its setup.
+            System.exit(ResearchZoshoInstall.door(java.util.Arrays.copyOfRange(args, 2, args.length), System.out));
+        }
+        if (args.length >= 1 && args[0].equals("librarian")) {
+            // `codezaiku librarian …` runs the installed researchzosho command (ResearchZosho is its own
+            // program since 0.3.0); the verb stays so nothing anyone typed stops working.
+            System.exit(ResearchZoshoInstall.alias(java.util.Arrays.copyOfRange(args, 1, args.length), System.out));
+        }
         if (args.length >= 2 && args[0].equals("research")) {
             // research <question|@file> [broad|depth] [drive] [maxTurns]
             String question = resolveGoal(args[1]);
             String mode = args.length >= 3 ? args[2] : "broad";
             String baseUrl = driveArg(args, 3);
             int maxTurns = args.length >= 5 ? Integer.parseInt(args[4]) : 30;
-            System.out.println("\n=== RESEARCH ===\n" + ("fan".equalsIgnoreCase(mode)
-                    ? researchFan(question, baseUrl, maxTurns)
-                    : research(question, mode, baseUrl, maxTurns)).summary());
+            if ("fan".equalsIgnoreCase(mode)) {
+                System.out.println("\n=== RESEARCH ===\n" + researchFan(question, baseUrl, maxTurns).summary());
+            } else {
+                FamiliarLoop.Result res = research(question, mode, baseUrl, maxTurns);
+                System.out.println("\n=== RESEARCH ===\n" + res.summary());
+            }
             System.exit(0);
         }
         if (args.length >= 2 && args[0].equals("investigate")) {
@@ -838,6 +864,11 @@ public final class FamiliarMain {
 
             RESEARCH — answer a question from the open web
               research <question|@file> [broad|depth] [drive] [maxTurns]
+
+            LIBRARY — ResearchZosho, the research library, is a separate program
+              install researchzosho           fetch it, check it, run its setup; the chat then files
+                                              research runs with it and reads what it holds
+              librarian <args…>               the installed researchzosho command, same arguments
 
             INTEGRATION — three ways another program drives CodeZaiku
               mcp                               MCP server on stdio (JSON-RPC 2.0). Exposes every
@@ -2553,11 +2584,15 @@ public final class FamiliarMain {
 
         // 1. Decompose — one deterministic call, JSON out. On any parse failure the question
         //    itself is the single sub-question and this degrades to depth-research + synthesis.
+        // The library consults FIRST (the compounding loop): what ResearchZosho holds is pushed into
+        // decompose so the fan runs only on the GAPS. "" when no daemon answers or it holds nothing.
+        String libKnown = org.codezaiku.research.LibraryBridge.push(question, 6);
         java.util.List<String> open = new java.util.ArrayList<>();
         try {
             var msgs = json.createArrayNode();
             msgs.addObject().put("role", "user").put("content",
-                    "Decompose this research question into 3-8 SELF-CONTAINED sub-questions that "
+                    libKnown
+                    + "Decompose this research question into 3-8 SELF-CONTAINED sub-questions that "
                     + "could each be researched independently by someone who sees nothing else. "
                     + "Cover every facet; where the question asks the same facts about many items, "
                     + "group items into a few sub-questions rather than one each. When the question "
@@ -2623,11 +2658,63 @@ public final class FamiliarMain {
 
         // 4. Synthesis — the normal research loop, seeded with the findings as its notes. Tools
         //    stay available for verifying a doubtful cell, but the work is assembly.
+        // TOKEN-AWARE notes budget (caught live 2026-09-02): seven workers' "3,500-char" notes
+        // in Japanese and Chinese are ~1 token per CHARACTER, so the synthesis context hit 101%
+        // of a 32k window, the per-turn output budget collapsed to 512 tokens, add_to_answer's
+        // arguments truncated ("nothing to save") and the deadline task_done recorded "(done)".
+        // A char cap is not a budget; this one counts tokens by script and fits ~35% of the
+        // window, so the synthesis has room to READ and to WRITE.
+        String notes = fitNotes(findings, drive.contextWindow());
         String synthGoal = question
-                + "\n\nRESEARCH NOTES already gathered by parallel sub-investigations (treat as "
+                + "\n\n" + libKnown
+                + "RESEARCH NOTES already gathered by parallel sub-investigations (treat as "
                 + "your own notes; verify only what looks doubtful, then ASSEMBLE the complete "
-                + "answer):\n\n" + String.join("\n\n", findings);
-        return research(synthGoal, "broad", baseUrl, Math.min(maxTurns, 15));
+                + "answer). Write the answer with add_to_answer in PIECES of at most 1500 characters "
+                + "each — one section per call — then call task_done with only the sources and "
+                + "caveats (a single huge save is cut off and lost):\n\n" + notes;
+        FamiliarLoop.Result res = research(synthGoal, "broad", baseUrl, Math.min(maxTurns, 15));
+        return res;
+    }
+
+    /** Rough token count by script: CJK ≈ 1 token per char, everything else ≈ 4 chars per token. */
+    static int estTokens(String s) {
+        if (s == null) return 0;
+        int cjk = 0, other = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if ((c >= 0x3040 && c <= 0x30ff) || (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xac00 && c <= 0xd7af)) cjk++;
+            else other++;
+        }
+        return cjk + other / 4;
+    }
+
+    /** Trim a string to ~maxTokens by the same estimate, cutting at a line break when possible. */
+    static String trimTokens(String s, int maxTokens) {
+        if (estTokens(s) <= maxTokens) return s;
+        int lo = 0, hi = s.length();
+        while (lo < hi) {            // binary search the longest prefix within budget
+            int mid = (lo + hi + 1) / 2;
+            if (estTokens(s.substring(0, mid)) <= maxTokens) lo = mid; else hi = mid - 1;
+        }
+        int nl = s.lastIndexOf('\n', lo);
+        return s.substring(0, nl > lo / 2 ? nl : lo) + " …[trimmed to fit the context]";
+    }
+
+    /** Fit worker findings into ~35% of the context window, each capped, the total capped. */
+    static String fitNotes(java.util.List<String> findings, int ctxTokens) {
+        int total = Math.max(2000, (int) (ctxTokens * 0.28));   // 0.35 hit 93% of the window live
+        int each = Math.max(400, total / Math.max(1, findings.size()));
+        var sb = new StringBuilder();
+        int used = 0;
+        for (String f : findings) {
+            String t = trimTokens(f, each);
+            int n = estTokens(t);
+            if (used + n > total) t = trimTokens(t, Math.max(200, total - used));
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append(t);
+            used += estTokens(t);
+        }
+        return sb.toString();
     }
 
     public static FamiliarLoop.Result research(String question, String mode, String baseUrl, int maxTurns) {
@@ -2674,6 +2761,10 @@ public final class FamiliarMain {
         String goal = "RESEARCH (read-only; you have web_search and web_fetch).\n\nQUESTION: " + question
                 + "\n\n" + known + shape + dataDoors + assemble
                 + "\n\nRules: base every claim on a source you actually FETCHED — do not answer from memory. "
+                // The steering the chat register and fan decompose already carry, missing HERE
+                // until 2026-09-01: an e2e about JAPANESE models ran five English-only queries.
+                + "When the question names languages or regions, write SOME of your web_search queries IN "
+                + "those languages — English queries surface the English literature only. "
                 + "Note when sources conflict or when something is uncertain. Finish by calling task_done with a "
                 + "written answer that (a) answers the question directly up front, (b) gives the supporting "
                 + "detail, and (c) ends with a SOURCES list of the URLs you actually used.";
@@ -2683,8 +2774,18 @@ public final class FamiliarMain {
         Path cwd = Path.of(System.getProperty("user.dir"));
         var draft = new AnswerDraftTool();
         var tools = ToolRegistry.research(cwd, question, draft);
+        // The search controller: the steerer rides on web_search; its exhausted() is the loop's
+        // early-finish signal. Stats are printed per run so over-search is a number, not a feeling.
+        var ws = (org.codezaiku.tools.WebSearchTool) tools.find("web_search");
         FamiliarLoop.Result res = new FamiliarLoop(drive, tools, cwd, goal, maxTurns, null, null)
-                .research().answerDraft(draft::draft).run();
+                .research().answerDraft(draft::draft)
+                .finishEarlyIf(() -> ws != null && ws.steer().exhausted())
+                .run();
+        if (ws != null) {
+            System.out.println("search controller: " + ws.steer().queries() + " queries, "
+                    + ws.steer().queriesAfterSaturation() + " after saturation"
+                    + (ws.steer().exhausted() ? " — finished on exhaustion" : ""));
+        }
         // Harvest the answer into the pool so the NEXT run starts from here (dedup handled on write).
         int stored = ResearchMemory.harvest(question, res.summary());
         if (stored > 0) System.out.println("research memory: stored " + stored + " new finding(s)");

@@ -7,6 +7,10 @@
             <pattern>%d{HH:mm:ss} %-5level %logger{0} - %msg%n</pattern>
         </encoder>
     </appender>
+    <!-- PDFBox/FontBox warn on every CJK font table they do not support ("Format 14 cmap table
+         is not supported") — fourteen lines per Japanese paper, none actionable. Errors still show. -->
+    <logger name="org.apache.pdfbox" level="ERROR"/>
+    <logger name="org.apache.fontbox" level="ERROR"/>
     <root level="INFO">
         <appender-ref ref="STDOUT"/>
     </root>

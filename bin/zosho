@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# ResearchZosho — 研究蔵書. The Librarian's command. `zosho` is the short form; `codezaiku librarian` the alias.
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/codezaiku" librarian "$@"

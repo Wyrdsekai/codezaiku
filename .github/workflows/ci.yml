@@ -36,14 +36,15 @@ jobs:
         # ignore is worse than an honest gap. See PLATFORMS.md.
 
     steps:
-      - uses: actions/checkout@v4
+      # GitHub-owned actions only: the Wyrdsekai org allows no third-party actions. setup-java's own
+      # cache keeps the Gradle wrapper and dependencies between runs.
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
-
-      - uses: gradle/actions/setup-gradle@v4
+          cache: gradle
 
       - name: Test
         run: ./gradlew --no-daemon :core:test

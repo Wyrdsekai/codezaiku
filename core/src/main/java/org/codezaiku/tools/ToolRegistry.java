@@ -15,6 +15,9 @@ public final class ToolRegistry {
     private final Map<String, Tool> tools = new LinkedHashMap<>();
     private PathScope scope;
 
+    /** A registered tool by name, or null. */
+    public Tool find(String name) { return tools.get(name); }
+
     public ToolRegistry add(Tool t) {
         tools.put(t.name(), t);
         return this;
@@ -194,7 +197,8 @@ public final class ToolRegistry {
     public static ToolRegistry research(Path projectRoot, String question, AnswerDraftTool draft) {
         PathScope scope = new PathScope(projectRoot);
         return new ToolRegistry().scope(scope)
-                .add(new WebSearchTool())
+                .add(new WebSearchTool().focus(question))
+                .add(new ScholarSearchTool())          // the literature by DOI, in every run: a web engine ranks it low
                 .add(new WebFetchTool().focus(question))
                 .add(draft)
                 .add(new ResearchMemoryTool())   // A-RAG: recall is a TOOL in the loop, not just a prompt seed

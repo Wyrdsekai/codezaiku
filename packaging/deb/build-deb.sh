@@ -2,7 +2,7 @@
 # Build a .deb for CodeZaiku.
 #
 #   packaging/deb/build-deb.sh                    # version from VERSION file
-#   CODEZAIKU_VERSION=0.2.0 packaging/deb/build-deb.sh
+#   CODEZAIKU_VERSION=0.3.0 packaging/deb/build-deb.sh
 #
 # Installs to /opt/codezaiku with a /usr/bin/codezaiku symlink. Architecture is `all`:
 # this is a JVM application, so the same package works on amd64 and arm64.

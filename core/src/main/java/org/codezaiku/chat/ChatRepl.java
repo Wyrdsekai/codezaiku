@@ -73,6 +73,23 @@ public final class ChatRepl {
             java.util.List.of("all", "think", "thinking")
                     .contains(org.codezaiku.Config.get("CODEZAIKU_STREAM", "").toLowerCase(java.util.Locale.ROOT));
     private ChatSession session;
+    // /research mode: the REFINE conversation that produces a Research Requirements Document.
+    // Non-null = active. `/research go` hands the brief to the daemon; the deep run happens there.
+    private ResearchBrief brief;
+    // jobs this chat launched, so the prompt can say when one lands
+    private final java.util.List<String> launched = new java.util.ArrayList<>();
+    private final java.util.Set<String> reported = new java.util.HashSet<>();
+    // the run() locals a command needs to start a turn itself (orientation on /research <topic>)
+    private LspClient lspRef; private Library libraryRef; private LibraryIndex indexRef; private ChatIo ioRef;
+
+    /**
+     * Loop steps ONE message may spend while research mode is on: the refine conversation
+     * orients with a general search or two and asks — it never researches in depth (that is
+     * the daemon's run). The chat's turn budget is otherwise unlimited (the person is the cap),
+     * and an uncapped research-mode turn was a full research run per message with no visible
+     * end (the operator, 2026-09-03: "I never get out of this").
+     */
+    static final int RESEARCH_TURN_STEPS = Integer.parseInt(org.codezaiku.Config.get("CODEZAIKU_RESEARCH_TURN_STEPS", "5"));
     private ChatIo io;
     /** Set when the person abandons a turn at an approval prompt; read by the loop's cancel hook. */
     private final AtomicBoolean abandoned = new AtomicBoolean();
@@ -178,7 +195,9 @@ public final class ChatRepl {
             drive = new DriveClient(driveUrl, model);
             var lsp = LspClient.forProject(root, ProjectFacts.language(root));
             var library = new Library();
+            lspRef = lsp; libraryRef = library; indexRef = index; ioRef = io;
             while (true) {
+                reportLanded(io);
                 String line = io.readLine(consent.mode() + " > ");
                 if (line == null) break;                 // ctrl-D
                 line = line.strip();
@@ -310,6 +329,11 @@ public final class ChatRepl {
             io.println("        for the whole project, run from " + above);
         }
         io.println("drive " + driveUrl + " · " + consent.mode() + " — " + consent.mode().description());
+        String self = org.codezaiku.SelfUpdate.maybeAuto();
+        if (self.isEmpty()) self = org.codezaiku.SelfUpdate.updateNotice();
+        if (!self.isEmpty()) io.println(self);
+        String rz = org.codezaiku.ResearchZoshoInstall.updateNotice();
+        if (!rz.isEmpty()) io.println(rz);
         io.println("/help for commands, /quit to leave.  ctrl-C stops a turn, ctrl-D leaves");
         io.println("");
     }
@@ -359,12 +383,20 @@ public final class ChatRepl {
                 io.println("    /diff · /test                    what changed · run the test suite");
                 io.println("    /tasks                           background tasks (it can start them; you get told)");
                 io.println("    /cost                            tokens this session (what a metered drive bills)");
+                io.println("  THE LIBRARIAN");
+                io.println("    /setup librarian                 install ResearchZosho (the library) and set it up, here");
+                io.println("    /librarian <question>            what the shelves hold — no model, instant");
+                io.println("    /research <topic>                refine a research brief in conversation; then /research go");
+                io.println("    /research · go · status · off    the brief · file the deep run with the daemon · jobs · discard");
+                io.println("    /research read <J-id|I-id>       print a finished research result here");
                 io.println("    /commit [msg]                    stage and commit, after showing the command");
                 io.println("    /model [url|name] [id]           show or switch the drive (probes first)");
                 io.println("  SESSIONS");
                 io.println("    /note [fact] · /unnote <fact>    pin a fact into the context — no model turn needed");
                 io.println("    /remember <fact> · /forget-memory  PROJECT memory: carried into every future session");
                 io.println("    /memory                          what this project remembers (it can save too — asks first)");
+                io.println("    /librarian <question>            ask The Librarian's shelves (the long-term library)");
+                io.println("    /research <topic>                work the stacks: live mind map; done submits · off discards");
                 io.println("    /state · /sessionid              what it remembers · this session's id + run log");
                 io.println("    /sessions · /resume [id]         list earlier ones · reopen (bare = latest)");
                 io.println("    /onboard <id>                    NEW session seeded from an old one");
@@ -394,6 +426,82 @@ public final class ChatRepl {
                 String m = memory.recall();
                 io.println(m.isEmpty() ? "    no project memory yet — /remember <fact> starts it"
                         : m.stripTrailing());
+            }
+            case "/research" -> {
+                // Two phases (the operator, 2026-09-03: ). REFINE: a conversation that orients (the shelves,
+                // then a general search or two) and asks, producing a Research Requirements Document.
+                // GO: the brief is filed with the daemon, whose one worker runs the deep research and
+                // lands a draft investigation; the chat says so when it does.
+                if (arg.isEmpty()) {
+                    io.println(brief == null
+                            ? "    usage: /research <what you want to understand>   starts a refine conversation\n"
+                              + "           then: /research shows the brief · /research go runs it (daemon) · /research status · /research read <J-id> · /research off"
+                            : brief.render().stripTrailing());
+                } else if (arg.equals("off")) {
+                    if (brief != null) { io.println("    research mode off — the brief is discarded (nothing was filed)"); brief = null; }
+                    else io.println("    research mode was not on");
+                } else if (arg.equals("done")) {
+                    io.println("    there is no 'done' — /research go files the brief for the deep run; /research off discards it");
+                } else if (arg.equals("status")) {
+                    researchStatus(io);
+                } else if (arg.startsWith("read ")) {
+                    researchRead(io, arg.substring(5).strip());
+                } else if (arg.startsWith("go")) {
+                    if (brief == null) { io.println("    research mode is not on — /research <topic> first"); break; }
+                    if (!org.codezaiku.research.LibraryBridge.answers()) {
+                        io.println("    no library answers on " + org.codezaiku.research.LibraryBridge.url() + " — /setup librarian installs ResearchZosho, or start its service (the brief is kept)");
+                        break;
+                    }
+                    if (org.codezaiku.research.LibraryBridge.token() == null) {
+                        io.println("    filing a run needs a write token: /setup librarian makes one, or set CODEZAIKU_LIBRARIAN_TOKEN (the brief is kept)");
+                        break;
+                    }
+                    String mode = arg.contains("depth") ? "depth" : arg.contains("broad") ? "broad" : brief.depth();
+                    try {
+                        // no ceiling unless the person set one: the run goes until the work is done (2026-09-07)
+                        String goTurns = org.codezaiku.Config.get("CODEZAIKU_RESEARCH_GO_TURNS", "");
+                        int turns = goTurns != null && goTurns.matches("\\d+") ? Integer.parseInt(goTurns) : 0;
+                        // The brief's sub-questions ARE the runner's plan — the refine phase's work, not redone.
+                        var r = org.codezaiku.research.LibraryBridge.client().research(brief.toQuestion(), mode, turns, brief.subQuestions());
+                        String id = r.get("job_id").asText();
+                        launched.add(id);
+                        io.println("    filed " + id + " (" + mode + ") — the library's worker runs it; you can keep talking or leave");
+                        io.println("    " + brief.render().lines().skip(1).map(String::strip).filter(l -> l.startsWith("question:")).findFirst().orElse(""));
+                        io.println("    /research status shows it; the chat says when it lands — in this session or the next — and /research read " + id + " prints it.");
+                    io.println("    Research mode is off.");
+                        brief = null;
+                    } catch (org.researchzosho.client.LibraryException e) {
+                        io.println("    ! " + e.getMessage() + " [" + e.code + "]");
+                    } catch (Exception e) {
+                        io.println("    ! could not file: " + e.getMessage() + " (brief kept)");
+                    }
+                } else {
+                    brief = new ResearchBrief(arg);
+                    io.println("    research mode ON — refining a brief for: " + arg);
+                    io.println("    Talk it through: what you want to understand, what to leave out, which sources matter.");
+                    io.println("    It checks the shelves and does a general search or two to orient — no deep research here.");
+                    io.println("      /research        shows the brief so far");
+                    io.println("      /research go     files the brief with the daemon for the deep run (go depth | go broad)");
+                    io.println("      /research off    discards it");
+                    // orientation: the first turn is the topic itself — the shelves, one general search, a question back
+                    if (ioRef != null && drive != null) turn(ioRef, drive, lspRef, libraryRef, indexRef, arg);
+                }
+            }
+            case "/setup" -> {
+                // `/setup librarian`: install ResearchZosho if it is not here yet, then its setup conversation, in this terminal.
+                if (!arg.equals("librarian") && !arg.equals("researchzosho")) { io.println("    usage: /setup librarian   (install ResearchZosho and set it up)"); break; }
+                int rc = org.codezaiku.ResearchZoshoInstall.door(new String[0], System.out);
+                io.println(rc == 0 ? "    done — /librarian <question> asks the library" : "    setup did not finish (exit " + rc + ")");
+            }
+            case "/librarian" -> {
+                // The desk, in chat: the deterministic answer package — exactly what the shelves
+                // hold, states and sources included, plus open threads. Model-free on purpose:
+                // what you read is what the library says, not a composition over it.
+                if (arg.isEmpty()) {
+                    io.println("    usage: /librarian <question>   (asks the library, not the web)");
+                    break;
+                }
+                io.println(org.codezaiku.research.LibraryBridge.answer(arg, 5).stripTrailing());
             }
             case "/cost" -> {
                 long pt = org.codezaiku.drive.DriveClient.SESSION_PROMPT_TOKENS.get();
@@ -684,7 +792,7 @@ public final class ChatRepl {
         // calling tools (the FindSymbolTool rule).
         if (org.codezaiku.Config.get("CODEZAIKU_SEARXNG") != null
                 || org.codezaiku.Config.get("CODEZAIKU_CHAT_WEB") != null) {
-            tools.add(new org.codezaiku.tools.WebSearchTool())
+            tools.add(new org.codezaiku.tools.WebSearchTool().focus(text))
                  .add(new org.codezaiku.tools.WebFetchTool());
         }
         if (consent.mode() != ChatConsent.Mode.PLAN) {
@@ -709,8 +817,22 @@ public final class ChatRepl {
         tools.listener(new Narrator(io, seen, consent, journal));
 
         String digest = tasks == null ? "" : tasks.digestInto();
+        // The library's push: relevant holdings ride into the turn's context (push before pull —
+        // the model never has to call a recall tool to benefit). "" when absent or irrelevant.
+        String stacks = org.codezaiku.research.LibraryBridge.push(text, 4);
+        // Research mode rides as context, not as a different loop: the map shows what is already
+        // organized so the model extends it instead of re-gathering (same push-not-pull logic).
+        String mapBlock = brief == null ? ""
+                : "RESEARCH REFINE MODE — you are The Librarian helping the person write a research brief on: "
+                  + brief.topic() + "\nTHE BRIEF SO FAR:\n" + brief.render()
+                  + "\nYOUR JOB THIS TURN: orient and refine, never research in depth. First use what the LIBRARY block above holds "
+                  + "(say so if it holds nothing). If the topic is unfamiliar or ambiguous, run ONE or TWO general web searches "
+                  + "(an encyclopedia-level overview is enough) to make sure you and the person mean the same thing. Then answer "
+                  + "briefly and ask ONE clarifying question that sharpens the brief — scope, sub-questions, sources, exclusions, "
+                  + "what a good result would contain. Reflect back what you now understand the ask to be. The deep research "
+                  + "runs later, from the finished brief.\n";
         String goal = session.restate() + memory.recall() + workingAgreements()
-                + digest + attachments + text;
+                + stacks + mapBlock + digest + attachments + text;
         abandoned.set(false);
         // Streamed prose appears as it is generated, when CODEZAIKU_STREAM is on. What streams is
         // the finishing tool's summary, decoded out of the argument fragments — the loop runs
@@ -749,7 +871,9 @@ public final class ChatRepl {
                 Runtime.getRuntime().halt(130);      // 128 + SIGINT
             }
         })) {
-            result = new FamiliarLoop(drive, tools, root, goal, maxTurns, library, index)
+            // research mode: a bounded turn (a few searches, then answer); otherwise the person is the cap
+            int turnBudget = brief != null ? Math.min(maxTurns, RESEARCH_TURN_STEPS) : maxTurns;
+            result = new FamiliarLoop(drive, tools, root, goal, turnBudget, library, index)
                     .chat()          // one task_done ends the turn — the person is the verifier
                     .lsp(lsp)
                     .cancelIf(abandoned::get)
@@ -806,6 +930,139 @@ public final class ChatRepl {
         session.log("agent", result.summary());
         if (result.done() && result.summary() != null) session.decided(firstLine(result.summary()));
         session.save();
+
+        // Refine-mode harvest: ONE classify call proposes how the turn changes the brief; the
+        // machine applies it (append/dedupe/remove) — the model never edits the document directly.
+        // A failed or unparseable proposal means the brief does not move this turn — never an error.
+        if (brief != null && result.summary() != null && !abandoned.get()) {
+            try {
+                var json = new com.fasterxml.jackson.databind.ObjectMapper();
+                var msgs = json.createArrayNode();
+                msgs.addObject().put("role", "user").put("content",
+                        "You maintain a RESEARCH BRIEF (requirements document) from a conversation.\n\nBRIEF SO FAR:\n"
+                        + brief.render()
+                        + "\nTHE TURN — the person said:\n" + org.codezaiku.research.LibraryBridge.compress(text, 600)
+                        + "\nThe librarian answered:\n" + org.codezaiku.research.LibraryBridge.compress(result.summary(), 1800)
+                        + "\n\nAnswer with a JSON object ONLY describing what the turn CHANGES (omit what it does not): "
+                        + "{\"question\": \"the refined research question, one sentence\", \"depth\": \"broad|depth\", "
+                        + "\"scope_in\": [..], \"scope_out\": [..], \"sub_questions\": [..], \"sources\": [\"languages or kinds of source wanted\"], "
+                        + "\"asks\": [\"specific deliverables the person asked for\"], \"held\": [\"library entry ids already covering part of it\"]}\n"
+                        + "Prefix an item with - to remove it. Only what the PERSON established or agreed to — not the librarian's guesses.");
+                String raw = drive.classify(msgs, 600);
+                int a = raw.indexOf('{'), b = raw.lastIndexOf('}');
+                if (a >= 0 && b > a) {
+                    int n = brief.apply(json.readTree(raw.substring(a, b + 1)));
+                    if (n > 0) io.println("(brief: " + n + " change(s) — /research shows it; /research go when it says what you want)");
+                }
+            } catch (Exception ignored) {
+                // the conversation is the product; the brief is its record, never a blocker
+            }
+        }
+    }
+
+    /** `/research status`: the active jobs, the last ten finished, and how many more there are. */
+    /** `/research status`: this patron's jobs on the daemon — the active ones, the last ten finished, unread marked. */
+    private void researchStatus(ChatIo io) {
+        if (!org.codezaiku.research.LibraryBridge.answers()) { io.println("    no library answers on " + org.codezaiku.research.LibraryBridge.url() + " — /setup librarian installs ResearchZosho, or start its service"); return; }
+        try {
+            var page = org.codezaiku.research.LibraryBridge.client().jobs(10, null);
+            var read = readJobs();
+            int shown = 0;
+            for (var j : page.path("active")) { if (statusLine(io, j, read)) shown++; }
+            for (var j : page.path("finished")) { if (statusLine(io, j, read)) shown++; }
+            long total = page.path("finished_total").asLong(0);
+            if (total > page.path("finished").size()) io.println("    … and " + (total - page.path("finished").size()) + " older finished job(s) on the daemon");
+            if (shown == 0) io.println("    no research jobs filed from here yet — /research <topic>, then /research go");
+            else io.println("    ◆ = landed, not yet read — /research read <J-id> prints it");
+        } catch (Exception e) {
+            io.println("    ! " + e.getMessage());
+        }
+    }
+
+    private boolean statusLine(ChatIo io, JsonNode j, java.util.Set<String> read) {
+        if (!"research".equals(j.path("kind").asText("research"))) return false;
+        String id = j.path("job_id").asText("");
+        String st = j.path("state").asText("");
+        boolean unread = ("done".equals(st) || "failed".equals(st)) && !read.contains(id);
+        String q = j.path("question").asText("");
+        int cut = q.indexOf('\n');
+        io.println("    " + (unread ? "◆ " : "  ") + id + "  " + st + "  " + j.path("elapsed_s").asLong(0) + "s  "
+                + org.codezaiku.research.LibraryBridge.compress(cut > 0 ? q.substring(0, cut) : q, 90)
+                + (j.hasNonNull("investigation") ? "  → " + j.get("investigation").asText() : ""));
+        return true;
+    }
+
+    /**
+     * Before each prompt: mention, once per chat session, every research job of ours that has landed
+     * and has NOT been read yet — including ones filed in an earlier chat that finished while nobody
+     * was here. The mark is cleared when the result is READ (/research read), never by the mention.
+     * The read marks live in CodeZaiku's own home, since the ledger is the daemon's.
+     */
+    private void reportLanded(ChatIo io) {
+        try {
+            if (!org.codezaiku.research.LibraryBridge.answers()) return;
+            var read = readJobs();
+            var page = org.codezaiku.research.LibraryBridge.client().jobs(20, null);
+            for (var j : page.path("finished")) {
+                String id = j.path("job_id").asText("");
+                if (id.isEmpty() || read.contains(id) || reported.contains(id)) continue;
+                reported.add(id);
+                String st = j.path("state").asText();
+                String q = j.path("question").asText("");
+                int cut = q.indexOf('\n');
+                io.println("  ◆ research " + id + ("done".equals(st) ? " landed" : " FAILED") + " — "
+                        + org.codezaiku.research.LibraryBridge.compress(cut > 0 ? q.substring(0, cut) : q, 100));
+                if ("done".equals(st)) {
+                    io.println("    " + (j.hasNonNull("investigation") ? j.get("investigation").asText() + " is in the library.  /research read " + id + " prints it (and marks it read)"
+                            : "refused at intake (see the library's open questions);") + " the library's housekeeping extracts its findings");
+                } else {
+                    io.println("    " + firstLine(j.path("result").asText("")) + "   (/research read " + id + " marks it read)");
+                }
+            }
+        } catch (Exception ignored) {
+            // a notice, never a blocker
+        }
+    }
+
+    /** `/research read <J-id | I-id>`: the whole result, here, from the daemon. */
+    private void researchRead(ChatIo io, String ref) {
+        if (!org.codezaiku.research.LibraryBridge.answers()) { io.println("    no library answers on " + org.codezaiku.research.LibraryBridge.url()); return; }
+        try {
+            var client = org.codezaiku.research.LibraryBridge.client();
+            String invId = ref;
+            if (ref.startsWith("J-")) {
+                JsonNode j = client.job(ref);
+                String st = j.path("state").asText();
+                if ("done".equals(st) || "failed".equals(st)) markRead(ref);   // read = the notice is spent
+                if (!"done".equals(st)) { io.println("    " + ref + " is " + st + (st.equals("failed") ? ": " + firstLine(j.path("result").asText("")) : " — not yet")); return; }
+                if (!j.hasNonNull("investigation")) { io.println("    " + ref + " finished but was refused at intake; its summary:"); io.println(j.path("result").asText("")); return; }
+                invId = j.get("investigation").asText();
+            }
+            JsonNode inv = client.get(invId);
+            if (inv == null || inv.isNull()) { io.println("    no investigation " + invId); return; }
+            io.println("  " + inv.path("id").asText() + "  [" + inv.path("state").asText() + ", by " + inv.path("writer").asText() + "]  " + inv.path("title").asText());
+            io.println("");
+            io.println(inv.path("body").asText("").strip());
+            var fs = inv.path("findings");
+            if (fs.isArray() && fs.size() > 0) { var ids = new java.util.ArrayList<String>(); for (var f : fs) ids.add(f.asText()); io.println("\n  findings extracted: " + String.join(", ", ids)); }
+            else io.println("\n  (no findings extracted yet — the library's housekeeping does that, or `researchzosho settle`)");
+        } catch (org.researchzosho.client.LibraryException e) {
+            io.println("    ! " + e.getMessage() + " [" + e.code + "]");
+        } catch (Exception e) {
+            io.println("    ! " + e.getMessage());
+        }
+    }
+
+    // the read marks: one id per line, in CodeZaiku's own home
+    private static Path readJobsFile() { return org.codezaiku.Config.home().resolve("research").resolve("read-jobs.txt"); }
+    private static java.util.Set<String> readJobs() {
+        try { return new java.util.HashSet<>(java.nio.file.Files.readAllLines(readJobsFile())); } catch (Exception e) { return new java.util.HashSet<>(); }
+    }
+    private static void markRead(String id) {
+        try {
+            java.nio.file.Files.createDirectories(readJobsFile().getParent());
+            if (!readJobs().contains(id)) java.nio.file.Files.writeString(readJobsFile(), id + "\n", java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (Exception ignored) { }
     }
 
     private static String firstLine(String s) {
@@ -817,7 +1074,7 @@ public final class ChatRepl {
      * Live tool narration. This is the seam ACP already drives, reused rather than reinvented — and
      * it is what makes a 30-second turn watchable without token streaming.
      */
-    private static final class Narrator implements ToolRegistry.Listener {
+    static final class Narrator implements ToolRegistry.Listener {
         private final ChatIo io;
         private final java.util.Set<String> files;
         private final ChatConsent consent;
@@ -862,16 +1119,55 @@ public final class ChatRepl {
         @Override public void started(String callId, String tool, JsonNode args) {
             String path = args != null && args.hasNonNull("path") ? args.get("path").asText() : null;
             if (path != null) files.add(path);
+            // Web work narrates its SUBSTANCE (the operator, 2026-09-01: "right now we only know
+            // searches and pages are being done") — the query in quotes, the url being read.
             String detail = path != null ? path
-                    : args != null && args.hasNonNull("command") ? args.get("command").asText() : "";
-            if (detail.length() > 70) detail = detail.substring(0, 67) + "...";
+                    : args != null && args.hasNonNull("command") ? args.get("command").asText()
+                    : args != null && args.hasNonNull("query") ? "\"" + args.get("query").asText() + "\""
+                    : args != null && args.hasNonNull("url") ? args.get("url").asText() : "";
+            if (detail.length() > 100) detail = detail.substring(0, 97) + "...";
             // The leading newline is for streaming: reasoning arrives without a trailing break, and
             // without this the tool line glues onto the middle of a streamed sentence.
             io.println("\n  · " + tool + (detail.isEmpty() ? "" : "  " + detail));
         }
 
         @Override public void finished(String callId, String tool, String result, boolean failed) {
-            if (failed) io.println("    failed");
+            if (failed) { io.println("    failed"); return; }
+            if ("web_search".equals(tool)) {
+                io.println("    " + searchDigest(result));
+            } else if ("web_fetch".equals(tool) && result != null && result.startsWith("source: ")) {
+                // the source line already carries url — Title (WebFetchTool adds the page title)
+                io.println("    read " + firstLineOf(result.substring("source: ".length())));
+            } else if ("web_fetch".equals(tool) && result != null
+                    && (result.startsWith("ERROR") || result.startsWith("ALREADY"))) {
+                io.println("    " + firstLineOf(result));
+            }
+        }
+
+        /** "N results — url1 · url2 · url3" (CODEZAIKU_CHAT_SEARCH_URLS urls, default 3), or the
+         *  honest failure state: no results / backend degraded. */
+        static String searchDigest(String result) {
+            if (result == null) return "(no result)";
+            if (result.startsWith("SEARCH BACKEND DEGRADED")) return "search backend DEGRADED — retrying differently";
+            if (result.startsWith("no results")) return "0 results";
+            if (result.startsWith("ALREADY SEARCHED")) return "already searched — needs a different query";
+            // both backends emit: "N. Title" then an indented "   url" line per result
+            int shown = org.codezaiku.Config.getInt("CODEZAIKU_CHAT_SEARCH_URLS", 3);
+            var urls = new java.util.ArrayList<String>();
+            int count = 0;
+            for (String line : result.split("\n")) {
+                if (line.matches("\\d+\\. .*")) count++;
+                else if (line.startsWith("   http") && urls.size() < shown) urls.add(line.strip());
+            }
+            if (count == 0) return firstLineOf(result);
+            return count + " result" + (count == 1 ? "" : "s")
+                    + (urls.isEmpty() ? "" : " — " + String.join(" · ", urls));
+        }
+
+        private static String firstLineOf(String s) {
+            int i = s.indexOf('\n');
+            String line = (i < 0 ? s : s.substring(0, i)).strip();
+            return line.length() > 160 ? line.substring(0, 157) + "..." : line;
         }
     }
 

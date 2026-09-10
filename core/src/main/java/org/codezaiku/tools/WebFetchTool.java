@@ -29,9 +29,13 @@ import java.util.zip.InflaterInputStream;
  * truncated, so a small model's context isn't blown by one page.
  */
 public final class WebFetchTool implements Tool {
-    private static final HttpClient HTTP = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NORMAL).build();
+
+    /** Session-wide count of successful source fetches — the acquisitions gate's "did this run
+     *  actually READ anything" evidence (a finding needs ≥1 fetched source; a claim without one
+     *  is answered-from-memory, which the librarian refuses at intake). */
+    public static final java.util.concurrent.atomic.AtomicInteger FETCHES_OK =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     // Page excerpts must stay SMALL: a 9B has a ~16K-token window shared with history. 12K-char pages filled
     // the context after a few fetches (out_budget collapsed 16384 -> 1909) leaving no room to WRITE the answer —
     // the loop could only keep making small tool calls and never concluded. Keep excerpts tight.
@@ -86,30 +90,55 @@ public final class WebFetchTool implements Tool {
                     + " in this session — its content is above in your history. Do NOT repeat this fetch. "
                     + "Fetch a DIFFERENT source, or re-read this one with a different `find` if you need "
                     + "another part of it, or write the answer now and call task_done.";
-        HttpResponse<byte[]> resp;
+        Fetch.Result resp;
         try {
-            resp = HTTP.send(HttpRequest.newBuilder(URI.create(url))
-                            .timeout(Duration.ofSeconds(30))
-                            .header("User-Agent", "Mozilla/5.0 (compatible; CodeZaiku-research/0.1)")
-                            .header("Accept-Encoding", "gzip")
-                            .GET().build(),
-                    HttpResponse.BodyHandlers.ofByteArray());
+            resp = Fetch.get(url, Duration.ofSeconds(30));
+        } catch (IllegalArgumentException e) {
+            return "ERROR: " + e.getMessage() + " — " + url + " is not a source this tool will read.";
         } catch (Exception e) {
             return "ERROR: could not fetch " + url + " (" + e + ")";
         }
-        if (resp.statusCode() >= 400) {
+        url = resp.url();   // after redirects — what was actually read is what gets cited
+        if (resp.status() >= 400) {
             // WIKIPEDIA 404 → real titles. A model GUESSES plausible article titles and a near-miss 404s
             // (measured: "List of state constitutions of the United States" — the page exists as
             // "List of U.S. state constitutions"; three fetch attempts, task lost). Wikipedia's own
             // title-search API resolves the guess; enrich the error with the top real titles.
             String didYouMean = wikiTitleSuggestions(url);
-            return "ERROR: HTTP " + resp.statusCode() + " for " + url + didYouMean;
+            return "ERROR: HTTP " + resp.status() + " for " + url + didYouMean;
         }
-        String text = readable(decode(resp));
-        if (text.length() <= MAX_CHARS) return "source: " + url + "\n\n" + text;
+        // Bytes → sniff → text: PDF, DOCX/PPTX/ODT/EPUB and HTML all arrive here as bytes and are
+        // converted by what they ARE (DocText), never by what the URL or content-type claims.
+        // Before 2026-09-01 a PDF body went through the HTML path and came out as "binary,
+        // unreadable" — two JA academic papers lost that way on the keigo shelf.
+        byte[] bytes = resp.body();
+        DocText.Doc doc = DocText.convert(bytes, url);
+        if (doc.kind().startsWith("pdf-unreadable")) {
+            return "ERROR: PDF at " + url + " could not be converted (" + doc.kind() + ")";
+        }
+        String text = doc.text();
+        FETCHES_OK.incrementAndGet();
+        // The document's own title rides on the source line: the person watching the turn sees
+        // WHAT was read, not just that a read happened, and the model cites by name, not URL.
+        String title = doc.title();
+        String kindNote = "html".equals(doc.kind()) || "text".equals(doc.kind()) ? "" : " [" + doc.kind() + "]";
+        String head = "source: " + url + (title.isEmpty() ? "" : " — " + title) + kindNote + "\n\n";
+        if (text.length() <= MAX_CHARS) return head + text;
         String terms = args.path("find").asText("");
         if (terms.isBlank()) terms = focus;
-        return "source: " + url + "\n\n" + excerpt(text, terms);
+        return head + excerpt(text, terms);
+    }
+
+    /** The page's <title>, entity-decoded and trimmed, or "". Read from the RAW body — readable()
+     *  strips the head, so this must run before it. */
+    public static String pageTitle(String html) {
+        if (html == null) return "";
+        var m = java.util.regex.Pattern.compile("(?is)<title[^>]*>(.*?)</title>").matcher(html);
+        if (!m.find()) return "";
+        String t = m.group(1).replaceAll("\\s+", " ").strip()
+                .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&#39;", "'").replace("&quot;", "\"").replace("&nbsp;", " ");
+        return t.length() > 120 ? t.substring(0, 117) + "..." : t;
     }
 
     /** On a wikipedia.org/wiki/<title> 404, ask Wikipedia's title-search API for the real titles and
@@ -122,12 +151,9 @@ public final class WebFetchTool implements Tool {
         try {
             String api = "https://" + lang + ".wikipedia.org/w/rest.php/v1/search/page?limit=5&q="
                     + URLEncoder.encode(title.replace('_', ' '), StandardCharsets.UTF_8);
-            HttpResponse<String> r = HTTP.send(HttpRequest.newBuilder(URI.create(api))
-                            .timeout(Duration.ofSeconds(15))
-                            .header("User-Agent", "Mozilla/5.0 (compatible; CodeZaiku-research/0.1)")
-                            .GET().build(), HttpResponse.BodyHandlers.ofString());
-            if (r.statusCode() != 200) return "";
-            var pages = new ObjectMapper().readTree(r.body()).path("pages");
+            Fetch.Result r = Fetch.get(api, Duration.ofSeconds(15));
+            if (r.status() != 200) return "";
+            var pages = new ObjectMapper().readTree(new String(r.body(), StandardCharsets.UTF_8)).path("pages");
             if (!pages.isArray() || pages.isEmpty()) return "";
             StringBuilder sb = new StringBuilder("\nThat exact article title does not exist. Real articles matching it:\n");
             for (JsonNode p : pages) {
@@ -138,32 +164,6 @@ public final class WebFetchTool implements Tool {
         } catch (Exception e) {
             return "";
         }
-    }
-
-    /**
-     * Decompress the body when the server compressed it. java.net.http does NOT auto-decompress, and some
-     * CDNs return {@code Content-Encoding: gzip} even to a client that never offered Accept-Encoding
-     * (measured: Yahoo Finance) — the model then received literal gzip bytes and reported the source as
-     * "garbled", scoring 0 on a task whose data was right there. We now offer gzip explicitly (fewer
-     * surprises than pretending we can't) and inflate it ourselves.
-     */
-    private static String decode(HttpResponse<byte[]> resp) {
-        byte[] body = resp.body();
-        String enc = resp.headers().firstValue("Content-Encoding").orElse("").toLowerCase();
-        try {
-            if (enc.contains("gzip") || (body.length > 2 && body[0] == (byte) 0x1f && body[1] == (byte) 0x8b)) {
-                try (var in = new GZIPInputStream(new ByteArrayInputStream(body))) {
-                    body = in.readAllBytes();
-                }
-            } else if (enc.contains("deflate")) {
-                try (var in = new InflaterInputStream(new ByteArrayInputStream(body))) {
-                    body = in.readAllBytes();
-                }
-            }
-        } catch (Exception e) {
-            // fall through with the raw bytes — worse than decoded, better than an exception
-        }
-        return new String(body, StandardCharsets.UTF_8);
     }
 
     private static final int LEAD_CHARS = 600;   // always keep the opening — it says what the page IS
