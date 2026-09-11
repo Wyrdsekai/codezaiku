@@ -18,8 +18,11 @@ class SelfUpdateTest {
 
     /** A fake install root with one jar and one launcher, and a fake release: a tarball of a newer root plus SHA256SUMS, served locally. */
     static String serve(Path dir, HttpServer s) {
+        // like GitHub: the release URL answers 302 to the store that holds the bytes; an updater that does not follow it fails
         s.createContext("/", x -> {
-            Path f = dir.resolve(x.getRequestURI().getPath().substring(1));
+            String path = x.getRequestURI().getPath();
+            if (!path.startsWith("/store/")) { x.getResponseHeaders().set("Location", "/store" + path); x.sendResponseHeaders(302, -1); return; }
+            Path f = dir.resolve(path.substring("/store/".length()));
             if (!Files.exists(f)) { x.sendResponseHeaders(404, -1); return; }
             byte[] b = Files.readAllBytes(f);
             x.sendResponseHeaders(200, b.length);

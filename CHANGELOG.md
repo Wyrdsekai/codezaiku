@@ -3,6 +3,11 @@
 Notable changes. This project follows [semantic versioning](https://semver.org/) loosely: while at
 0.x, minor versions may change behaviour.
 
+## 0.3.1
+
+Fixed
+- `codezaiku update now` failed with "HTTP 302" on a tarball install: a GitHub release asset is served through a redirect and the downloader did not follow it. The update check, the deb path, and `codezaiku install researchzosho` were unaffected. On 0.3.0, update with the install one-liner instead.
+
 ## 0.3.0
 
 Added

@@ -29,7 +29,8 @@ public final class SelfUpdate {
     private SelfUpdate() { }
 
     public static final String REPO = "Wyrdsekai/codezaiku";
-    private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).build();
+    private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8))
+            .followRedirects(HttpClient.Redirect.NORMAL).build();   // a GitHub release asset is a 302 to its store; the updater must follow it
 
     /** check | auto | off */
     public static String mode() {
