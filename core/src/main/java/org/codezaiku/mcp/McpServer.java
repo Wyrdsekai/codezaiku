@@ -97,7 +97,7 @@ public final class McpServer {
                 r.set("capabilities", caps);
                 ObjectNode info = M.createObjectNode();
                 info.put("name", "codezaiku");
-                info.put("version", "0.1");
+                info.put("version", org.codezaiku.FamiliarMain.VERSION);   // it said "0.1" whatever the release, through 0.3.3
                 r.set("serverInfo", info);
                 return r;
             }

@@ -431,19 +431,30 @@ public final class ModelServer {
         for (Row r : ROWS) urls.add(r.url());
         for (String a : new String[]{"linux_amd64.tar.gz", "linux_arm64.tar.gz", "darwin_arm64.tar.gz", "darwin_amd64.tar.gz", "windows_amd64.zip"}) urls.add("https://github.com/mostlygeek/llama-swap/releases/download/v" + SWAP_VERSION + "/llama-swap_" + SWAP_VERSION + "_" + a);
         for (String a : new String[]{"macos-arm64.tar.gz", "macos-x64.tar.gz", "win-vulkan-x64.zip"}) urls.add("https://github.com/ggml-org/llama.cpp/releases/download/" + LLAMA_BUILD + "/llama-" + LLAMA_BUILD + "-bin-" + a);
+        int limited = 0;
         for (String u : urls) {
-            String status;
-            try {
-                Result h = runner.run(List.of(os == Os.windows ? "curl.exe" : "curl", "-sIL", "-o", os == Os.windows ? "NUL" : "/dev/null", "-w", "%{http_code}", u));
-                status = h.out().strip();
-            } catch (Exception e) { status = "no curl"; }
-            boolean ok = status.equals("200");
-            if (!ok) bad++;
-            out.println("  " + (ok ? "ok  " : "GONE") + " " + status + "  " + u);
+            String status = "";
+            // a host that is rate-limiting (429) says nothing about the file: wait and ask again, up to three times
+            for (int attempt = 0; attempt < 3; attempt++) {
+                if (attempt > 0) { try { Thread.sleep(checkBackoffMs); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; } }
+                try {
+                    Result h = runner.run(List.of(os == Os.windows ? "curl.exe" : "curl", "-sIL", "-o", os == Os.windows ? "NUL" : "/dev/null", "-w", "%{http_code}", u));
+                    status = h.out().strip();
+                } catch (Exception e) { status = "no curl"; }
+                if (!status.equals("429")) break;
+            }
+            boolean ok = status.equals("200"), rateLimited = status.equals("429");
+            if (rateLimited) limited++; else if (!ok) bad++;
+            out.println("  " + (ok ? "ok  " : rateLimited ? "WAIT" : "GONE") + " " + status + "  " + u + (rateLimited ? "  (the host is rate-limiting this machine; not checked, not proof of absence)" : ""));
         }
-        out.println(bad == 0 ? "  every row and pinned build resolves" : "  " + bad + " missing: re-point the row (and re-record its sha256) before a release");
+        if (bad == 0 && limited == 0) out.println("  every row and pinned build resolves");
+        if (bad > 0) out.println("  " + bad + " missing: re-point the row (and re-record its sha256) before a release");
+        if (limited > 0) out.println("  " + limited + " not checked: the host answered 429 (rate-limited) three times; nothing is known to be missing, run the check again later");
         return bad == 0 ? 0 : 1;
     }
+
+    /** The pause between attempts when a host answers 429; a test sets it to 0. */
+    static long checkBackoffMs = 20_000;
 
     /** The other product's settings file, when it is not this product's own; its drive line, or null. */
     static String siblingDrive() {

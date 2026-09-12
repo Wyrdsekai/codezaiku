@@ -243,4 +243,18 @@ class ModelServerTest {
         assertTrue(o.contains("llama-swap_255_windows_amd64.zip") && o.contains("llama-b10929-bin-win-vulkan-x64.zip"), o);
         assertTrue(o.contains("1 missing"), o);
     }
+
+    @Test
+    void checkReadsARateLimitAsUncheckedNotGone() {
+        ModelServer.os = ModelServer.Os.linux;
+        ModelServer.checkBackoffMs = 0;
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        ModelServer.runner = cmd -> { String u = cmd.get(cmd.size() - 1); if (u.contains("gemma-4-E2B")) calls.incrementAndGet(); return new ModelServer.Result(0, u.contains("gemma-4-E2B") ? "429" : "200"); };
+        var out = new ByteArrayOutputStream();
+        assertEquals(0, ModelServer.check(new PrintStream(out, true)), "a 429 is not a missing file: the release gate does not fail on it");
+        String o = out.toString();
+        assertEquals(3, calls.get(), "asked three times before giving up on the host");
+        assertTrue(o.contains("WAIT 429  https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"), o);
+        assertTrue(o.contains("1 not checked") && !o.contains("GONE") && !o.contains(" missing:"), o);
+    }
 }

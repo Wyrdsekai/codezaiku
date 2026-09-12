@@ -3,6 +3,12 @@
 Notable changes. This project follows [semantic versioning](https://semver.org/) loosely: while at
 0.x, minor versions may change behaviour.
 
+## 0.3.4
+
+Fixed
+- The MCP server introduced itself as version 0.1 whatever the release; it now says the release's version. (Its sibling ResearchZosho 0.1.8 fixes the same line, and its drive probe, which named no model and so read every llama-swap drive as absent; CodeZaiku's probe already named the model.)
+- `codezaiku model serve check` (which the release build runs) read a rate-limited host (HTTP 429) as a missing file; it now asks again, twice, twenty seconds apart, and then reports the row as not checked rather than gone.
+
 ## 0.3.3
 
 Added
