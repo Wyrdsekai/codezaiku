@@ -79,4 +79,35 @@ class SelfUpdateTest {
         assertEquals("check", SelfUpdate.mode());
         assertTrue(SelfUpdate.status().contains("installed:") && SelfUpdate.status().contains("mode:      check"), SelfUpdate.status());
     }
+
+    @Test
+    void anInstallWithItsOwnRuntimeTakesTheNextVersionsPlatformBuild(@TempDir Path tmp) throws Exception {
+        Path root = tmp.resolve("codezaiku"); fakeRoot(root, "0.1.1");
+        Files.createDirectories(root.resolve("jre").resolve("bin"));   // the mark of a build that carries its own Java
+        Path release = tmp.resolve("release"); Files.createDirectories(release);
+        Path stage = tmp.resolve("stage"); fakeRoot(stage.resolve("codezaiku"), "0.1.2");
+        Files.createDirectories(stage.resolve("codezaiku").resolve("jre").resolve("bin"));
+        String asset = "codezaiku-0.1.2-" + SelfUpdate.platformTag() + ".tar.gz";
+        assertEquals(0, new ProcessBuilder("tar", "czf", release.resolve(asset).toString(), "-C", stage.toString(), "codezaiku").inheritIO().start().waitFor());
+        // the plain tarball is there too, and must NOT be the one taken
+        Path plainStage = tmp.resolve("plain"); fakeRoot(plainStage.resolve("codezaiku"), "0.1.2");
+        assertEquals(0, new ProcessBuilder("tar", "czf", release.resolve("codezaiku-0.1.2.tar.gz").toString(), "-C", plainStage.toString(), "codezaiku").inheritIO().start().waitFor());
+        Files.writeString(release.resolve("SHA256SUMS"), SelfUpdate.sha256(release.resolve(asset)) + "  " + asset + "\n" + SelfUpdate.sha256(release.resolve("codezaiku-0.1.2.tar.gz")) + "  codezaiku-0.1.2.tar.gz\n");
+        var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        java.util.List<String> asked = new java.util.ArrayList<>();
+        server.createContext("/", ex -> {
+            asked.add(ex.getRequestURI().getPath());
+            Path f = release.resolve(ex.getRequestURI().getPath().substring(1));
+            if (!Files.exists(f)) { ex.sendResponseHeaders(404, -1); ex.close(); return; }
+            byte[] b = Files.readAllBytes(f); ex.sendResponseHeaders(200, b.length); ex.getResponseBody().write(b); ex.close();
+        });
+        server.start();
+        try {
+            SelfUpdate.swapIn(root, "0.1.2", "http://127.0.0.1:" + server.getAddress().getPort(), new PrintStream(new ByteArrayOutputStream()));
+            assertTrue(asked.contains("/" + asset), asked.toString());
+            assertFalse(asked.contains("/codezaiku-0.1.2.tar.gz"), "the plain tarball was not taken: " + asked);
+            assertTrue(Files.isDirectory(root.resolve("jre")), "still carries its runtime");
+        } finally { server.stop(0); }
+        assertTrue(SelfUpdate.platformTag().matches("(linux|macos|windows)-(x64|arm64)"), SelfUpdate.platformTag());
+    }
 }

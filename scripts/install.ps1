@@ -29,15 +29,24 @@ $prefix = if ($env:CODEZAIKU_PREFIX) { $env:CODEZAIKU_PREFIX }
 # is the odd one out.
 function Die($m) { [Console]::Error.WriteLine("codezaiku: $m"); exit 1 }
 
-# A JRE is the one thing not bundled. Fail before downloading 23MB nobody can run.
+# Java 21 or newer on the machine gets the small tarball. Without it -- or with $env:CODEZAIKU_RUNTIME set -- the
+# x64 build that carries its own Java runtime is installed instead, when the release has one.
+$javaOk = $false; $jv = 0
 $java = Get-Command java -ErrorAction SilentlyContinue
-if (-not $java) { Die 'java not found -- CodeZaiku needs a JRE or JDK 21 or newer on PATH' }
-# java writes its version to STDERR, and with ErrorActionPreference=Stop PowerShell treats any
-# native stderr output as a terminating error -- so probing the JDK aborted the installer on a
-# perfectly good JDK. Relax the preference for this one call, not for the whole script.
-$jvLine = & { $ErrorActionPreference = 'Continue'; (& java -version) 2>&1 | Select-Object -First 1 }
-$jv = "$jvLine" -replace '.*version "(\d+).*', '$1'
-if ([int]$jv -lt 21) { Die "java $jv found -- CodeZaiku needs 21 or newer" }
+if ($java) {
+    # java writes its version to STDERR, and with ErrorActionPreference=Stop PowerShell treats any
+    # native stderr output as a terminating error -- so probing the JDK aborted the installer on a
+    # perfectly good JDK. Relax the preference for this one call, not for the whole script.
+    $jvLine = & { $ErrorActionPreference = 'Continue'; (& java -version) 2>&1 | Select-Object -First 1 }
+    $jv = "$jvLine" -replace '.*version "(\d+).*', '$1'
+    if ([int]$jv -ge 21) { $javaOk = $true }
+}
+function NoJava { if (-not $java) { Die 'java not found -- CodeZaiku needs a JRE or JDK 21 or newer on PATH' } else { Die "java $jv found -- CodeZaiku needs 21 or newer" } }
+$runtime = ''
+if ($env:CODEZAIKU_RUNTIME -or -not $javaOk) {
+    $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    if ("$arch" -eq 'X64') { $runtime = 'windows-x64' } else { NoJava }
+}
 
 # The harness shells out through bash, and Git for Windows supplies it. Without it the install
 # succeeds and every command that touches the shell fails later -- say so now, not then.
@@ -54,11 +63,13 @@ if (-not $ver -and -not $base) {
 if (-not $base) { $base = "https://github.com/$repo/releases/download/v$ver" }
 
 $tar = "codezaiku-$ver.tar.gz"
+if ($runtime) { $tar = "codezaiku-$ver-$runtime.tar.gz"; Write-Host "codezaiku: installing the $runtime build, which carries its own Java runtime" }
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("codezaiku-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     Write-Host "codezaiku: downloading $tar"
-    Invoke-WebRequest "$base/$tar" -OutFile "$tmp\$tar" -UseBasicParsing
+    try { Invoke-WebRequest "$base/$tar" -OutFile "$tmp\$tar" -UseBasicParsing }
+    catch { if ($runtime) { [Console]::Error.WriteLine("codezaiku: this release has no build with its own runtime for $runtime ($base/$tar)"); NoJava } else { Die "download failed: $base/$tar ($_)" } }
     Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$tmp\SHA256SUMS" -UseBasicParsing
 
     # An artifact that does not match is not installed: a partial download and a substituted one

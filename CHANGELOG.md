@@ -3,6 +3,12 @@
 Notable changes. This project follows [semantic versioning](https://semver.org/) loosely: while at
 0.x, minor versions may change behaviour.
 
+## 0.3.2
+
+Added
+- `npx -y @wyrdsekai/codezaiku-mcp` starts the MCP server from any client that runs npm packages: the launcher finds an installed CodeZaiku, or fetches the release of the same version, checks it against the release's checksums and unpacks it under `~/.codezaiku/launcher`. CodeZaiku is listed in the MCP Registry as `io.github.Wyrdsekai/codezaiku`.
+- Builds with their own Java runtime, one per platform (Linux and macOS on x64 and arm64, Windows x64): `codezaiku-<version>-<platform>.tar.gz`, nothing to install first. The install one-liners take one when the machine has no Java 21 (`CODEZAIKU_RUNTIME=1` asks for it), the npm launcher does the same, and `codezaiku update` on such an install stays on its own kind.
+
 ## 0.3.1
 
 Fixed

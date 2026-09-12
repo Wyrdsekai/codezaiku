@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Wyrdsekai/codezaiku",
+  "title": "CodeZaiku",
+  "description": "A local-model operator for one machine: coding, review, research and guarded ops.",
+  "websiteUrl": "https://codezaiku.org",
+  "repository": {
+    "url": "https://github.com/Wyrdsekai/codezaiku",
+    "source": "github"
+  },
+  "version": "0.3.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@wyrdsekai/codezaiku-mcp",
+      "version": "0.3.2",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "CODEZAIKU_DRIVE",
+          "description": "The model server, an OpenAI-style endpoint (or set it in ~/.codezaiku/config)",
+          "isRequired": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

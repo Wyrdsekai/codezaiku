@@ -34,7 +34,7 @@ on:
 
 permissions:
   contents: write        # upload .sigstore.json bundles to the release
-  id-token: write        # Sigstore keyless signing via GitHub OIDC
+  id-token: write        # Sigstore keyless signing via GitHub OIDC; npm trusted publishing; the MCP Registry's OIDC login
   attestations: write    # actions/attest -> GitHub attestation store
 
 jobs:
@@ -45,10 +45,17 @@ jobs:
       fail-fast: false     # one unattested artifact must not hide the others
       matrix:
         include:
-          - artifact: tarball
-            pattern: 'codezaiku-[0-9]*.tar.gz'
-          - artifact: deb
-            pattern: 'codezaiku_*_all.deb'
+          # pattern: what gh downloads (a glob; the plain tarball's would match the platform builds too, since "x64"
+          # ends in a digit); name: the one file the job attests, an exact expression
+          - { artifact: tarball,     pattern: 'codezaiku-*.tar.gz',              name: 'codezaiku-[0-9.]+\.tar\.gz' }
+          - { artifact: deb,         pattern: 'codezaiku_*_all.deb',             name: 'codezaiku_[0-9.]+_all\.deb' }
+          # the builds with their own Java runtime, made by scripts/release-build.sh with the rest (from 0.3.2; a re-run
+          # of this workflow on an older tag shows these five red, which is the truth about that release)
+          - { artifact: linux-x64,   pattern: 'codezaiku-*-linux-x64.tar.gz',    name: 'codezaiku-[0-9.]+-linux-x64\.tar\.gz' }
+          - { artifact: linux-arm64, pattern: 'codezaiku-*-linux-arm64.tar.gz',  name: 'codezaiku-[0-9.]+-linux-arm64\.tar\.gz' }
+          - { artifact: macos-x64,   pattern: 'codezaiku-*-macos-x64.tar.gz',    name: 'codezaiku-[0-9.]+-macos-x64\.tar\.gz' }
+          - { artifact: macos-arm64, pattern: 'codezaiku-*-macos-arm64.tar.gz',  name: 'codezaiku-[0-9.]+-macos-arm64\.tar\.gz' }
+          - { artifact: windows-x64, pattern: 'codezaiku-*-windows-x64.tar.gz',  name: 'codezaiku-[0-9.]+-windows-x64\.tar\.gz' }
     steps:
       - name: Resolve tag
         id: tag
@@ -86,10 +93,10 @@ jobs:
         id: asset
         run: |
           cd assets
-          FILE=$(find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%f\n')
+          FILE=$(find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%f\n' | grep -E '^${{ matrix.name }}$' || true)
           COUNT=$(printf '%s\n' "$FILE" | grep -c .)
           if [ "$COUNT" -ne 1 ]; then
-            echo "Expected exactly one asset for pattern '${{ matrix.pattern }}', got $COUNT:" >&2
+            echo "Expected exactly one asset named like '${{ matrix.name }}', got $COUNT:" >&2
             printf '%s\n' "$FILE" >&2
             exit 1
           fi
@@ -134,3 +141,59 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
           echo "Uploaded $(basename "$OUT")"
+
+  # The npm launcher (npm/): the package version is the release's; trusted publishing signs it with this workflow's
+  # identity (no token; set up once on npmjs.com for the package, after its first publish by hand — RELEASING.md).
+  # A version already on npm — the first one, published by hand — is left alone. Still only GitHub-authored actions.
+  launcher:
+    name: Launcher on npm
+    needs: attest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: npm 11.5+ (trusted publishing)
+        run: npm install -g npm@latest && npm --version
+      - name: The launcher names this release
+        run: |
+          TAG="${{ github.event.release.tag_name || github.ref_name }}"
+          V=$(node -p "require('./npm/package.json').version")
+          [ "${V%%-*}" = "${TAG#v}" ] || { echo "npm/package.json says $V, the release is ${TAG#v}" >&2; exit 1; }   # 0.1.6-1 starts 0.1.6
+          cd npm && npm test
+      - name: Publish
+        working-directory: npm
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if npm view "@wyrdsekai/codezaiku-mcp@$V" version >/dev/null 2>&1; then echo "already on npm: $V"; exit 0; fi
+          npm publish --access public --tag latest   # required for a version with a suffix (0.1.6-1); harmless otherwise
+
+  # The MCP Registry entry (server.json): the npm launcher it names must exist first.
+  registry:
+    name: MCP Registry
+    needs: launcher
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref_name }}
+      - name: mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher --help | head -1
+      - name: server.json names this release
+        run: |
+          TAG="${{ github.event.release.tag_name || github.ref_name }}"
+          V=$(jq -r .version server.json)
+          [ "$V" = "${TAG#v}" ] || { echo "server.json says $V, the release is ${TAG#v}" >&2; exit 1; }
+          ./mcp-publisher validate
+      - name: Publish
+        run: |
+          ./mcp-publisher login github-oidc
+          for i in 1 2 3 4 5 6; do ./mcp-publisher publish && exit 0; echo "retry $i: npm may still be propagating"; sleep 30; done
+          exit 1
+

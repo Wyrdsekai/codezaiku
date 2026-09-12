@@ -23,7 +23,9 @@ It runs against any OpenAI-compatible server and ships no weights. The reference
 
 ## Quick start
 
-You need a **JDK 21+** and an **OpenAI-compatible model server**. CodeZaiku ships no weights.
+You need an **OpenAI-compatible model server**, and a **JDK 21+** unless you take a build that carries its
+own Java runtime (from 0.3.2, one per platform; the installer picks one when Java is missing). CodeZaiku
+ships no weights.
 
 Linux is the supported platform. macOS runs the coding and research surfaces (and can operate remote
 Linux hosts over ssh); Windows works under WSL2. There is a container image. See
@@ -48,7 +50,7 @@ and the two things that trip people up. Nothing here depends on it; CodeZaiku ru
 
 | path | needs | good for |
 |---|---|---|
-| **one-line install** — `curl … \| sh`, or `irm … \| iex` on Windows | a **JDK 21+** | **the recommended path.** Verifies the download against the release checksums |
+| **one-line install** — `curl … \| sh`, or `irm … \| iex` on Windows | a **JDK 21+**, or nothing: without one it takes the build with its own runtime | **the recommended path.** Verifies the download against the release checksums |
 | **release tarball** — unpack and run; nothing to build | a **JDK 21+** | doing it by hand, or air-gapped |
 | **Docker** — `packaging/docker/Dockerfile` | docker only | trying it with nothing on the host |
 | **`.deb`** — from the release, or `packaging/deb/build-deb.sh` | a JRE, pulled automatically by apt | Debian/Ubuntu, no build |
@@ -97,7 +99,9 @@ sudo apt install ./codezaiku_0.1.1_all.deb
 ```
 
 The one-liners deliberately do not install a JRE themselves: a script piped into a shell should not
-be reaching for `sudo`. They check for one, and say so if it is missing.
+be reaching for `sudo`. They check for one; when it is missing they install the build for the platform
+that carries its own runtime (`codezaiku-<version>-<platform>.tar.gz`, from 0.3.2; `CODEZAIKU_RUNTIME=1`
+asks for it outright), and `codezaiku update` keeps such an install on its own kind.
 
 **To upgrade, run the same command again.** The installers resolve the latest release each time and
 replace the old install rather than writing over it, so nothing stale is left behind. Your config and
@@ -322,6 +326,7 @@ codezaiku research "what changed in the Foo API in v3" depth
 codezaiku run --text "add pagination" --output-format json   # one task, one JSON result
 codezaiku acp                                   # Agent Client Protocol v1 agent on stdio
 codezaiku mcp                                   # MCP server on stdio, all surfaces exposed
+npx -y @wyrdsekai/codezaiku-mcp                 # the same, from any client that runs npm packages; installs the release if needed
 codezaiku serve 7070                            # HTTP: POST /fix, GET /health, GET /audit
 ```
 

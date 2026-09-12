@@ -150,7 +150,9 @@ public final class SelfUpdate {
      * install as it was.
      */
     static void swapIn(Path root, String version, String base, java.io.PrintStream out) throws Exception {
-        String tar = "codezaiku-" + version + ".tar.gz";
+        // an install that carries its own Java (a jre/ beside bin/) stays one: the next version's build for this platform
+        boolean runtime = Files.isDirectory(root.resolve("jre"));
+        String tar = "codezaiku-" + version + (runtime ? "-" + platformTag() : "") + ".tar.gz";
         Path work = Files.createTempDirectory(root.toAbsolutePath().getParent(), ".codezaiku-update-");
         try {
             Path tarPath = work.resolve(tar);
@@ -173,6 +175,7 @@ public final class SelfUpdate {
             if (p.waitFor() != 0) throw new IOException("could not unpack " + tar + ": " + o.strip());
             Path fresh = unpack.resolve("codezaiku");
             if (!Files.isDirectory(fresh.resolve("lib"))) throw new IOException(tar + " does not contain codezaiku/lib");
+            if (runtime && !Files.isDirectory(fresh.resolve("jre"))) throw new IOException(tar + " carries no runtime; this install has one, and the next must too");
             Path old = root.resolveSibling(root.getFileName() + ".old");
             deleteTree(old);
             try {
@@ -191,6 +194,15 @@ public final class SelfUpdate {
         } finally {
             deleteTree(work);
         }
+    }
+
+    /** The release's name for this machine's build with its own runtime: linux-x64, linux-arm64, macos-x64, macos-arm64, windows-x64. */
+    static String platformTag() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+        String o = os.contains("win") ? "windows" : os.contains("mac") || os.contains("darwin") ? "macos" : "linux";
+        String a = arch.contains("aarch64") || arch.contains("arm64") ? "arm64" : "x64";
+        return o + "-" + a;
     }
 
     private static void fetch(String url, Path to) throws IOException {
