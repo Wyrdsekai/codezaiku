@@ -5,9 +5,9 @@
 
 # CodeZaiku
 
-A harness for driving **small local models** through real work: writing and maintaining code,
-operating a service stack, reviewing diffs, checking security posture, and researching questions
-against live sources.
+A coding and development harness that runs on **local models or hosted APIs**, through real work:
+writing and maintaining code, reviewing diffs, operating a service stack, checking security posture,
+and researching questions against live sources.
 
 Most agents like this assume a frontier model behind someone else's API. CodeZaiku is built the
 other way round — a 9B on hardware you own — and the harness does the work that makes that viable:
@@ -399,6 +399,14 @@ the ones that came out badly.
 answer. For anything else, **support@codezaiku.org**. Vulnerabilities go to **security@codezaiku.org**
 or a private advisory — see [SECURITY.md](SECURITY.md); conduct concerns to
 **conduct@codezaiku.org**.
+
+## The family
+
+CodeZaiku is part of [Wyrdsekai](https://wyrdsekai.org), and its sibling is
+[ResearchZosho](https://researchzosho.org), the research library: it keeps what research runs find,
+checks the claims against their sources, and answers questions from what it holds.
+`codezaiku install researchzosho` puts it beside CodeZaiku, and the two share a model server, so one
+on-demand model on a machine serves both.
 
 ## License
 

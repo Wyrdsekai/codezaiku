@@ -1,6 +1,6 @@
 # @wyrdsekai/codezaiku-mcp
 
-Starts [CodeZaiku](https://codezaiku.org), the local-model operator for one machine, as an MCP server over
+Starts [CodeZaiku](https://codezaiku.org), the coding and development harness for local models and hosted APIs, as an MCP server over
 stdio. Any MCP client that can run `npx` can run it:
 
 ```json

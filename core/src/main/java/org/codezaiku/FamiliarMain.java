@@ -833,7 +833,7 @@ public final class FamiliarMain {
 
     private static void usage() {
         System.err.println("""
-            codezaiku — a harness for driving small local models through real work
+            codezaiku — a coding and development harness that runs on local models or hosted APIs
 
             USAGE
               codezaiku <command> [args]        every command takes the model server as an

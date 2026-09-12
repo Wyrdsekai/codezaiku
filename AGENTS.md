@@ -11,7 +11,7 @@ learned by getting them wrong, and most of them are about **evidence** rather th
 
 ## What this project is
 
-A local-model autonomous operator for a single box: one binary, several surfaces — coding, operations,
+A coding and development harness that runs on local models or hosted APIs, for a single box: one binary, several surfaces — coding, operations,
 security, research, review — all drivable by another program over MCP, ACP or `run`. Java 21+, Gradle
 Kotlin DSL, one module (`core`).
 
