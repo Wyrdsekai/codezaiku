@@ -104,4 +104,4 @@ case ":$PATH:" in
     *) printf 'codezaiku: %s is not on your PATH — add it:\n      export PATH="%s/bin:$PATH"\n' \
               "$PREFIX/bin" "$PREFIX" ;;
 esac
-printf '\nnext:  codezaiku doctor      # names anything missing, and the fix\n'
+printf '\nnext:  codezaiku setup       # the model, web search and your editor'"'"'s agent, in a few questions\n'

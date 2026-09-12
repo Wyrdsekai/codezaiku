@@ -94,7 +94,7 @@ try {
     }
     Write-Host "codezaiku: installed $dest"
     & "$bin\codezaiku.bat" --version
-    Write-Host "`nnext:  codezaiku doctor      # names anything missing, and the fix"
+    Write-Host "`nnext:  codezaiku setup       # the model, web search and your editors agent, in a few questions"
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

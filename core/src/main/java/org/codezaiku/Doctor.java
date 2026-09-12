@@ -83,13 +83,10 @@ final class Doctor {
             checks.add(new Check("researchzosho " + rzHave + (answers ? ", daemon answering at " + org.codezaiku.research.LibraryBridge.url() : ", daemon not answering at " + org.codezaiku.research.LibraryBridge.url()),
                     false, !newer, newer ? latest + " is available" : "", newer ? "codezaiku install researchzosho  (updates it; the library and settings stay)" : answers ? "" : "researchzosho service install, or researchzosho serve"));
         }
+        // no drive: when this machine can serve one on demand, that is the fix to name (ModelServer); the docker line otherwise
+        String offer = drive ? null : ModelServer.offer();
         checks.add(new Check("model server at " + driveUrl, true, drive,
-                drive ? "" : driveDetail.isEmpty() ? "nothing answered /v1/models" : driveDetail,
-                "start any OpenAI-compatible server, e.g.\n"
-                + "      docker run -d --name codezaiku-drive -p 8200:8200 \\\n"
-                + "        -v /path/to/models:/models ghcr.io/ggml-org/llama.cpp:server-cuda \\\n"
-                + "        -m /models/<your-model>.gguf --port 8200 --host 0.0.0.0 --jinja\n"
-                + "      then: export CODEZAIKU_DRIVE=http://localhost:8200"));
+                drive ? "" : driveDetail.isEmpty() ? "nothing answered /v1/models" : driveDetail, driveFix(offer)));
 
         if (drive) {
             int ctx = 0;
@@ -161,7 +158,28 @@ final class Doctor {
         } else {
             System.out.println(failedRequired + " required check(s) failed — fix those first.");
         }
+        // the one fix the doctor can do itself: serve the model on this machine, when the person is at the keyboard to say yes
+        if (!drive && offer != null && System.console() != null) {
+            System.out.print("\n" + offer + " Set it up now? [Y/n] ");
+            String answer = System.console().readLine();
+            if (answer == null || answer.isBlank() || answer.strip().regionMatches(true, 0, "y", 0, 1)) {   // (a local named `java` shadows the package here)
+                String r = ModelServer.install(null, "all", ModelServer.DEFAULT_IDLE_MINUTES, false, System.out);
+                if (r.startsWith("!")) System.out.println("  not set up: " + r.substring(1));
+                else { System.out.println("  serving " + r + " at " + ModelServer.URL + "; run codezaiku doctor again to see it"); return failedRequired == 1 ? 0 : 1; }
+            }
+        }
         return failedRequired == 0 ? 0 : 1;
+    }
+
+    /** The fix line for a missing drive: the on-demand install when this machine can do it, the server line otherwise. */
+    static String driveFix(String offer) {
+        if (offer != null) return offer + "\n      codezaiku model serve install   (or say yes below)";
+        return "start any OpenAI-compatible server, e.g.\n"
+                + "      docker run -d --name codezaiku-drive -p 8200:8200 \\\n"
+                + "        -v /path/to/models:/models ghcr.io/ggml-org/llama.cpp:server-cuda \\\n"
+                + "        -m /models/<your-model>.gguf --port 8200 --host 0.0.0.0 --jinja\n"
+                + "      then: export CODEZAIKU_DRIVE=http://localhost:8200\n"
+                + "      (on a Linux machine with an NVIDIA card and Docker, `codezaiku model serve install` does it for you, on demand)";
     }
 
     /** What a one-token request to the endpoint CodeZaiku actually uses told us. */

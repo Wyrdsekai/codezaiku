@@ -64,4 +64,12 @@ class DriveProbeMessageTest {
         assertTrue(r.detail().contains("rate limit exceeded"),
                 "the provider named the real problem; quote it rather than guessing");
     }
+
+    @Test
+    void theMissingDriveFixNamesTheOnDemandInstallWhenThisMachineCanServeOne() {
+        String offer = "Serve gpt-oss-20b on this machine on demand: it downloads once (about 14 GB), starts when a run needs it, and stops after 20 idle minutes.";
+        assertTrue(Doctor.driveFix(offer).startsWith(offer) && Doctor.driveFix(offer).contains("codezaiku model serve install"), Doctor.driveFix(offer));
+        String plain = Doctor.driveFix(null);
+        assertTrue(plain.contains("docker run") && plain.contains("model serve install"), plain);
+    }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@wyrdsekai/codezaiku-mcp",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Starts CodeZaiku, the local-model operator for one machine, as an MCP server over stdio: npx @wyrdsekai/codezaiku-mcp",
   "mcpName": "io.github.Wyrdsekai/codezaiku",
   "bin": {

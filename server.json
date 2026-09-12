@@ -8,12 +8,12 @@
     "url": "https://github.com/Wyrdsekai/codezaiku",
     "source": "github"
   },
-  "version": "0.3.2",
+  "version": "0.3.3",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@wyrdsekai/codezaiku-mcp",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

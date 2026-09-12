@@ -135,6 +135,8 @@ git clone https://github.com/Wyrdsekai/codezaiku.git && cd codezaiku
 scripts/install.sh
 
 # 2. point it at your model server (install.sh already wrote a starter config)
+codezaiku setup               # the first ten minutes: the model (found, served on demand, or a hosted key), web search, your editor's agent over MCP, the library if wanted
+codezaiku model serve install # this machine's card, on demand: the measured model, llama.cpp behind a proxy that starts it when asked and stops it after 20 idle minutes
 codezaiku model detect        # finds Ollama / llama.cpp / LM Studio / vLLM if running
 codezaiku model use http://localhost:8200
 

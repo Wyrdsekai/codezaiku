@@ -18,13 +18,11 @@ import java.util.Map;
 /**
  * Model endpoints: find them, name them, switch between them.
  *
- * CodeZaiku deliberately does NOT run or download models. Managing an inference server means owning
- * GPU/driver detection, VRAM sizing, quantization choice and multi-gigabyte downloads — a larger support
- * surface than the rest of this project, for a job llama.cpp and Ollama already do well. Every bug in
- * their server would become a bug in ours.
- *
- * What it does own is the part that is genuinely ours: knowing which endpoints are live, letting you keep
- * several under names, and switching the drive without editing a URL by hand.
+ * CodeZaiku does not run an inference server of its own: llama.cpp does that, and every bug in a server of
+ * ours would be ours to fix. What it owns is knowing which endpoints are live, keeping several under names,
+ * switching the drive without editing a URL by hand — and, since 0.3.3, `model serve`: setting llama.cpp up
+ * on this machine's card behind a proxy that starts it on demand and stops it when idle (ModelServer), the
+ * measured model for the card, so nothing has to be up all the time.
  */
 final class Models {
 
@@ -53,9 +51,13 @@ final class Models {
                 case "add" -> add(a);
                 case "use" -> use(a);
                 case "remove" -> remove(a);
+                case "serve" -> ModelServer.command(a, 1, System.out);
                 default -> {
                     System.err.println("""
                         usage:
+                          codezaiku model serve install|status|stop|uninstall
+                                                               the model on this machine, on demand: it comes up when asked and goes away
+                                                               after 20 idle minutes (install [--file <gguf>] [--gpu <index>] [--idle-minutes N] [--share])
                           codezaiku model detect               find model servers running locally
                           codezaiku model list                 saved endpoints, and which one is in use
                           codezaiku model add <name> <url>     save an endpoint under a name

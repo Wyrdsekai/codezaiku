@@ -110,7 +110,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.2";
+    public static final String VERSION = "0.3.3";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -139,6 +139,22 @@ public final class FamiliarMain {
                 || args[0].equals("version"))) {
             System.out.println("codezaiku " + VERSION);
             System.exit(0);
+        }
+        if (args.length >= 1 && args[0].equals("setup")) {
+            // the first ten minutes: the model, web search, the programs that reach CodeZaiku over MCP, the library
+            boolean yes = false, programs = true, library = true;
+            for (int i = 1; i < args.length; i++) {
+                switch (args[i]) {
+                    case "--yes", "-y" -> yes = true;
+                    case "--no-programs" -> programs = false;
+                    case "--no-library" -> library = false;
+                    default -> { System.err.println("usage: codezaiku setup [--yes] [--no-programs] [--no-library]"); System.exit(2); }
+                }
+            }
+            try {
+                System.exit(new Setup(new java.io.BufferedReader(new java.io.InputStreamReader(System.in, java.nio.charset.StandardCharsets.UTF_8)), System.out,
+                        Setup.liveProbe(), Setup.liveActs(), yes).run(programs, library));
+            } catch (Exception e) { System.err.println("setup: " + e.getMessage()); System.exit(1); }
         }
         if (args.length >= 1 && args[0].equals("model")) {
             System.exit(Models.command(Arrays.copyOfRange(args, 1, args.length)));
@@ -822,6 +838,13 @@ public final class FamiliarMain {
             USAGE
               codezaiku <command> [args]        every command takes the model server as an
                                                 optional trailing argument (default: %s)
+
+            SETUP — the first ten minutes
+              setup [--yes] [--no-programs] [--no-library]
+                                                the model (found, served on demand, or a hosted
+                                                key), web search, the programs that reach CodeZaiku
+                                                over MCP, and ResearchZosho if wanted. Enter takes
+                                                every default; --yes takes them all.
 
             CHAT — sit down and talk to it (no host, no editor, no browser)
               chat [project] [--mode ask] [--drive URL] [--from ID] [--max-turns N]
