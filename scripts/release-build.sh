@@ -19,6 +19,8 @@ done
 SRC_V=$(grep -o 'VERSION = "[0-9.]*"' core/src/main/java/org/codezaiku/FamiliarMain.java | grep -o '[0-9.]*')
 [[ "$SRC_V" == "$VER" ]] || { echo "FamiliarMain.VERSION is $SRC_V, build.gradle.kts says $VER — bump them together" >&2; exit 1; }
 ./gradlew -q :core:installDist
+# every model row and pinned build the on-demand install would fetch must still resolve (a row went 404 upstream once, 2026-09-12)
+core/build/install/codezaiku/bin/codezaiku model serve check
 rm -rf dist && mkdir -p dist
 tar czf "dist/codezaiku-$VER.tar.gz" -C core/build/install codezaiku
 # the builds with their own Java runtime, one per platform, from the tarball just made (scripts/package-runtime.sh)

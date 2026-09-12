@@ -17,7 +17,10 @@ const RELEASE = VERSION.replace(/-.*$/, '');   // the release the launcher fetch
 const WIN = process.platform === 'win32';
 const EXPECT_TOOL = 'code';
 
-function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), `${TOOL}-mcp-`)); }
+const made = [];
+function tmp() { const d = fs.mkdtempSync(path.join(os.tmpdir(), `${TOOL}-mcp-`)); made.push(d); return d; }
+// every temp home goes at the end: the download test unpacks a 60 MB runtime build into each, and a day of runs left gigabytes behind
+test.after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
 /** A fake installed program: its start script echoes its arguments to stdout. */
 function fakeInstall(dir, version) {
@@ -44,7 +47,7 @@ function runLauncher(env, input) {
 const PATH_KEY = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
 
 /**
- * An environment with no CodeZaiku in it: a fresh home (the JVM reads the real one, so the library and the config
+ * An environment with no __TITLE__ in it: a fresh home (the JVM reads the real one, so the library and the config
  * are named explicitly), no installer prefix, and a PATH holding only what the download path needs — java and tar,
  * plus the system directories; on Windows the process's PATH minus any entry that names the program.
  */
