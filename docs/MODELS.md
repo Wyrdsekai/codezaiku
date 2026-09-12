@@ -3,13 +3,16 @@
 CodeZaiku ships **no model weights** and does not run an inference server. It talks to any
 OpenAI-compatible `/v1/chat/completions` endpoint — llama.cpp, Ollama, vLLM, LM Studio, or a hosted API.
 
-**Why we don't manage the server for you.** Doing it properly means owning GPU and driver detection
-across CUDA/ROCm/Metal, VRAM sizing, quantization choice, and multi-gigabyte downloads — a bigger support
-surface than the rest of CodeZaiku, for work that llama.cpp and Ollama already do well. Every bug in
-their server would become a bug in ours. So we own the part that is actually ours: finding the servers
-you already run, keeping several under names, and switching between them.
+**The server, on demand.** `codezaiku model serve install` sets a model server up on this machine for the
+card it finds: it picks the measured row for the card's memory (the table below), downloads the file once and
+checks it against a recorded sha256, and puts llama.cpp behind a small proxy that starts the model when
+something asks and stops it after twenty idle minutes. Linux uses llama.cpp's CUDA container, macOS its Metal
+build as a launchd agent, Windows its Vulkan build as a logon task. `codezaiku setup` offers it when it finds
+no server. Everything else stays yours: the servers you already run, kept under names, switched between.
 
 ```bash
+codezaiku setup                   # the first ten minutes: finds a server, or serves one, or takes a key
+codezaiku model serve install     # the model on this machine, on demand; status · stop · uninstall · check
 codezaiku model detect            # find what is running locally
 codezaiku model add big http://localhost:8201
 codezaiku model use big           # point the drive at it, and report what it serves
@@ -23,6 +26,33 @@ prints the two commands most likely to get you going.
 
 `model use` probes before switching, so a dead endpoint is reported now rather than becoming a confusing
 failure in your next command.
+
+---
+
+## By VRAM
+
+What `model serve install` picks, best first. VRAM is the memory on the graphics card, not the computer's
+RAM; `nvidia-smi` shows it, and on a Mac with Apple silicon read the tiers against about two thirds of the
+unified memory. The rows come from ResearchZosho's measurement of eleven
+models on the same research questions (the facts right, claims made, citations the checker could read, time
+per question) and from CodeZaiku's own coding probes on the two we drive with. A row marked *research* was
+measured reading and writing, not coding; it calls tools cleanly, which is what the harness needs first.
+
+| VRAM | model | file | what we saw |
+|---|---|---|---|
+| 24 GB or more | Qwen3.8-27B at 4-bit | `Qwen3.8-27B-UD-Q4_K_M.gguf` | the reference drive: 93% of tool-call probes acted on the right tool on time, the only local model green across the coding reverse-eval; 17 GB file, 3.6 s median turn |
+| 16 GB | gpt-oss-20b | `gpt-oss-20b-F16.gguf` | *research*: right, fast (about 5 minutes a question), 13 GB in use with two 16k slots |
+| 8 GB | Qwen3.5 9B at 4-bit | `Qwen3.5-9B-Q4_K_M.gguf` | the drive behind nearly every number in LIMITATIONS.md; calls tools cleanly; multi-file coding ceiling about 45% |
+| 4 GB | Gemma 4 E4B at 4-bit | `gemma-4-E4B-it-Q4_K_M.gguf` | *research*: right, the best citation reader of the small models; 3.6 GB in use |
+| 2 GB | Gemma 4 E2B at 4-bit | `gemma-4-E2B-it-Q4_K_M.gguf` | *research*: facts right, write-ups thin. A hosted API is the better answer this small |
+
+The files are the ones Hugging Face lists under `unsloth/<model>-GGUF`. The full research list, with the
+second and third choices per tier and the models measured and not recommended, is
+[ResearchZosho's models page](https://researchzosho.org/models/).
+
+One measured note that generalizes: a 30B-class coder that is a ~3B-active mixture did no better than the
+9B on knowledge-heavy work. Bigger parameter counts on the label do not mean more capability for a given job;
+the 27B dense model is the reference because it acts on tools reliably, not because it is larger.
 
 ---
 
@@ -58,8 +88,9 @@ Every number in [LIMITATIONS.md](LIMITATIONS.md) came from one of two models:
 
 | Tier | Model | Where it was used |
 |---|---|---|
-| **9B (reference)** | a Qwen-3.5-9B derivative, Q4_K_M | the default drive for nearly all results |
+| **9B** | a Qwen-3.5-9B derivative, Q4_K_M | the drive for nearly all the LIMITATIONS.md results |
 | **30B** | `qwen3-coder-30b-a3b-instruct`, Q8_0 | the larger-model control, and a second ops tier |
+| **27B (reference since 0.2.0)** | `Qwen3.8-27B-UD-Q4_K_M.gguf` | the chat, tool-call probe and coding reverse-eval numbers; what `model serve install` picks on a 24 GB card |
 
 **Your results will differ with a different model, and we have not measured yours.** The comparisons in
 LIMITATIONS.md hold *within* our setup — they were designed to isolate harness from model, not to rank
@@ -80,7 +111,7 @@ run locally. Prefer an **instruct/chat** build with tool-calling support.
 |---|---|
 | Coding work on modest hardware | a 7–9B coder-instruct, Q4_K_M or better |
 | Ops/security operation | same tier — the operator leans on deterministic sensors, not model scale |
-| Best available locally | a 30B-class instruct model if you have the VRAM |
+| Best available locally | the 27B row above, on a card with 24 GB of VRAM |
 | No local GPU | any hosted OpenAI-compatible endpoint — see [Using a hosted endpoint](#using-a-hosted-endpoint) |
 
 Quantization: **Q4_K_M is the practical floor** and what our 9B results used. Below that, instruction

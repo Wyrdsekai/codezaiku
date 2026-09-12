@@ -3,6 +3,11 @@
 Notable changes. This project follows [semantic versioning](https://semver.org/) loosely: while at
 0.x, minor versions may change behaviour.
 
+## Unreleased
+
+Changed
+- MODELS.md and codezaiku.org/models: the by-VRAM table `model serve install` picks from, and the on-demand server in place of a paragraph that still said CodeZaiku does not manage one. The usage text names `model serve install|status|stop|uninstall|check`, which it had not.
+
 ## 0.3.4
 
 Fixed

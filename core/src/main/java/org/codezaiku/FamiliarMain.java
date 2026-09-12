@@ -918,6 +918,8 @@ public final class FamiliarMain {
               init [--force]                    write a starter config to ~/.codezaiku/config
               config list|get|set|unset|edit    read and change settings
               model detect|list|add|use         find and switch model servers
+              model serve install|status|stop|uninstall|check
+                                                a model server on this machine, on demand (the row for your card)
               smoke [drive]                     check the model server answers
               shape <project>                   what the harness sees: language, tests, layout
               lsp-check <project>               language-server availability
