@@ -110,4 +110,11 @@ class SetupTest {
         assertTrue(out.contains("Skipped. Later: codezaiku install researchzosho"), out);
         assertTrue(out.contains("The built-in fallback it is"), out);
     }
+
+    @org.junit.jupiter.api.Test
+    void theHelloTestReadsAReasoningModelAsAnswered() {
+        org.junit.jupiter.api.Assertions.assertEquals("ready", Setup.helloReply("{\"choices\":[{\"message\":{\"content\":\" ready \"}}]}"));
+        org.junit.jupiter.api.Assertions.assertTrue(Setup.helloReply("{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning_content\":\"thinking about the word\"}}]}").startsWith("(it answered"));
+        org.junit.jupiter.api.Assertions.assertTrue(Setup.helloReply("{\"choices\":[{\"message\":{\"content\":\"\"}}]}").contains("the address works"));
+    }
 }

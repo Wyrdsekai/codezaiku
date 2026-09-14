@@ -31,6 +31,19 @@ public final class Setup {
     private static final ObjectMapper J = new ObjectMapper();
 
     /** What setup asks of the outside world. */
+    /** The hello test's reading of a 200 reply: the words; else a reply that thought and ran out of room still answered; else an empty reply, said as the server's. */
+    static String helloReply(String responseBody) {
+        try {
+            JsonNode j = J.readTree(responseBody);
+            JsonNode msg = j.path("choices").path(0).path("message");
+            String text = msg.path("content").asText("").strip();
+            if (!text.isEmpty()) return text;
+            String thought = msg.path("reasoning_content").asText(msg.path("reasoning").asText("")).strip();
+            if (!thought.isEmpty()) return "(it answered; it thinks before it speaks, and the test's room went to the thinking)";
+            return "(an empty reply, but it answered; the address works — check the model name if it keeps saying nothing)";
+        } catch (Exception e) { return "!the server answered, but not with a chat completion"; }
+    }
+
     public interface Probe {
         /** Model ids a server offers at {@code base}, or null when nothing answers there. */
         List<String> models(String base, String key);
@@ -91,15 +104,13 @@ public final class Setup {
             }
             @Override public String chat(String base, String model, String key) {
                 try {
-                    String body = "{\"model\":" + J.writeValueAsString(model) + ",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word ready.\"}]}";
+                    String body = "{\"model\":" + J.writeValueAsString(model) + ",\"max_tokens\":400,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word ready.\"}]}";   // a reasoning model thinks first; 64 tokens left no room for the word
                     var b = HttpRequest.newBuilder(URI.create(base.replaceAll("/+$", "") + "/v1/chat/completions")).timeout(Duration.ofSeconds(120))
                             .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body));
                     if (key != null && !key.isBlank()) b.header("Authorization", "Bearer " + key.strip());
                     HttpResponse<String> r = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
                     if (r.statusCode() != 200) return "!HTTP " + r.statusCode() + ": " + r.body().replaceAll("\\s+", " ").strip().substring(0, Math.min(160, r.body().length()));
-                    JsonNode j = J.readTree(r.body());
-                    String text = j.path("choices").path(0).path("message").path("content").asText("").strip();
-                    return text.isEmpty() ? "(an empty reply, but it answered)" : text;
+                    return helloReply(r.body());
                 } catch (Exception e) { return "!" + e.getMessage(); }
             }
             @Override public boolean searxng(String base) {

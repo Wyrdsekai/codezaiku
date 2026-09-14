@@ -3,10 +3,14 @@
 Notable changes. This project follows [semantic versioning](https://semver.org/) loosely: while at
 0.x, minor versions may change behaviour.
 
-## Unreleased
+## 0.3.5
+
+Fixed
+- Setup's "say hello" check works with reasoning models. It used to give the model 64 tokens to reply. A model that thinks before it answers could use them all up on thinking and send back nothing. Now the check allows 400 tokens and a reply that thought but ran out of room counts as a hello.
 
 Changed
-- MODELS.md and codezaiku.org/models: the by-VRAM table `model serve install` picks from, and the on-demand server in place of a paragraph that still said CodeZaiku does not manage one. The usage text names `model serve install|status|stop|uninstall|check`, which it had not.
+- MODELS.md now starts with a table of which model to run for how much VRAM you have, the same table `codezaiku model serve install` picks from. The old opening paragraph said CodeZaiku does not manage a model server for you, which stopped being true in 0.3.3. The same table is on codezaiku.org/models.
+- The usage text now lists `model serve install|status|stop|uninstall|check`. It had been missing.
 
 ## 0.3.4
 
