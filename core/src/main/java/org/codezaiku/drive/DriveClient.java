@@ -208,14 +208,18 @@ public final class DriveClient {
     }
 
     /** llama.cpp: {@code /props → default_generation_settings.n_ctx}. The most accurate source. */
-    private Integer fromLlamaCppProps() {
+    Integer fromLlamaCppProps() {
         try {
-            HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/props")))
-                    .timeout(Duration.ofSeconds(10)).GET().build();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-            if (resp.statusCode() != 200) return null;
-            JsonNode n = json.readTree(resp.body()).path("default_generation_settings").path("n_ctx");
-            return n.isInt() ? n.asInt() : null;
+            Integer n = propsAt(baseUrl + "/props");
+            if (n != null) return n;
+            // llama-swap routes by model name and answers /props with "no model id could be identified"; the upstream
+            // server's own properties are at /upstream/<model>/props (every `model serve install` sits behind llama-swap,
+            // and the fallback of 8192 had the loop compacting at a quarter of the real window, 2026-09-14)
+            if (model != null && !model.isBlank()) {
+                n = propsAt(baseUrl + "/upstream/" + java.net.URLEncoder.encode(model, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20") + "/props");
+                if (n != null) { log.info("context window {} (from llama-swap's upstream /props for {})", n, model); return n; }
+            }
+            return null;
         } catch (Exception e) {
             // A connection-level failure here is worth naming, because on macOS it is usually the
             // Local Network permission rather than the endpoint — but it is not fatal on its own.
@@ -223,6 +227,15 @@ public final class DriveClient {
             if (!hint.isEmpty()) log.warn("reaching {}{}", baseUrl, hint);
             return null;
         }
+    }
+
+    /** {@code default_generation_settings.n_ctx} from a llama.cpp /props page at {@code url}, or null. */
+    private Integer propsAt(String url) throws Exception {
+        HttpRequest req = auth(HttpRequest.newBuilder(URI.create(url))).timeout(Duration.ofSeconds(10)).GET().build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 200) return null;
+        JsonNode n = json.readTree(resp.body()).path("default_generation_settings").path("n_ctx");
+        return n.isInt() ? n.asInt() : null;
     }
 
     /** Ollama: {@code /api/show → model_info["<family>.context_length"]}, keyed by model family. */

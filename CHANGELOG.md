@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.6
+
+Fixed
+- The usage text now lists `doctor` and `update now|status`. Both existed, and the release notes told you to run `update now`, but `codezaiku` with no arguments never mentioned either.
+- Behind llama-swap, which `model serve install` sets up, the model server's context window was never found: the proxy answers `/props` with "no model id" because that request names no model, so the harness assumed 8192 and compacted at a quarter of the real window. The window is now read from the proxy's per-model path, `/upstream/<model>/props`.
+
 Notable changes. This project follows [semantic versioning](https://semver.org/) loosely: while at
 0.x, minor versions may change behaviour.
 
