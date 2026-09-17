@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.8
+
+This release fixes `codezaiku setup` choosing a model that cannot chat.
+
+### Fixed
+
+- `setup`: when a model server has more than one model, setup asked "Which model?" with the first name in the server's list as the default. Servers list their models in alphabetical order, so on a server with an embedding model the default was `embed`. Pressing Enter saved it, the one-word test failed, setup said "Saved anyway", and every command after that failed. Setup now says what the choice is, shows the models numbered, marks the ones that look like embedding or ranking models, and offers the model already in your settings as the default, or else the first chat model.
+- `setup`: a model that does not answer the one-word test is not saved while another model is left to try. Setup says why and asks again. When nothing answers, for example while a model is still loading, the first choice is saved and setup says it is unchecked.
+- `setup`: a server that lists no models asks for the model's name. A server with one model asks nothing.
+- `setup`: an address typed with `/v1` on the end, such as `https://api.openai.com/v1`, is probed correctly. Setup's own checks went to `/v1/v1/…`.
+- ACP: the `model` option no longer offers the drive's embedding models.
+
 ## 0.3.7
 
 This release fixes places where CodeZaiku could hang or act on half an answer, and brings the ACP server up to the current schema.

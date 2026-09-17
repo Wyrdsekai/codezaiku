@@ -74,6 +74,8 @@ class AcpServerTest {
             String configured = option.path("currentValue").asText();
             assertEquals(configured, option.path("options").path(0).path("value").asText(), "the configured model is a choice, and the first");
             assertTrue(option.path("options").toString().contains("qwen3.8-27b"));
+            assertFalse(option.path("options").toString().contains("\"embed\""), "the drive's embedding model is not a choice: " + option.path("options"));
+            assertThrows(IllegalArgumentException.class, () -> server.setConfigOptionForTest(made.path("sessionId").asText(), parse("{\"configId\":\"model\",\"value\":\"embed\"}")));
 
             var set = server.setConfigOptionForTest(made.path("sessionId").asText(), parse("{\"configId\":\"model\",\"value\":\"qwen3.8-27b\"}"));
             assertEquals("qwen3.8-27b", set.path("configOptions").path(0).path("currentValue").asText());

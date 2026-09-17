@@ -58,6 +58,69 @@ class SetupTest {
 
     private static String cfg(Path home) throws Exception { return Files.readString(home.resolve(".codezaiku").resolve("config")); }
 
+    /** A server as llama-swap lists it: alphabetical, so the embedding model is first. Only the chat model answers a chat request. */
+    static final class TwoModelProbe implements Setup.Probe {
+        final List<String> asked = new ArrayList<>();
+        @Override public List<String> models(String base, String key) { return base.equals("http://localhost:8200") ? List.of("embed", "qwen3.8-27b") : null; }
+        @Override public String chat(String base, String model, String key) { asked.add(model); return model.equals("qwen3.8-27b") ? "ready" : "!the server answered HTTP 404"; }
+    }
+
+    @Test
+    void enterNeverSavesTheEmbeddingModelThatTheServerListsFirst(@TempDir Path home) throws Exception {
+        var probe = new TwoModelProbe();
+        String out = run(home, "\n\n\n\n\n\n\n\n", probe, new FakeActs(), false);          // Enter to everything
+        assertTrue(out.contains("This server has 2 models. Pick the one CodeZaiku should work with. It has to be a chat model"), out);
+        assertTrue(out.contains("1. embed") && out.contains("looks like an embedding or ranking model: it cannot chat"), out);
+        assertTrue(out.contains("Which one? (number or name) [qwen3.8-27b]"), "the default is the chat model, not the first name: " + out);
+        assertEquals(List.of("qwen3.8-27b"), probe.asked);
+        assertTrue(cfg(home).contains("model = qwen3.8-27b"), cfg(home));
+    }
+
+    @Test
+    void aModelThatDoesNotAnswerIsNotSavedAndThePersonIsAskedAgain(@TempDir Path home) throws Exception {
+        var probe = new TwoModelProbe();
+        String out = run(home, "\n1\n\n\n\n\n\n\n\n", probe, new FakeActs(), false);         // use the server, then pick number 1: embed
+        assertTrue(out.contains("Asking embed for one word") && out.contains("no: the server answered HTTP 404"), out);
+        assertTrue(out.contains("embed did not answer a chat request, so it is not saved. Pick another."), out);
+        assertEquals(List.of("embed", "qwen3.8-27b"), probe.asked, "asked again, with the other model as the default");
+        String c = cfg(home);
+        assertTrue(c.contains("model = qwen3.8-27b") && !c.contains("model = embed"), c);
+    }
+
+    @Test
+    void theModelInTheSettingsIsTheDefaultAndWhenNothingAnswersTheFirstChoiceIsSavedAndSaidToBeUnchecked(@TempDir Path home) throws Exception {
+        Files.createDirectories(home.resolve(".codezaiku"));
+        Files.writeString(home.resolve(".codezaiku").resolve("config"), "drive = http://localhost:8200\nmodel = zeta-chat\n");
+        Setup.Probe loading = new Setup.Probe() {
+            @Override public List<String> models(String base, String key) { return base.equals("http://localhost:8200") ? List.of("alpha-chat", "embed", "zeta-chat") : null; }
+            @Override public String chat(String base, String model, String key) { return "!it did not answer in 120 seconds"; }
+        };
+        String out = run(home, "", loading, new FakeActs(), true);                                   // --yes
+        assertTrue(out.contains("3. zeta-chat   (in your settings)") || out.contains("3. zeta-chat"), out);
+        assertTrue(out.contains("Which one? (number or name) [zeta-chat]"), out);
+        assertTrue(out.contains("None of them answered. Saved zeta-chat unchecked"), out);
+        assertTrue(cfg(home).contains("model = zeta-chat"), cfg(home));
+    }
+
+    @Test
+    void aServerThatListsNoModelsAsksForTheName(@TempDir Path home) throws Exception {
+        var probe = new FakeProbe("https://api.example.com/v1", List.of());
+        String out = run(home, String.join("\n", "https://api.example.com/v1", "sk-test-123", "provider/big-chat", "", "n") + "\n", probe, new FakeActs(), false);
+        assertTrue(out.contains("The server did not list its models. Which model should CodeZaiku use?"), out);
+        assertTrue(cfg(home).contains("model = provider/big-chat"), cfg(home));
+    }
+
+    @Test
+    void namesThatSayAModelCannotChat() {
+        for (String id : List.of("embed", "Qwen/Qwen3-Embedding-0.6B", "text-embedding-3-small", "nomic-embed-text", "bge-m3", "bge-reranker-v2", "e5-large", "all-MiniLM-L6-v2", "whisper-1", "jina-embeddings-v3"))
+            assertTrue(ModelChoice.looksUnableToChat(id), id);
+        for (String id : List.of("qwen3.8-27b", "gpt-5.4", "local-model", "deepseek-chat", "gemma-3-12b", "glm-5.3", "phi-4-mini", "llama3.1:8b", "mistral-small", "embedded-systems-coder"))
+            assertFalse(ModelChoice.looksUnableToChat(id), id);
+        assertEquals("qwen3.8-27b", ModelChoice.preferred(List.of("embed", "qwen3.8-27b"), null));
+        assertEquals("qwen3.8-27b", ModelChoice.preferred(List.of("embed", "qwen3.8-27b"), "embed"), "an embedding model in the settings is not offered again");
+        assertEquals("embed", ModelChoice.preferred(List.of("embed"), null), "the only one is the only one");
+    }
+
     @Test
     void aFoundServerIsUsedAndTheProgramsAreConnected(@TempDir Path home) throws Exception {
         var acts = new FakeActs(); acts.hosts = List.of("claude", "gemini");
@@ -90,8 +153,7 @@ class SetupTest {
         var probe = new FakeProbe("https://api.example.com/v1", List.of("big-model")); probe.braveKey = "brave-123";
         String script = String.join("\n",
                 "https://api.example.com/v1",   // where the server is
-                "sk-test-123",                  // its key
-                "",                             // which model (default: big-model)
+                "sk-test-123",                  // its key; the server has one model, so there is nothing to choose
                 "brave-123",                    // web search: the Brave key
                 "y"                             // install the library
         ) + "\n";

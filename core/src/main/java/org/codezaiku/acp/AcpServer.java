@@ -402,11 +402,20 @@ public final class AcpServer {
         o.put("type", "select");
         o.put("currentValue", s.model);
         var options = o.putArray("options");
-        var seen = new java.util.LinkedHashSet<String>();
-        seen.add(s.model);
-        seen.addAll(s.offeredModels);
-        for (String m : seen) options.addObject().put("value", m).put("name", m);
+        for (String m : choices(s)) options.addObject().put("value", m).put("name", m);
         return all;
+    }
+
+    /**
+     * The models a host may pick from: the session's own first, then the drive's models that can hold a conversation.
+     * A drive usually lists its embedding model too ("embed" sorts first), and a picker that offers it lets a person
+     * select a model that answers no prompt at all.
+     */
+    static java.util.LinkedHashSet<String> choices(Session s) {
+        var out = new java.util.LinkedHashSet<String>();
+        out.add(s.model);
+        for (String m : s.offeredModels) if (!org.codezaiku.ModelChoice.looksUnableToChat(m)) out.add(m);
+        return out;
     }
 
     /** {@code session/set_config_option}. Only "model" exists, and only a model the option offered is taken. */
@@ -414,8 +423,7 @@ public final class AcpServer {
         String configId = p.path("configId").asText("");
         if (!configId.equals("model")) throw new IllegalArgumentException("unknown config option: " + configId + " (this agent offers: model)");
         String value = p.path("value").asText("");
-        var offered = new java.util.LinkedHashSet<String>(s.offeredModels);
-        offered.add(s.model);
+        var offered = choices(s);
         if (!offered.contains(value)) throw new IllegalArgumentException("the drive does not offer the model '" + value + "'. It offers: " + String.join(", ", offered));
         s.model = value;
         ObjectNode r = J.createObjectNode();

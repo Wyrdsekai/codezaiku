@@ -93,7 +93,7 @@ public final class Setup {
         return new Probe() {
             @Override public List<String> models(String base, String key) {
                 try {
-                    var b = HttpRequest.newBuilder(URI.create(base.replaceAll("/+$", "") + "/v1/models")).timeout(Duration.ofSeconds(6)).GET();
+                    var b = HttpRequest.newBuilder(URI.create(Config.driveBase(base) + "/v1/models")).timeout(Duration.ofSeconds(6)).GET();
                     if (key != null && !key.isBlank()) b.header("Authorization", "Bearer " + key.strip());
                     HttpResponse<String> r = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
                     if (r.statusCode() != 200) return null;
@@ -105,11 +105,15 @@ public final class Setup {
             @Override public String chat(String base, String model, String key) {
                 try {
                     String body = "{\"model\":" + J.writeValueAsString(model) + ",\"max_tokens\":400,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word ready.\"}]}";   // a reasoning model thinks first; 64 tokens left no room for the word
-                    var b = HttpRequest.newBuilder(URI.create(base.replaceAll("/+$", "") + "/v1/chat/completions")).timeout(Duration.ofSeconds(120))
+                    var b = HttpRequest.newBuilder(URI.create(Config.driveBase(base) + "/v1/chat/completions")).timeout(Duration.ofSeconds(120))
                             .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body));
                     if (key != null && !key.isBlank()) b.header("Authorization", "Bearer " + key.strip());
                     HttpResponse<String> r = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
-                    if (r.statusCode() != 200) return "!HTTP " + r.statusCode() + ": " + r.body().replaceAll("\\s+", " ").strip().substring(0, Math.min(160, r.body().length()));
+                    if (r.statusCode() != 200) {
+                        String said = r.body() == null ? "" : r.body().replaceAll("\\s+", " ").strip();
+                        if (said.length() > 160) said = said.substring(0, 160) + "…";
+                        return "!the server answered HTTP " + r.statusCode() + (said.isEmpty() ? (r.statusCode() == 404 ? ": it has no chat for this model" : "") : ": " + said);
+                    }
                     return helloReply(r.body());
                 } catch (Exception e) { return "!" + e.getMessage(); }
             }
@@ -186,6 +190,67 @@ public final class Setup {
         return b.contains("localhost") || b.contains("127.0.0.1") || b.contains("://[::1]") || b.contains("://10.") || b.contains("://192.168.") || b.contains("://172.");
     }
 
+    /**
+     * Which of the server's models to use, settled by asking it for one word. With one model, or a model the machine
+     * just started itself ({@code preset}), there is nothing to choose. With several the person is told what the choice
+     * is, sees them numbered with the ones that cannot chat marked, and gets the model already in the settings as the
+     * default. A choice that does not answer is not saved while another is left to try: the person is told why and asked
+     * again. When nothing answers, the first choice is saved and said to be unchecked, so setup can still finish while
+     * a model is loading.
+     */
+    String settleModel(String base, String key, List<String> offeredIds, String preset) throws IOException {
+        List<String> ids = offeredIds == null ? List.of() : offeredIds;
+        String configured = Config.get("CODEZAIKU_MODEL");
+        String wait = base.equals(ModelServer.URL) ? " (the first request starts the model; a moment)" : "";
+        if (preset != null || ids.size() <= 1) {
+            String only = preset != null ? preset : ids.isEmpty()
+                    // a server that lists nothing (some hosted APIs): the name has to come from the person
+                    ? ask("   The server did not list its models. Which model should CodeZaiku use? (its name, as the provider writes it)", configured == null || configured.isBlank() ? "local-model" : configured)
+                    : ids.get(0);
+            out.print("   Asking " + only + " for one word" + wait + "… ");
+            out.flush();
+            String reply = probe.chat(base, only, key);
+            out.println(reply.startsWith("!") ? "no: " + reply.substring(1) + "\n   Saved anyway; `codezaiku doctor` re-checks it." : "it answered: \"" + reply + "\"");
+            return only;
+        }
+        out.println("   This server has " + ids.size() + " models. Pick the one CodeZaiku should work with. It has to be a chat model:");
+        out.println("   one that answers questions, not one that only turns text into numbers for search.");
+        int width = 0;
+        for (String id : ids.subList(0, Math.min(20, ids.size()))) width = Math.max(width, id.length());
+        for (int i = 0; i < Math.min(20, ids.size()); i++) {
+            String id = ids.get(i);
+            String note = ModelChoice.looksUnableToChat(id) ? "looks like an embedding or ranking model: it cannot chat" : id.equals(configured) ? "in your settings" : "";
+            out.println(String.format("     %2d. %-" + width + "s%s", i + 1, id, note.isEmpty() ? "" : "   (" + note + ")"));
+        }
+        if (ids.size() > 20) out.println("     … and " + (ids.size() - 20) + " more; type a name to use one of them.");
+        List<String> left = new ArrayList<>(ids);
+        String firstChoice = null;
+        int asked = 0;
+        while (!left.isEmpty() && asked++ < ids.size() + 5) {      // the cap is for a person who keeps typing names the server does not have
+            String dflt = ModelChoice.preferred(left, configured);
+            String answer = ask("   Which one? (number or name)", dflt);
+            String choice = answer;
+            if (answer.matches("\\d{1,3}")) {
+                int n = Integer.parseInt(answer);
+                if (n < 1 || n > ids.size()) { out.println("   There is no number " + n + " in the list."); continue; }
+                choice = ids.get(n - 1);
+            }
+            if (firstChoice == null) firstChoice = choice;
+            out.print("   Asking " + choice + " for one word" + wait + "… ");
+            out.flush();
+            String reply = probe.chat(base, choice, key);
+            if (!reply.startsWith("!")) {
+                out.println("it answered: \"" + reply + "\"");
+                return choice;
+            }
+            out.println("no: " + reply.substring(1));
+            left.remove(choice);
+            if (!left.isEmpty()) out.println("   " + choice + " did not answer a chat request, so it is not saved. Pick another.");
+        }
+        out.println("   None of them answered. Saved " + firstChoice + " unchecked; if the model is still loading, `codezaiku doctor` re-checks it.");
+        return firstChoice;
+    }
+
     /** The wizard. {@code offerPrograms}: the MCP registration step; {@code offerLibrary}: the ResearchZosho step. */
     public int run(boolean offerPrograms, boolean offerLibrary) throws Exception {
         out.println("CodeZaiku setup. Your settings go in " + Config.userConfigPath() + "; every question has a default, Enter takes it.");
@@ -195,6 +260,7 @@ public final class Setup {
         out.println("1. The model. CodeZaiku drives a model that speaks the OpenAI chat API: a local server (llama.cpp, Ollama, LM Studio)");
         out.println("   or a hosted API with a key (OpenAI, DeepSeek, Gemini, OpenRouter and others).");
         String base = null, model = null, key = Config.get("CODEZAIKU_API_KEY");
+        List<String> offered = null;      // the models of the server that was chosen; which one is settled below, by asking it
         String current = Config.get("CODEZAIKU_DRIVE");
         List<String> candidates = new ArrayList<>();
         if (current != null && !current.isBlank()) candidates.add(current);
@@ -202,12 +268,11 @@ public final class Setup {
         for (String cand : candidates) {
             List<String> ids = probe.models(cand, local(cand) ? null : key);
             if (ids == null) continue;
-            String first = ids.isEmpty() ? Config.get("CODEZAIKU_MODEL", "local-model") : ids.get(0);
             out.println("   Found a model server at " + cand + (ids.isEmpty() ? "." : " offering " + String.join(", ", ids.subList(0, Math.min(5, ids.size()))) + (ids.size() > 5 ? ", …" : "") + ".")
                     + (cand.equals(current) ? " It is the one in your settings." : ""));
             if (yesNo("   Use it?", true)) {
                 base = cand;
-                model = ids.size() > 1 ? ask("   Which model?", first) : first;
+                offered = ids;
             }
             break;
         }
@@ -228,18 +293,14 @@ public final class Setup {
                     String k = ask("   Does it need a key? (paste it, or leave blank)", "");
                     if (!k.isBlank()) key = k;
                 }
-                List<String> ids = probe.models(base, key);
-                model = ask("   Which model?", ids != null && !ids.isEmpty() ? ids.get(0) : Config.get("CODEZAIKU_MODEL", "local-model"));
+                offered = probe.models(base, key);
             }
         }
         if (base != null) {
+            model = settleModel(base, local(base) ? null : key, offered, model);
             Config.set("CODEZAIKU_DRIVE", base);
             if (model != null && !model.isBlank()) Config.set("CODEZAIKU_MODEL", model);
             if (key != null && !key.isBlank() && !local(base)) Config.set("CODEZAIKU_API_KEY", key);
-            out.print("   Asking it for one word" + (base.equals(ModelServer.URL) ? " (the first request starts the model; a moment)" : "") + "… ");
-            out.flush();
-            String reply = probe.chat(base, model == null ? "local-model" : model, local(base) ? null : key);
-            out.println(reply.startsWith("!") ? "no: " + reply.substring(1) + "\n   Saved anyway; `codezaiku doctor` re-checks it." : "it answered: \"" + reply + "\"");
         } else {
             out.println("   No model server set. `codezaiku model detect` finds one later, `codezaiku model use <address>` names it.");
         }

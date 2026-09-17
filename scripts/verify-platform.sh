@@ -197,6 +197,25 @@ else
     fi
 fi
 
+# ── 3b. setup keeps a model that can chat ────────────────────────────────────
+# 0.3.8: setup used to offer the first model a server lists, and servers list alphabetically, so a box with an
+# embedding model saved "embed" on Enter. Run the real wizard against the real drive, Enter to everything, in a
+# settings file of its own, and read what it saved.
+head_ "setup"
+SETUP_CFG="$WORK/setup-home/config"; mkdir -p "$WORK/setup-home"; printf 'drive = %s\n' "$DRIVE" > "$SETUP_CFG"
+setup_out="$(printf '\n\n\n\n\n\n' | CODEZAIKU_CONFIG="$SETUP_CFG" $CP setup --no-programs --no-library 2>/dev/null)"
+if printf '%s' "$setup_out" | grep -q 'Found a model server'; then
+    saved_model="$(grep -E '^model *=' "$SETUP_CFG" | head -1 | sed 's/^model *= *//')"
+    printf '%s' "$setup_out" | grep -q 'it answered' && ok "setup: the model it saved answered ($saved_model)" \
+        || bad "setup: the saved model did not answer" "$(printf '%s' "$setup_out" | grep -E 'Asking|no:|Saved' | head -3)"
+    case "$saved_model" in
+        *embed*|*rerank*|"") bad "setup: saved '$saved_model' as the model" ;;
+        *) ok "setup: Enter did not save an embedding model" ;;
+    esac
+else
+    skip "setup against a drive (no drive at $DRIVE)"
+fi
+
 # ── 4. cancellation leaves nothing behind ────────────────────────────────────
 head_ "cancellation"
 
