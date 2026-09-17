@@ -110,7 +110,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.6";
+    public static final String VERSION = "0.3.7";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -1552,8 +1552,12 @@ public final class FamiliarMain {
             // PASSED on re-check" in each log) because only the loop's first answer reached the audit,
             // the learn/promote gates, and OpsOutcome.
             finalVerified = remediation.harnessVerified();
-            boolean haveVerify = snap != null && verifyCmd != null && !verifyCmd.isBlank();
-            boolean failed = haveVerify && Boolean.FALSE.equals(remediation.harnessVerified());
+            // The settle re-check needs only a verify command. The restart-validation and the rollback need the
+            // snapshot too. Without this split a run with rollback off (or an unlocalized target) got no re-check,
+            // and a service still coming back up was recorded verified=false in the audit and the outcome.
+            boolean canVerify = verifyCmd != null && !verifyCmd.isBlank();
+            boolean haveVerify = snap != null && canVerify;
+            boolean failed = canVerify && Boolean.FALSE.equals(remediation.harnessVerified());
             boolean latentRisk = haveVerify && Boolean.TRUE.equals(remediation.harnessVerified())
                     && (touchedConfigFile(remediation.allMutations())
                         || runtimeWriteOverriddenByCommandLine(exec, stackLoc == null ? null
@@ -1588,7 +1592,11 @@ public final class FamiliarMain {
                     // verify passed, the restart-validate re-check failed, and the run still reported
                     // verified=true.
                     finalVerified = false;
-                    rolledBack = snapshotter.rollback(snap);
+                    if (snap == null) {
+                        System.out.println("ops: verify still FAILS after the settle re-check — no snapshot was taken "
+                                + "(rollback is off or the target was not localized), so nothing is rolled back");
+                    }
+                    rolledBack = snap != null && snapshotter.rollback(snap);
                     if (rolledBack) {
                         boolean post = false;
                         for (int t = 0; t < 8 && !post; t++) {
@@ -1597,7 +1605,7 @@ public final class FamiliarMain {
                         }
                         System.out.println("ops: R3 post-rollback verify=" + post
                                 + " (target restored to its pre-fix state — fix was UNDONE, service not bricked)");
-                    } else {
+                    } else if (snap != null) {
                         // A rollback that could not restore the service is the MOST urgent outcome there is —
                         // the fix failed AND the undo failed, so the target is left in whatever state the fix
                         // put it in. It used to be the only outcome that raised nothing, because the alert
@@ -2275,7 +2283,10 @@ public final class FamiliarMain {
      * flight. Both are null-safe — the CLI path passes neither.
      */
     public record Hooks(ToolRegistry.Listener listener,
-                        BooleanSupplier cancelled) { }
+                        BooleanSupplier cancelled,
+                        java.util.List<org.codezaiku.tools.Tool> extraTools) {
+        public Hooks(ToolRegistry.Listener listener, BooleanSupplier cancelled) { this(listener, cancelled, java.util.List.of()); }
+    }
 
     /** As above, with host hooks for streaming and cancellation. */
     /** Apply the mode's loop configuration. Only ARTIFACT changes anything today: it is the one mode
@@ -2300,6 +2311,8 @@ public final class FamiliarMain {
         var lsp = LspClient.forProject(root, ProjectFacts.language(root));
         var tools = ToolRegistry.standard(root, lsp); // no gate; lsp powers edit_file fallback + replace_symbol
         if (hooks != null && hooks.listener() != null) tools.listener(hooks.listener());
+        // Tools the host brought: the MCP servers an ACP client named in session/new, already started and listed.
+        if (hooks != null && hooks.extraTools() != null) for (var extra : hooks.extraTools()) tools.add(extra);
         BooleanSupplier cancel = hooks == null ? null : hooks.cancelled();
         FamiliarLoop.Result result;
         // LIBRARY A/B (CODEZAIKU_LIB_OFF=1): OFF arm passes null library+index -> no idioms, no error-grounding

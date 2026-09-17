@@ -80,6 +80,44 @@ class WorkspaceFilesTest {
                 "a status change from A to AM means the run touched it");
     }
 
+    @Test void reportsAModifiedFileTheRunModifiesAgainAndLeavesTheOtherDirtyFileOut() throws Exception {
+        Files.writeString(repo.resolve("other.txt"), "base\n"); git("add", "-A"); git("commit", "-qm", "other");
+        Files.writeString(repo.resolve("tracked.txt"), "the developer's own edit\n");      // " M" before the run
+        Files.writeString(repo.resolve("other.txt"), "also the developer's\n");            // " M" before the run
+        var before = WorkspaceFiles.snapshot(repo);
+        Files.writeString(repo.resolve("tracked.txt"), "and the run's edit on top\n");     // still " M"
+
+        assertEquals(List.of("tracked.txt"), WorkspaceFiles.changedSince(repo, before),
+                "the status is ' M' on both sides; only the content says which one the run touched");
+    }
+
+    @Test void reportsAFileTheRunEditedAndThenCommitted() throws Exception {
+        var before = WorkspaceFiles.snapshot(repo);
+        Files.writeString(repo.resolve("tracked.txt"), "edited\n");
+        Files.writeString(repo.resolve("new.txt"), "new\n");
+        git("add", "-A"); git("commit", "-qm", "the run committed its work");               // clean before, clean after
+
+        assertEquals(List.of("new.txt", "tracked.txt"), WorkspaceFiles.changedSince(repo, before));
+    }
+
+    @Test void aRepositoryNamedByTheCallersEnvironmentIsNotTheOneRead(@TempDir Path elsewhere) throws Exception {
+        // The harness strips GIT_DIR and GIT_WORK_TREE from its own git calls. It cannot set them on this JVM to prove
+        // that, so the test asks the runner what environment a git child sees.
+        String env = WorkspaceFiles.git(repo, "-c", "alias.e=!env", "e");
+        assertTrue(env != null, "the alias ran");
+        assertTrue(env.contains("GIT_OPTIONAL_LOCKS=0") && env.contains("LC_ALL=C") && env.contains("GIT_TERMINAL_PROMPT=0"), env);
+        assertFalse(env.lines().anyMatch(l -> l.startsWith("GIT_WORK_TREE=") || l.startsWith("GIT_INDEX_FILE=")), "stripped");
+    }
+
+    @Test void aGitThatHangsIsCutOffAtTheTimeout() throws Exception {
+        // `git -c alias.h='!sleep 60' h` is a git that never answers. Read with readAllBytes first, the timeout never began.
+        long t0 = System.nanoTime();
+        Thread t = new Thread(() -> WorkspaceFiles.git(repo, "-c", "alias.h=!sleep 60", "h"));
+        t.start(); t.join((WorkspaceFiles.GIT_TIMEOUT_SECONDS + 8) * 1000L);
+        assertFalse(t.isAlive(), "the call returned by itself");
+        assertTrue((System.nanoTime() - t0) / 1_000_000_000L <= WorkspaceFiles.GIT_TIMEOUT_SECONDS + 6);
+    }
+
     /**
      * Git collapses a wholly untracked directory into one `?? pkg/` entry, so the default porcelain
      * output names the DIRECTORY and loses every file under it — the run's actual work, silently

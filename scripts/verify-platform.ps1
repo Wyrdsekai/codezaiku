@@ -1,7 +1,7 @@
 # CodeZaiku platform pass, Windows. Args: -Dist <dir with tarballs, SHA256SUMS, install.ps1> -Ver 0.3.5
 param([string]$Dist, [string]$Ver)
 $ErrorActionPreference = 'Continue'
-$script:P = 0; $script:F = 0
+$script:P = 0; $script:F = 0   # PowerShell names ignore case: no other variable here may be called $p or $f
 function Pass($n) { Write-Output "  ok   ${n}"; $script:P++ }
 function Fail($n, $m) { Write-Output "  FAIL ${n}: ${m}"; $script:F++ }
 function Expect($name, $want, [scriptblock]$run) {
@@ -11,6 +11,7 @@ function Expect($name, $want, [scriptblock]$run) {
 $W = Join-Path $env:TEMP ("czv-" + [guid]::NewGuid().ToString().Substring(0,8)); New-Item -ItemType Directory -Path "$W\www" | Out-Null
 $env:CODEZAIKU_PREFIX = "$W\prefix"; $env:HOME = "$W\home"; $env:USERPROFILE = "$W\home"; New-Item -ItemType Directory -Path "$W\home" | Out-Null
 $env:Path = 'C:\tools\jdk25\bin;' + $env:Path
+foreach ($g in 'C:\Program Files\Git\cmd', 'C:\Program Files\Git\bin') { if (Test-Path $g) { $env:Path = "$g;" + $env:Path } }   # an ssh session has no user PATH, and the shell tool needs Git for Windows' bash
 Copy-Item "$Dist\codezaiku-$Ver*.tar.gz" "$W\www\"; Copy-Item "$Dist\SHA256SUMS" "$W\www\"
 $port = Get-Random -Minimum 20000 -Maximum 40000
 $http = Start-Process -FilePath python -ArgumentList "-m http.server $port --bind 127.0.0.1" -WorkingDirectory "$W\www" -PassThru -WindowStyle Hidden
@@ -25,8 +26,8 @@ Expect 'doctor names this version' "codezaiku $Ver" { & $Z doctor }
 Write-Output "== the MCP server says which release it is"
 $init = "$W\init.json"
 Set-Content -Path $init -Value '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' -NoNewline
-$p = Start-Process -FilePath cmd.exe -ArgumentList "/c `"type $init | $Z mcp > $W\mcp-out.txt 2> $W\mcp-err.txt`"" -PassThru -WindowStyle Hidden
-if (-not $p.WaitForExit(90000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+$proc = Start-Process -FilePath cmd.exe -ArgumentList "/c `"type $init | $Z mcp > $W\mcp-out.txt 2> $W\mcp-err.txt`"" -PassThru -WindowStyle Hidden
+if (-not $proc.WaitForExit(90000)) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
 $mcp = (Get-Content "$W\mcp-out.txt" -ErrorAction SilentlyContinue | Out-String)
 if ($mcp -match "`"serverInfo`":\{`"name`":`"codezaiku`",`"version`":`"$Ver`"\}") { Pass "mcp serverInfo version $Ver" } else { Fail "mcp serverInfo version $Ver" (($mcp -split "`n" | Select-Object -First 2) -join ' ') }
 Get-Process java -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$W*" } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -39,6 +40,30 @@ $Z2 = "$RT\codezaiku\bin\codezaiku.bat"
 $env:JAVA_HOME = 'C:\nonexistent'
 Expect 'version (own runtime, JAVA_HOME pointing nowhere)' $Ver { & $Z2 --version }
 Remove-Item Env:JAVA_HOME
+Write-Output "== run: a file made through the shell is in files[] (the harness's own git calls, on this platform)"
+$repo = "$W\repo"; New-Item -ItemType Directory -Path $repo | Out-Null
+git -C $repo init -q 2>$null; Set-Content -Path "$repo\seed.txt" -Value 'seed'
+git -C $repo add -A 2>$null; git -C $repo -c user.email=t@example.com -c user.name=t commit -qm base 2>$null
+$script = "$W\script.json"
+Set-Content -Path $script -Value '[{"tool":"shell","args":{"command":"echo hi > made.txt"}},{"tool":"task_done","args":{"summary":"made made.txt"}}]' -NoNewline
+$sport = Get-Random -Minimum 20000 -Maximum 40000
+$stub = Start-Process -FilePath python -ArgumentList "`"$Dist\stub-drive.py`" $sport `"$script`"" -PassThru -WindowStyle Hidden
+Start-Sleep 2
+Push-Location $repo
+$runOut = (& $Z2 run --text "Make made.txt with the shell." --output-format json --no-session -q --max-turns 6 --task-id win-1 --drive "http://127.0.0.1:$sport" 2>$null | Out-String)
+Pop-Location
+Stop-Process -Id $stub.Id -Force -ErrorAction SilentlyContinue
+if ((Test-Path "$repo\made.txt") -and ($runOut -match 'made\.txt') -and ($runOut -notmatch 'seed\.txt')) { Pass 'run: files[] has the shell-made file and not the committed one' } else { Fail 'run: files[]' (($runOut -split "`n" | Select-Object -Last 4) -join ' ') }
+Write-Output "== ACP: session/new starts a client's stdio MCP server and offers the model option"
+$acpIn = "$W\acp-in.txt"
+$j1 = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}'
+$j2 = '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"' + $repo.Replace('\','\\') + '","mcpServers":[{"name":"self","command":"' + $Z2.Replace('\','\\') + '","args":["mcp"],"env":[{"name":"CZ_PLATFORM_CHECK","value":"1"}]}]}}'
+Set-Content -Path $acpIn -Value @($j1, $j2)
+$proc = Start-Process -FilePath cmd.exe -ArgumentList "/c `"type $acpIn | $Z2 acp > $W\acp-out.txt 2> $W\acp-err.txt`"" -PassThru -WindowStyle Hidden
+if (-not $proc.WaitForExit(180000)) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+$acp = (Get-Content "$W\acp-out.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -match '"id":2' } | Out-String)
+if ($acp -match '"sessionId"') { Pass 'ACP: the MCP server started' } else { Fail 'ACP: the MCP server started' $acp }
+if ($acp -match '"category":"model"') { Pass 'ACP: model option offered' } else { Fail 'ACP: model option offered' $acp }
 Stop-Process -Id $http.Id -Force -ErrorAction SilentlyContinue
 Get-Process java -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$W*" } | Stop-Process -Force -ErrorAction SilentlyContinue
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

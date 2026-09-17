@@ -96,6 +96,10 @@ public final class Fetch {
     /** GET {@code url}, walking redirects with the check at every hop. Throws on refusal or transport failure. */
     public static Result get(String url, Duration timeout) throws Exception {
         String current = url;
+        // The request timeout covers each hop up to its response headers. The body read after that had no limit: a
+        // server that sends one byte a minute held a tool call, and the turn, for as long as it liked. One deadline
+        // now covers the whole fetch, every hop and the body.
+        final long deadline = System.nanoTime() + totalBudget(timeout).toNanos();
         for (int hop = 0; hop <= MAX_HOPS; hop++) {
             URI uri = URI.create(current);
             String why = refusal(uri);
@@ -109,7 +113,7 @@ public final class Fetch {
             int status = resp.statusCode();
             if (status >= 300 && status < 400) {
                 String loc = resp.headers().firstValue("Location").orElse(null);
-                try (InputStream in = resp.body()) { in.skip(Long.MAX_VALUE); }
+                try (InputStream in = resp.body()) { readUntil(in, 64 * 1024, deadline); } catch (java.io.IOException ignored) { }
                 if (loc == null) return new Result(current, status, new byte[0], "");
                 current = uri.resolve(loc).toString();
                 if (hop == MAX_HOPS) throw new IllegalStateException("too many redirects from " + url);
@@ -117,13 +121,47 @@ public final class Fetch {
             }
             byte[] body;
             try (InputStream in = resp.body()) {
-                body = in.readNBytes(MAX_BYTES + 1);
+                body = readUntil(in, MAX_BYTES + 1, deadline);
             }
             if (body.length > MAX_BYTES) throw new IllegalStateException("the body exceeds " + MAX_BYTES + " bytes; not read");
             String enc = resp.headers().firstValue("Content-Encoding").orElse("").toLowerCase(Locale.ROOT);
             return new Result(current, status, decode(body, enc), resp.headers().firstValue("Content-Type").orElse(""));
         }
         throw new IllegalStateException("too many redirects from " + url);
+    }
+
+    /** The whole fetch: three request timeouts, at least 30 seconds, at most five minutes. */
+    static Duration totalBudget(Duration perRequest) {
+        long s = Math.max(30, Math.min(300, perRequest.toSeconds() * 3));
+        return Duration.ofSeconds(s);
+    }
+
+    /** Up to {@code max} bytes, or an exception when the deadline passes first. The watchdog closes the stream, which is what ends a blocked read. */
+    static byte[] readUntil(InputStream in, int max, long deadlineNanos) throws java.io.IOException {
+        var done = new java.util.concurrent.atomic.AtomicBoolean(false);
+        var timedOut = new java.util.concurrent.atomic.AtomicBoolean(false);
+        Thread watchdog = new Thread(() -> {
+            while (!done.get()) {
+                long left = deadlineNanos - System.nanoTime();
+                if (left <= 0) { timedOut.set(true); try { in.close(); } catch (java.io.IOException ignored) { } return; }
+                try { Thread.sleep(Math.min(500L, Math.max(10L, left / 1_000_000L))); } catch (InterruptedException e) { return; }
+            }
+        }, "fetch-deadline");
+        watchdog.setDaemon(true);
+        watchdog.start();
+        try {
+            byte[] got = in.readNBytes(max);
+            // the HTTP client's body stream answers a close with end-of-stream, not an exception: what was read so far
+            // would come back looking like the whole page
+            if (timedOut.get()) throw new java.io.IOException("the page did not finish arriving within the time allowed; not read");
+            return got;
+        } catch (java.io.IOException e) {
+            if (timedOut.get()) throw new java.io.IOException("the page did not finish arriving within the time allowed; not read");
+            throw e;
+        } finally {
+            done.set(true);
+            watchdog.interrupt();
+        }
     }
 
     /** Inflate a compressed body (some CDNs gzip even to a client that did not ask). Capped like the raw body. */

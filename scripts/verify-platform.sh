@@ -242,6 +242,13 @@ newrepo acp
   if command -v cygpath >/dev/null 2>&1; then acp_cwd="$(cygpath -w "$REPO")"; fi
   printf '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"%s","mcpServers":[]}}\n' \
       "$(printf '%s' "$acp_cwd" | sed 's/\\/\\\\/g')"
+  # A client's own MCP server (0.3.7): session/new has to START a program the client names, with the platform's own
+  # path form, and list its tools. CodeZaiku's `mcp` command is the server here, so the check needs nothing else
+  # installed. On Windows a native client names the .bat launcher, not the shell script beside it.
+  mcp_cmd="$(command -v "$CP")"
+  if command -v cygpath >/dev/null 2>&1; then mcp_cmd="$(cygpath -w "${mcp_cmd%.bat}.bat")"; fi
+  printf '{"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":"%s","mcpServers":[{"name":"self","command":"%s","args":["mcp"],"env":[{"name":"CZ_PLATFORM_CHECK","value":"1"}]}]}}\n' \
+      "$(printf '%s' "$acp_cwd" | sed 's/\\/\\\\/g')" "$(printf '%s' "$mcp_cmd" | sed 's/\\/\\\\/g')"
   printf '{"jsonrpc":"2.0","id":99,"method":"totally/unknown","params":{}}\n'
 } | $CP acp >"$WORK/acp.txt" 2>/dev/null
 
@@ -257,6 +264,8 @@ else
 fi
 grep -q '"protocolVersion":1' "$WORK/acp.txt" && ok "ACP: negotiates protocol v1" || bad "ACP: no protocolVersion 1"
 grep -q '"sessionId"' "$WORK/acp.txt" && ok "ACP: session/new returns a sessionId" || bad "ACP: session/new failed"
+grep '"id":3' "$WORK/acp.txt" | grep -q '"sessionId"' && ok "ACP: session/new starts the client's stdio MCP server" || bad "ACP: the client's MCP server did not start: $(grep '"id":3' "$WORK/acp.txt" | cut -c1-300)"
+grep '"id":2' "$WORK/acp.txt" | grep -q '"category":"model"' && ok "ACP: session/new offers the model option" || bad "ACP: no model config option"
 grep -q '\-32601' "$WORK/acp.txt" && ok "ACP: unknown method -> -32601" || bad "ACP: wrong error for unknown method"
 
 printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}\n' \

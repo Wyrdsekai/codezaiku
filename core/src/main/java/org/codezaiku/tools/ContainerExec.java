@@ -71,23 +71,41 @@ public final class ContainerExec {
 
     public record Result(int exit, String out) { }
 
-    /** Run a host process (docker ...), optionally feeding {@code stdin}, capturing merged stdout+stderr. */
-    public static Result run(String stdin, String... argv) {
+    /** A file operation inside the container that has not finished by now never will: the daemon is wedged. */
+    static final int TIMEOUT_SECONDS = 120;
+
+    /**
+     * Run a host process (docker ...), optionally feeding {@code stdin}, capturing merged stdout+stderr. The output is
+     * drained and the stdin is fed on side threads while the timeout runs: written up front, a large file's content
+     * blocked on a full pipe before anything was reading the other end, and there was no timeout at all.
+     */
+    public static Result run(String stdin, String... argv) { return run(stdin, TIMEOUT_SECONDS, argv); }
+
+    static Result run(String stdin, int timeoutSeconds, String... argv) {
+        Process proc = null;
         try {
-            ProcessBuilder pb = new ProcessBuilder(argv).redirectErrorStream(true);
-            Process proc = pb.start();
-            if (stdin != null) {
-                try (OutputStream os = proc.getOutputStream()) {
-                    os.write(stdin.getBytes(StandardCharsets.UTF_8));
-                }
-            } else {
-                proc.getOutputStream().close();
-            }
+            proc = new ProcessBuilder(argv).redirectErrorStream(true).start();
+            Process p = proc;
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
-            proc.getInputStream().transferTo(buf);
-            int exit = proc.waitFor();
-            return new Result(exit, buf.toString(StandardCharsets.UTF_8));
+            Thread drain = new Thread(() -> { try { p.getInputStream().transferTo(buf); } catch (Exception ignored) { } });
+            drain.setDaemon(true);
+            drain.start();
+            Thread feed = new Thread(() -> {
+                try (OutputStream os = p.getOutputStream()) {
+                    if (stdin != null) os.write(stdin.getBytes(StandardCharsets.UTF_8));
+                } catch (Exception ignored) { }
+            });
+            feed.setDaemon(true);
+            feed.start();
+            if (!proc.waitFor(Math.max(1, timeoutSeconds), java.util.concurrent.TimeUnit.SECONDS)) {
+                proc.destroyForcibly();
+                drain.join(1000);
+                return new Result(124, buf.toString(StandardCharsets.UTF_8) + "\n[timed out after " + timeoutSeconds + "s]");
+            }
+            drain.join(2000);
+            return new Result(proc.exitValue(), buf.toString(StandardCharsets.UTF_8));
         } catch (Exception e) {
+            if (proc != null) proc.destroyForcibly();
             return new Result(-1, "ContainerExec error: " + e.getMessage());
         }
     }

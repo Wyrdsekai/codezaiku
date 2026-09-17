@@ -24,7 +24,7 @@ import java.util.Map;
  * on this machine's card behind a proxy that starts it on demand and stops it when idle (ModelServer), the
  * measured model for the card, so nothing has to be up all the time.
  */
-final class Models {
+public final class Models {
 
     private static final ObjectMapper J = new ObjectMapper();
     private static final HttpClient HTTP = HttpClient.newBuilder()
@@ -116,7 +116,16 @@ final class Models {
         return new Endpoint(base, server, models);
     }
 
-    private static List<String> fetchModels(String url, String arrayField, String nameField) {
+    /** The models a drive offers, by id, or an empty list when it will not say. For a host's model picker. */
+    public static List<String> offered(String base) {
+        List<String> models = fetchModels(base + "/v1/models", "data", "id", 50);
+        if (models == null) models = fetchModels(base + "/api/tags", "models", "name", 50);
+        return models == null ? List.of() : models;
+    }
+
+    private static List<String> fetchModels(String url, String arrayField, String nameField) { return fetchModels(url, arrayField, nameField, 4); }
+
+    private static List<String> fetchModels(String url, String arrayField, String nameField, int limit) {
         try {
             HttpResponse<String> r = HTTP.send(
                     org.codezaiku.drive.DriveClient.auth(
@@ -132,7 +141,7 @@ final class Models {
                 if (name.isBlank()) name = n.path("name").asText("");
                 if (name.isBlank()) name = n.path("id").asText("");
                 if (!name.isBlank()) out.add(name);
-                if (out.size() >= 4) break;
+                if (out.size() >= limit) break;
             }
             return out;
         } catch (Exception e) {

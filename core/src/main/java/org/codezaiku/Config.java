@@ -42,7 +42,25 @@ public final class Config {
     /** The value for an environment-style key such as {@code CODEZAIKU_OPS_AUTHORITY}, or null. */
     public static String get(String envKey) {
         ensureLoaded();
-        return resolve(env(envKey), FILE.get(normalize(envKey)), env(envKey + DEFAULT_SUFFIX));
+        String v = resolve(env(envKey), FILE.get(normalize(envKey)), env(envKey + DEFAULT_SUFFIX));
+        return envKey.endsWith("_DRIVE") ? driveBase(v) : v;
+    }
+
+    /**
+     * A drive address as every caller expects it: the base, with no {@code /v1} on the end. Providers print their
+     * address as {@code https://host/api/v1}, people paste that, and each request then went to {@code /v1/v1/…} and
+     * came back 404. The pasted forms are accepted: a trailing {@code /v1}, {@code /v1/chat/completions} or
+     * {@code /v1/models}, and trailing slashes. Anything that is not an http address ("off") is left as it is.
+     */
+    public static String driveBase(String url) {
+        if (url == null) return null;
+        String u = url.strip();
+        if (!u.regionMatches(true, 0, "http", 0, 4)) return url;
+        u = u.replaceAll("/+$", "");
+        for (String tail : new String[]{"/chat/completions", "/completions", "/models"})
+            if (u.endsWith("/v1" + tail)) { u = u.substring(0, u.length() - tail.length()); break; }
+        if (u.endsWith("/v1")) u = u.substring(0, u.length() - 3);
+        return u.replaceAll("/+$", "");
     }
 
     /** Read an environment variable. */
@@ -122,6 +140,29 @@ public final class Config {
         return (!Files.isDirectory(now) && Files.isDirectory(was)) ? was : now;
     }
 
+    /**
+     * The user's config file holds API keys, so only its owner may read it: the file becomes 600, and the settings
+     * folder 700 when it is our own folder under the home directory. With a umask of 002, the default on many
+     * desktops, both were group-readable. Done on every load as well as every write, so a file made by an older
+     * version or by an editor is tightened the next time anything runs. A file system without POSIX permissions
+     * (Windows) is left alone, and so is a file we do not own.
+     */
+    static void keepPrivate(Path cfg) {
+        try {
+            if (cfg == null || !Files.exists(cfg) || !Files.getFileStore(cfg).supportsFileAttributeView("posix")) return;
+            var owner = java.nio.file.attribute.PosixFilePermissions.fromString("rw-------");
+            if (!Files.getPosixFilePermissions(cfg).equals(owner)) Files.setPosixFilePermissions(cfg, owner);
+            Path dir = cfg.toAbsolutePath().getParent();
+            String name = dir == null || dir.getFileName() == null ? "" : dir.getFileName().toString();
+            if (dir != null && (name.equals(".codezaiku") || name.equals(".codeplane"))) {
+                var mine = java.nio.file.attribute.PosixFilePermissions.fromString("rwx------");
+                if (!Files.getPosixFilePermissions(dir).equals(mine)) Files.setPosixFilePermissions(dir, mine);
+            }
+        } catch (Exception ignored) {
+            // not ours to change, or the file system said no: the settings still load
+        }
+    }
+
     private static void ensureLoaded() {
         if (loaded) return;
         synchronized (Config.class) {
@@ -129,6 +170,7 @@ public final class Config {
             for (Path p : new Path[]{userConfigPath(), Paths.get("/etc/codezaiku/config")}) {
                 if (p != null && Files.isReadable(p)) {
                     read(p);
+                    if (p.equals(userConfigPath())) keepPrivate(p);
                     loadedFrom = p;
                     break;      // the user's file wins outright; we do not merge layers
                 }
@@ -210,6 +252,7 @@ public final class Config {
             lines.add(shorthand(want) + " = " + value);
         }
         Files.writeString(cfg, String.join("\n", lines) + "\n");
+        keepPrivate(cfg);
         invalidate();
     }
 
@@ -232,6 +275,7 @@ public final class Config {
         }
         if (removed) {
             Files.writeString(cfg, String.join("\n", out) + "\n");
+            keepPrivate(cfg);
             invalidate();
         }
         return removed;

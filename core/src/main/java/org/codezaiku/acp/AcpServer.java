@@ -86,6 +86,11 @@ public final class AcpServer {
         this.wire = wire;
     }
 
+    /** For tests: a server writing to {@code wire}, and the two session calls without the JSON-RPC envelope. */
+    static AcpServer forTest(PrintStream wire) { return new AcpServer(wire); }
+    ObjectNode newSessionForTest(JsonNode params) { return newSession(params); }
+    ObjectNode setConfigOptionForTest(String sessionId, JsonNode params) { return setConfigOption(sessions.get(sessionId), params); }
+
     public static void main(String[] args) throws Exception {
         PrintStream wire = System.out;
         // Before anything can log or narrate: stdout is the protocol channel from here on.
@@ -114,6 +119,7 @@ public final class AcpServer {
             }
         }
         prompts.shutdownNow();
+        sessions.values().forEach(Session::closeMcp);      // the client went away: its servers go with it
     }
 
     private void dispatch(JsonNode msg) {
@@ -169,6 +175,16 @@ public final class AcpServer {
                 // On a worker, so session/cancel can still be read while this runs.
                 prompts.submit(() -> runPrompt(idNode, s, p));
             }
+            case "session/set_config_option" -> {
+                if (!isRequest) return;
+                Session s = sessions.get(p.path("sessionId").asText(""));
+                if (s == null) { send(error(idNode, -32602, "unknown sessionId")); return; }
+                try {
+                    send(result(idNode, setConfigOption(s, p)));
+                } catch (IllegalArgumentException e) {
+                    send(error(idNode, -32602, e.getMessage()));
+                }
+            }
             case "session/cancel" -> {
                 Session s = sessions.get(p.path("sessionId").asText(""));
                 if (s != null) s.cancel();
@@ -176,7 +192,7 @@ public final class AcpServer {
             }
             case "session/close", "session/delete" -> {
                 Session s = sessions.remove(p.path("sessionId").asText(""));
-                if (s != null) s.cancel();
+                if (s != null) { s.cancel(); s.closeMcp(); }
                 if (isRequest) send(result(idNode, J.createObjectNode()));
             }
             case "$/cancel_request" -> { }        // implementation-dependent; safe to ignore
@@ -231,34 +247,44 @@ public final class AcpServer {
         }
         if (!Files.isDirectory(ws)) throw new IllegalArgumentException("cwd is not a directory: " + cwd);
 
-        // Reject what we cannot honour instead of ignoring it. A client that passes mcpServers
-        // believes the agent gained those tools; silently dropping them leaves it reasoning about a
-        // capability that is not there. Borrowed from deepseek-harness, whose ACP server rejects
-        // non-empty values for exactly this reason.
+        // Reject what we cannot honour instead of ignoring it: a client that passes an option believes
+        // the agent took it, and silently dropping it leaves the client reasoning about something that
+        // is not there.
         var unsupported = unsupportedSessionOption(p);
         if (unsupported.isPresent()) throw new IllegalArgumentException(unsupported.get());
 
         String id = "cp-" + sessionSeq.incrementAndGet();
-        sessions.put(id, new Session(id, ws.normalize()));
+        Session session = new Session(id, ws.normalize());
+        // The MCP servers the client named. Every agent must take the stdio kind. They are started here, not at the
+        // first prompt, so a server that cannot start fails session/new with its own words instead of leaving the
+        // client believing in tools that never came.
+        session.attach(startMcpServers(p.path("mcpServers"), session.cwd));
+        session.offeredModels = MODELS.apply(Config.get("CODEZAIKU_DRIVE", "http://localhost:8200"));
+        sessions.put(id, session);
         ObjectNode r = J.createObjectNode();
         r.put("sessionId", id);
+        r.set("configOptions", configOptions(session));
         return r;
     }
 
     /**
      * A session option we cannot honour, or empty if the request is servable.
      *
-     * <p>Rejecting beats ignoring: a client that passes {@code mcpServers} believes the agent gained
-     * those tools and will reason about having them. Silently dropping the field leaves it wrong
-     * about its own capabilities, and the failure surfaces later as the agent "forgetting" to use a
-     * tool that was never there.
+     * <p>Rejecting beats ignoring: a client that passes an option believes the agent took it. A stdio
+     * MCP server is taken (see {@link #startMcpServers}); an http or sse one is refused, because the
+     * capabilities we announce say we do not offer those transports.
      */
     static Optional<String> unsupportedSessionOption(JsonNode p) {
-        JsonNode mcp = p.path("mcpServers");
-        if (mcp.isArray() && !mcp.isEmpty()) {
-            return Optional.of("mcpServers is not supported by this agent — it runs its own "
-                    + "tools. Pass an empty array, or drive CodeZaiku's MCP surface directly with "
-                    + "`codezaiku mcp`.");
+        for (JsonNode server : p.path("mcpServers")) {
+            String type = server.path("type").asText("");
+            if (type.equals("http") || type.equals("sse")) {
+                return Optional.of("the MCP server '" + server.path("name").asText("") + "' uses the " + type
+                        + " transport, which this agent does not offer (its capabilities say so). "
+                        + "Pass stdio servers only.");
+            }
+            if (server.path("command").asText("").isBlank()) {
+                return Optional.of("the MCP server '" + server.path("name").asText("") + "' has no command to start.");
+            }
         }
         JsonNode extra = p.path("additionalDirectories");
         if (extra.isArray() && !extra.isEmpty()) {
@@ -272,12 +298,31 @@ public final class AcpServer {
     // ---- session/prompt -------------------------------------------------------------------------
 
     private void runPrompt(JsonNode rpcId, Session s, JsonNode p) {
-        String text = promptText(p.path("prompt"));
+        String text = promptText(p.path("prompt"), s.cwd);
         if (text.isBlank()) {
             send(error(rpcId, -32602, "prompt contained no text content"));
             return;
         }
         s.begin();
+        String mcpNotice = s.mcpNoticeOnce();
+        if (mcpNotice != null) {
+            ObjectNode n = J.createObjectNode();
+            n.put("sessionUpdate", "agent_message_chunk");
+            n.putObject("content").put("type", "text").put("text", mcpNotice + "\n\n");
+            sessionUpdate(s.id, n);
+        }
+        // usage_update after every model call: how much of the context window the session holds. The window is asked
+        // of the drive once, on the first call; a drive that will not say gets no update, since a made-up size would
+        // draw a wrong meter in the host.
+        final String driveUrl = Config.get("CODEZAIKU_DRIVE", "http://localhost:8200");
+        final String driveModel = s.model;
+        final int[] window = {0};
+        org.codezaiku.drive.DriveClient.USAGE_SINK.set(used -> {
+            if (window[0] == 0) {
+                try { window[0] = new org.codezaiku.drive.DriveClient(driveUrl, driveModel).contextWindow(); } catch (RuntimeException e) { window[0] = -1; }
+            }
+            if (window[0] > 0 && used > 0) sessionUpdate(s.id, usageUpdate(used, window[0]));
+        });
         var before = WorkspaceFiles.snapshot(s.cwd);
         FamiliarMain.Tracked t = null;
         String failure = null;
@@ -285,10 +330,12 @@ public final class AcpServer {
             t = FamiliarMain.runLoopTracked(
                     s.cwd, text, Config.get("CODEZAIKU_DRIVE", "http://localhost:8200"),
                     Config.getInt("CODEZAIKU_RUN_MAX_TURNS", 40), "none", null,
-                    Config.get("CODEZAIKU_MODEL", "local-model"),
-                    new FamiliarMain.Hooks(new ToolStream(s), s::isCancelled));
+                    s.model,
+                    new FamiliarMain.Hooks(new ToolStream(s), s::isCancelled, s.mcpTools()));
         } catch (RuntimeException | Error e) {
             failure = e.toString();
+        } finally {
+            org.codezaiku.drive.DriveClient.USAGE_SINK.remove();
         }
 
         boolean cancelled = s.isCancelled();
@@ -336,17 +383,166 @@ public final class AcpServer {
         s.finish();
     }
 
-    /** Concatenate the text blocks of a prompt; other content types are not ours to interpret. */
-    static String promptText(JsonNode prompt) {
+    /** Who lists a drive's models. A field so a test needs no drive. */
+    static java.util.function.Function<String, List<String>> MODELS = org.codezaiku.Models::offered;
+
+    /**
+     * The session's one setting: which model on the drive answers. It is a config option of category "model", the
+     * protocol's stable way to offer a model picker, and what a harness uses to apply its {@code --model} flag. The
+     * choices are the drive's own list with the configured model first. A drive that lists nothing still gets the
+     * configured model as the one choice, so the option is always there and always truthful.
+     */
+    static com.fasterxml.jackson.databind.node.ArrayNode configOptions(Session s) {
+        var all = J.createArrayNode();
+        ObjectNode o = all.addObject();
+        o.put("id", "model");
+        o.put("name", "Model");
+        o.put("description", "The model on the drive that answers this session.");
+        o.put("category", "model");
+        o.put("type", "select");
+        o.put("currentValue", s.model);
+        var options = o.putArray("options");
+        var seen = new java.util.LinkedHashSet<String>();
+        seen.add(s.model);
+        seen.addAll(s.offeredModels);
+        for (String m : seen) options.addObject().put("value", m).put("name", m);
+        return all;
+    }
+
+    /** {@code session/set_config_option}. Only "model" exists, and only a model the option offered is taken. */
+    static ObjectNode setConfigOption(Session s, JsonNode p) {
+        String configId = p.path("configId").asText("");
+        if (!configId.equals("model")) throw new IllegalArgumentException("unknown config option: " + configId + " (this agent offers: model)");
+        String value = p.path("value").asText("");
+        var offered = new java.util.LinkedHashSet<String>(s.offeredModels);
+        offered.add(s.model);
+        if (!offered.contains(value)) throw new IllegalArgumentException("the drive does not offer the model '" + value + "'. It offers: " + String.join(", ", offered));
+        s.model = value;
+        ObjectNode r = J.createObjectNode();
+        r.set("configOptions", configOptions(s));
+        return r;
+    }
+
+    /** How many tools the client's MCP servers may add. Every tool's schema is sent with every model call, and a small window has no room for ninety of them. */
+    static final int MAX_MCP_TOOLS = Config.getInt("CODEZAIKU_ACP_MCP_MAX_TOOLS", 40);
+
+    /** What starting a session's MCP servers produced: the running clients, their tools as loop tools, and a note for the person when some tools were left out. */
+    record McpAttachment(List<org.codezaiku.mcp.McpClient> clients, List<org.codezaiku.tools.Tool> tools, String notice) {
+        static McpAttachment none() { return new McpAttachment(List.of(), List.of(), null); }
+    }
+
+    /**
+     * Start each stdio server, list its tools, and wrap them as {@code mcp_<server>_<tool>}. A server that does not
+     * start, or does not answer, fails the whole call with its reason and stops the ones already started. Tools past
+     * {@link #MAX_MCP_TOOLS} are left out in the order given, and the notice says how many and how to raise the limit.
+     */
+    static McpAttachment startMcpServers(JsonNode servers, Path cwd) { return startMcpServers(servers, cwd, MAX_MCP_TOOLS); }
+
+    static McpAttachment startMcpServers(JsonNode servers, Path cwd, int maxTools) {
+        if (!servers.isArray() || servers.isEmpty()) return McpAttachment.none();
+        List<org.codezaiku.mcp.McpClient> clients = new java.util.ArrayList<>();
+        List<org.codezaiku.tools.Tool> tools = new java.util.ArrayList<>();
+        int offered = 0;
+        try {
+            for (JsonNode server : servers) {
+                String name = server.path("name").asText("server");
+                List<String> command = new java.util.ArrayList<>();
+                command.add(server.path("command").asText());
+                for (JsonNode a : server.path("args")) command.add(a.asText());
+                Map<String, String> env = new java.util.LinkedHashMap<>();
+                for (JsonNode e : server.path("env")) if (!e.path("name").asText("").isBlank()) env.put(e.path("name").asText(), e.path("value").asText(""));
+                org.codezaiku.mcp.McpClient client;
+                try {
+                    client = new org.codezaiku.mcp.McpClient(name, command, env, cwd);
+                } catch (Exception e) {
+                    throw new IllegalArgumentException("the MCP server '" + name + "' did not start: " + e.getMessage());
+                }
+                clients.add(client);
+                List<org.codezaiku.mcp.McpClient.RemoteTool> listed;
+                try {
+                    listed = client.listTools();
+                } catch (Exception e) {
+                    throw new IllegalArgumentException("the MCP server '" + name + "' did not list its tools: " + e.getMessage());
+                }
+                for (var remote : listed) {
+                    offered++;
+                    if (tools.size() < maxTools) tools.add(new org.codezaiku.tools.McpBridgeTool(client, remote));
+                }
+            }
+        } catch (RuntimeException e) {
+            clients.forEach(org.codezaiku.mcp.McpClient::close);
+            throw e;
+        }
+        String notice = offered > tools.size()
+                ? "Using " + tools.size() + " of the " + offered + " tools your MCP servers offer. Each tool is sent to the model with every call, "
+                  + "so the rest were left out. Set CODEZAIKU_ACP_MCP_MAX_TOOLS to use more, or pass fewer servers."
+                : null;
+        return new McpAttachment(List.copyOf(clients), List.copyOf(tools), notice);
+    }
+
+    /** {@code usage_update}: tokens in the context now, and the size of the window. */
+    static ObjectNode usageUpdate(int used, int size) {
+        ObjectNode u = J.createObjectNode();
+        u.put("sessionUpdate", "usage_update");
+        u.put("used", used);
+        u.put("size", size);
+        return u;
+    }
+
+    /** The prompt as the task text, with no workspace to make an attached file's path relative to. */
+    static String promptText(JsonNode prompt) { return promptText(prompt, null); }
+
+    /**
+     * The text blocks of a prompt, and the files and resources the host attached to it.
+     *
+     * <p>{@code resource_link} is the one block besides text that every agent must accept: a host that is told we do
+     * not take embedded context sends a link instead, which is what an @-mention of a file becomes. Dropped, the
+     * task read "fix the bug in" with nothing after it. A link is rendered as one line naming the file, relative to
+     * the workspace when it is inside it, so the model can read it with its own tools. An embedded text resource,
+     * which we do not ask for, is included when a host sends one anyway. Images and audio are skipped.
+     * A name or an address is one line with control characters removed: it is a label, never more task text.
+     */
+    static String promptText(JsonNode prompt, java.nio.file.Path cwd) {
         if (!prompt.isArray()) return "";
         StringBuilder b = new StringBuilder();
         for (JsonNode block : prompt) {
-            if ("text".equals(block.path("type").asText())) {
-                if (b.length() > 0) b.append("\n\n");
-                b.append(block.path("text").asText(""));
-            }
+            String piece = switch (block.path("type").asText()) {
+                case "text" -> block.path("text").asText("");
+                case "resource_link" -> attached(block.path("name").asText(""), block.path("uri").asText(""), cwd);
+                case "resource" -> {
+                    JsonNode r = block.path("resource");
+                    String text = r.path("text").asText("");
+                    yield text.isBlank() ? "" : attached("", r.path("uri").asText(""), cwd) + "\n```\n" + text + "\n```";
+                }
+                default -> "";
+            };
+            if (piece.isBlank()) continue;
+            if (b.length() > 0) b.append("\n\n");
+            b.append(piece);
         }
         return b.toString().strip();
+    }
+
+    /** One line for an attached file or resource. */
+    static String attached(String name, String uri, java.nio.file.Path cwd) {
+        String cleanName = oneLine(name), cleanUri = oneLine(uri);
+        if (cleanUri.startsWith("file:")) {
+            try {
+                java.nio.file.Path file = java.nio.file.Path.of(java.net.URI.create(cleanUri)).normalize();
+                java.nio.file.Path root = cwd == null ? null : cwd.toAbsolutePath().normalize();
+                String shown = root != null && file.startsWith(root) ? root.relativize(file).toString().replace('\\', '/') : file.toString();
+                return "Attached file: " + shown;
+            } catch (RuntimeException e) {
+                // not a usable file address: shown as a resource below
+            }
+        }
+        if (cleanUri.isEmpty() && cleanName.isEmpty()) return "";
+        return "Attached resource: " + (cleanName.isEmpty() ? cleanUri : cleanName + (cleanUri.isEmpty() ? "" : " (" + cleanUri + ")"));
+    }
+
+    private static String oneLine(String s) {
+        String t = s == null ? "" : s.replaceAll("[\\p{Cntrl}]+", " ").strip();
+        return t.length() > 300 ? t.substring(0, 300) + "…" : t;
     }
 
     // ---- streaming ------------------------------------------------------------------------------
@@ -372,6 +568,11 @@ public final class AcpServer {
          */
         @Override
         public String permit(String tool, JsonNode args) {
+            // A remote tool runs in someone else's process and nothing here knows whether it changes anything, so
+            // the person is asked, per tool: "allow for this session" covers that one tool and no other.
+            if (tool.startsWith("mcp_")) {
+                return askPermission(s, "permit_" + permitSeq.incrementAndGet(), tool, args, "the MCP tool `" + tool + "`");
+            }
             if (!"shell".equals(tool)) return null;
             String cmd = args == null ? null : args.path("command").asText(null);
             if (!ShellTool.isGitWrite(cmd)) return null;
@@ -385,6 +586,7 @@ public final class AcpServer {
             u.put("sessionUpdate", "tool_call");
             u.put("toolCallId", callId);
             u.put("title", title(tool, args));
+            u.put("name", tool);             // the tool's own name, optional since schema 1.22.0: a host can key on it, a title is for people
             u.put("kind", kind(tool));
             u.put("status", "in_progress");
             u.set("rawInput", args == null ? J.createObjectNode() : args);
@@ -471,6 +673,20 @@ public final class AcpServer {
             this.id = id;
             this.cwd = cwd;
         }
+
+        /** The model this session's prompts go to, and the models the drive listed when the session was made. */
+        volatile String model = Config.get("CODEZAIKU_MODEL", "local-model");
+        volatile List<String> offeredModels = List.of();
+
+        /** The client's MCP servers, running for as long as the session is. */
+        private volatile McpAttachment mcp = McpAttachment.none();
+        private final AtomicBoolean noticeGiven = new AtomicBoolean();
+
+        void attach(McpAttachment a) { this.mcp = a; }
+        List<org.codezaiku.tools.Tool> mcpTools() { return mcp.tools(); }
+        /** The note about left-out tools, once. */
+        String mcpNoticeOnce() { return mcp.notice() != null && noticeGiven.compareAndSet(false, true) ? mcp.notice() : null; }
+        void closeMcp() { mcp.clients().forEach(org.codezaiku.mcp.McpClient::close); mcp = McpAttachment.none(); }
 
         /** Take the session's single prompt slot; false if one is already in flight. */
         boolean claimPromptSlot() {
@@ -587,6 +803,7 @@ public final class AcpServer {
         ObjectNode tc = p.putObject("toolCall");
         tc.put("toolCallId", callId);
         tc.put("title", title(tool, args));
+        tc.put("name", tool);
         tc.put("kind", kind(tool));
         tc.put("status", "pending");
         tc.set("rawInput", args == null ? J.createObjectNode() : args);

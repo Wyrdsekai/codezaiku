@@ -60,13 +60,18 @@ fi
 
 INSTALLED_KB=$(du -sk "$DEB_ROOT/opt" | cut -f1)
 
+# Java 21 or newer, and nothing less. `default-jre-headless` used to be the first alternative: on Debian 12 that is
+# Java 17, so the package installed cleanly and then died with UnsupportedClassVersionError (found 2026-09-17, in a
+# clean bookworm container). Every OpenJDK package provides javaN-runtime-headless for its own version and all lower
+# ones, so java21-runtime-headless is satisfied by 21, 25 and later. Where neither exists apt refuses the install and
+# says why, which is the honest answer; the build with its own Java runtime is the way onto such a system.
 cat > "$DEB_ROOT/DEBIAN/control" << EOF
 Package: codezaiku
 Version: $VERSION
 Section: devel
 Priority: optional
 Architecture: all
-Depends: default-jre-headless | openjdk-21-jre-headless | java21-runtime-headless
+Depends: openjdk-21-jre-headless | java21-runtime-headless
 Recommends: git, docker.io
 Suggests: trivy
 Installed-Size: $INSTALLED_KB

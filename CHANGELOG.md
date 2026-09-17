@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.3.7
+
+This release fixes places where CodeZaiku could hang or act on half an answer, and brings the ACP server up to the current schema.
+
+### Fixed
+
+- The drive client shares one HTTP client instead of building one per instance. Each client owns a thread or two, so long sessions leaked threads.
+- MCP client: a server that logs a lot to stderr no longer blocks. Its stderr was never read, so the pipe filled and the server stopped.
+- MCP client: a server that goes silent now fails the call after 60 seconds. The timeout was only checked when a line arrived, so a silent server hung the chat forever. Progress notifications extend the wait. `CODEZAIKU_MCP_TIMEOUT_SECONDS` changes the limit.
+- MCP client: it reads every page of `tools/list`, answers `ping` and `roots/list` from the server, returns `structuredContent` when a tool sends no text, and leaves out arguments the model set to null. When a server dies at start, the error includes what it wrote to stderr.
+- Streaming: a stream that ends without a finish reason or `[DONE]` is not accepted as a message. A dropped connection used to hand back half a tool call as if it were whole. The turn now falls back to a plain request. A stream that sends nothing for a whole drive timeout is closed.
+- `fix`: the 30-second settle re-check after a failed verify now also runs when rollback is off or the target was not localized. Before, that case recorded `verified=false` for a service that was still coming back up.
+- `run` and ACP file lists: a file that was already modified and is edited again by the run is now reported. So is a file the run edited and then committed.
+- Harness git calls: the 20-second timeout now works. Output was read before the timeout started, so a hung git never timed out. `GIT_DIR`, `GIT_WORK_TREE` and related variables inherited from the caller are removed, so the file list comes from the workspace and not from the caller's repository. Git is run with `GIT_OPTIONAL_LOCKS=0` and `LC_ALL=C`.
+- The shell tool sets `GIT_EDITOR`, `EDITOR`, `VISUAL`, `GIT_SEQUENCE_EDITOR`, `GIT_ASKPASS` and `SSH_ASKPASS_REQUIRE`, and removes an inherited `GIT_DIR`. A `git commit` without `-m` fails at once instead of waiting for an editor until the timeout.
+- Ops and container commands that take stdin: stdin is written while the output drains and the timeout runs. Before, a child that did not read its stdin blocked the write before the timeout had started. Container file operations now have a timeout of 120 seconds; they had none.
+- `web_fetch`: one deadline covers the whole fetch, including the body. The request timeout stops at the response headers, so a server that trickled the body could hold a turn for as long as it liked.
+- MCP server: a tool call with a missing required argument now comes back as a tool result marked `isError`, with the argument's name, so the calling model can read it and call again. It used to be a JSON-RPC error (-32602), which most hosts treat as a failed request and do not show to the model. An unknown tool is still a JSON-RPC error.
+- The `.deb` now requires Java 21. It used to accept `default-jre-headless`, which is Java 17 on Debian 12, so the package installed there and then failed to start. On a system without Java 21, `apt` now refuses the install. Use the install one-liner there; it takes the build that carries its own Java runtime.
+- The config file holds API keys. It is now kept at mode 600, and `~/.codezaiku` at 700. With a umask of 002 both were group-readable. This is applied on every load and every write, so existing files are tightened the next time you run anything.
+- A drive address ending in `/v1`, `/v1/chat/completions` or `/v1/models` now works. Requests used to go to `/v1/v1/…` and fail with 404.
+
+### Added
+
+- ACP: tool calls and permission requests carry the tool's `name` (optional in schema 1.22.0).
+- ACP: `resource_link` blocks in a prompt are used. An attached file is named in the task, relative to the workspace, so the model can read it. They used to be dropped, so "fix the bug in @Main.java" arrived as "fix the bug in".
+- ACP: a `usage_update` after each model call, with the tokens in context and the size of the window.
+- ACP: the stdio MCP servers a client passes in `session/new` are started, and their tools join the session as `mcp_<server>_<tool>`. Before, `session/new` failed when the list was not empty, although the protocol says every agent must take stdio servers. Each call to a remote tool asks the client for permission. A server that does not start fails `session/new` with what it wrote to stderr. At most 40 remote tools are used (`CODEZAIKU_ACP_MCP_MAX_TOOLS`), and the first prompt says when some were left out. `http` and `sse` servers are still refused.
+- ACP: `session/new` returns a `model` config option with the models the drive lists, and `session/set_config_option` switches the session to one of them. A host can show a model picker. harbor's `--model` flag needs it: without it harbor stopped with "ACP agent did not advertise a model-selection mechanism". Two harbor tasks now pass through `codezaiku acp` with a local 27B, one of them with a stdio MCP server passed by harbor.
+- What a remote MCP tool returns is labelled as another program's output and put between markers, in the chat as well as in ACP. The output cannot close its own markers.
+- `scripts/check-mcp-real-client.sh` connects the official MCP Python SDK client to `codezaiku mcp`. SDK 2.2.0 opens with `server/discover`, gets "method not found", falls back to `initialize`, and works. A test pins the error code that fallback depends on.
+
 ## 0.3.6
 
 Fixed

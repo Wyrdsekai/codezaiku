@@ -241,12 +241,12 @@ public final class McpServer {
             return toolContent("job " + jobId + " submitted (running). Poll it with the job_status tool: "
                     + "{\"jobId\": \"" + jobId + "\"}.", false);
         }
-        JobRegistry.ToolResult r = execTool(name, args);   // RpcError (bad tool/args) propagates to a JSON-RPC error
+        JobRegistry.ToolResult r = execTool(name, args);   // an unknown tool propagates to a JSON-RPC error; bad arguments come back as an isError result
         return toolContent(r.text(), r.isError());
     }
 
-    /** Execute one tool synchronously → (text, isError). Protocol errors (unknown tool / missing required arg)
-     *  throw RpcError; execution failures become an isError result. Shared by the sync and async paths. */
+    /** Execute one tool synchronously → (text, isError). An unknown tool throws RpcError; a missing required
+     *  argument and an execution failure both become an isError result the calling model can read. Shared by the sync and async paths. */
     private static JobRegistry.ToolResult execTool(String name, JsonNode args) {
         try {
             switch (name) {
@@ -340,12 +340,15 @@ public final class McpServer {
             }
         } catch (RpcError e) {
             throw e;
+        } catch (ToolInputError e) {
+            return new JobRegistry.ToolResult(e.getMessage() + ". Call " + name + " again with it; tools/list has the tool's arguments.", true);
         } catch (Exception e) {
             return new JobRegistry.ToolResult("tool error: " + e, true);
         }
     }
 
     private static JsonNode jobStatus(JsonNode args) {
+        if (args.path("jobId").asText("").isBlank()) return toolContent("missing required argument: jobId. Call job_status again with the id a job submission returned.", true);
         String jobId = reqStr(args, "jobId");
         JobRegistry.Job j = JobRegistry.get().job(jobId);
         if (j == null) return toolContent("no such job: " + jobId, true);
@@ -408,10 +411,21 @@ public final class McpServer {
         return wrap;
     }
 
+    /**
+     * A tool call whose arguments are wrong. It is answered as a tool RESULT marked isError, not as a JSON-RPC error:
+     * the host shows a tool result to the model that made the call, so the model reads "missing required argument:
+     * project" and calls again with it. A JSON-RPC error goes to the host's error path, where most hosts stop. The MCP
+     * specification asks for this split: a protocol error for an unknown tool or a malformed request, a tool result
+     * for input the tool did not accept.
+     */
+    static final class ToolInputError extends RuntimeException {
+        ToolInputError(String message) { super(message); }
+    }
+
     private static String reqStr(JsonNode args, String key) {
         JsonNode v = args.get(key);
         if (v == null || v.isNull() || v.asText().isBlank())
-            throw new RpcError(-32602, "missing required argument: " + key);
+            throw new ToolInputError("missing required argument: " + key);
         return v.asText();
     }
 

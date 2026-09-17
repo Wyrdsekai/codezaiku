@@ -1,6 +1,6 @@
 {
   "name": "@wyrdsekai/codezaiku-mcp",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Starts CodeZaiku, the coding and development harness for local models and hosted APIs, as an MCP server over stdio: npx @wyrdsekai/codezaiku-mcp",
   "mcpName": "io.github.Wyrdsekai/codezaiku",
   "bin": {

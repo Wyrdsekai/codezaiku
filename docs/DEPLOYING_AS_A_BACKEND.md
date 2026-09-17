@@ -293,11 +293,30 @@ stdio, framed as **newline-delimited JSON** (one object per line, flushed) — n
 headers.
 
 **Implemented:** `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/close`,
-`session/delete`, `authenticate` (a no-op; credentials come from the environment).
+`session/delete`, `session/set_config_option`, `authenticate` (a no-op; credentials come from the environment).
+
+**Model.** `session/new` returns one config option, `model` (category `model`): the models the drive lists, with
+the configured one first and selected. `session/set_config_option` switches the session to another of them. This is
+what a host's model picker reads, and how a harness such as harbor applies its `--model` flag.
 
 **Streaming.** During a prompt we send `session/update` notifications — `tool_call` and
 `tool_call_update` per tool, mapped to the ACP taxonomy (`read` / `edit` / `execute` / `search` /
 `fetch`) with `locations` for file tools, plus an `agent_message_chunk` carrying the final summary.
+Each `tool_call` carries the tool's `name`. After each model call a `usage_update` reports the tokens
+in context (`used`) and the window (`size`).
+
+**Prompts.** Text blocks are the task. A `resource_link` block is named in the task as an attached
+file, relative to the workspace when it is inside it, so the model can read it with its own tools.
+Images and audio are skipped.
+
+**MCP servers.** The stdio servers you pass in `session/new` are started in the workspace with the
+environment you give, and their tools join the session as `mcp_<server>_<tool>`. They stop when the
+session closes or the client disconnects. If a server does not start or does not list its tools,
+`session/new` fails and the error includes what the server wrote to stderr. `http` and `sse` servers
+are refused; the capabilities say we do not offer them. At most 40 remote tools are used, because
+every tool's schema is sent with every model call. When some are left out, the first prompt says how
+many. `CODEZAIKU_ACP_MCP_MAX_TOOLS` changes the limit. What a remote tool returns is given to the
+model as data from another program, between markers.
 
 **Cancellation** is cooperative: `session/cancel` is honoured at the next turn boundary rather than by
 interrupting mid-write, and child processes are killed so a long build actually stops. The pending
@@ -313,8 +332,9 @@ same code that writes the CLI document, so the two cannot drift and you parse on
 **We never call `fs/*` or `terminal/*`.** CodeZaiku has its own confined file tools and shell, so a
 client that declines those capabilities loses nothing.
 
-**`session/request_permission`** is sent before any shell command that writes git state, so your
-client decides whether it runs. See §7 — nothing else is gated, and with no client (the CLI path)
+**`session/request_permission`** is sent before any shell command that writes git state and before
+every call to a remote MCP tool, so your client decides whether it runs. "Allow for this session" on
+a remote tool covers that one tool. See §7 — nothing else is gated, and with no client (the CLI path)
 nothing is gated at all.
 
 ---

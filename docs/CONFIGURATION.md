@@ -63,7 +63,7 @@ Two details that matter if you are wiring this up:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CODEZAIKU_DRIVE` | `http://localhost:8200` | The OpenAI-compatible model server. The only genuinely required setting. |
+| `CODEZAIKU_DRIVE` | `http://localhost:8200` | The OpenAI-compatible model server. The only genuinely required setting. Give the base address; an address pasted with `/v1` on the end is accepted too. |
 | `CODEZAIKU_MODEL` | `local-model` | The `model` field sent with each request. llama.cpp ignores it and serves whatever is loaded, but Ollama, LM Studio, vLLM and hosted APIs use it to **select** a model — set it there or requests fail. |
 | `CODEZAIKU_SHELL` | Git Bash on Windows, `bash` elsewhere | The shell every command is dispatched through. Worth knowing about on Windows, where asking for `bash` does not get you the one on your PATH: `C:\Windows\System32\bash.exe` is the **WSL launcher**, and `CreateProcess` finds `System32` before any PATH entry — so a plain `bash` runs your commands inside the Linux distribution instead. CodeZaiku resolves Git Bash by absolute path to make that a choice rather than an accident. Set this to dispatch elsewhere on purpose. `codezaiku doctor` prints the shell it resolved. |
 | `CODEZAIKU_SHELL_TIMEOUT_SEC` | `300` | Per-command wall-clock cap for the model's shell. Raise it when a task legitimately runs for minutes — a step making hundreds of model calls, a full-dataset pass. A command killed on this cap is told that the cap expired and that it may simply need longer, so it does not respond by wrapping itself in a shorter `timeout`. |
@@ -185,6 +185,8 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 | `CODEZAIKU_RESEARCH_WORKERS` / `_WORKER_TURNS` / `_ROUNDS` | Fan-out research: parallel sub-researchers (4), their turn budget (14), critic rounds (2). |
 | `CODEZAIKU_DELEGATE_DRIVE` / `CODEZAIKU_DELEGATE_MODEL` | Sub-agents from `delegate` run HERE instead of the chat's drive — frontier judgment, local labor. |
 | `CODEZAIKU_MCP_SERVERS` | `name=command;name2=command2` — spawns MCP stdio servers whose tools join chat as `mcp_<server>_<tool>`, consent-gated per call. |
+| `CODEZAIKU_MCP_TIMEOUT_SECONDS` | How long a call to an MCP server waits with no answer and no progress notification. Default 60. |
+| `CODEZAIKU_ACP_MCP_MAX_TOOLS` | How many tools the MCP servers an ACP client passes may add to a session. Default 40. |
 | `CODEZAIKU_V1_PORT` | Port for `codezaiku v1` (default 7071). |
 | `CODEZAIKU_TEMP` | Sampling temperature override; `none` omits the field (some hosted models reject any temperature). |
 | `CODEZAIKU_DRIVE_TIMEOUT` | Per-request HTTP timeout in seconds (default 300). Raise for drives with very long generations. |

@@ -39,6 +39,9 @@ public final class DriveClient {
 
     private final String baseUrl;
     private final String model;
+    /** One HTTP client for every DriveClient: each owns a selector thread and an executor, and a client per instance
+     *  leaked threads until a small macOS runner failed with "pthread_create failed (EAGAIN)" (ResearchZosho, 2026-09-14). */
+    private static final HttpClient SHARED_HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private final HttpClient http;
     private final ObjectMapper json = new ObjectMapper();
     // Tolerant reader for SALVAGED tool calls (text-mode recovery, below): the re-emitted JSON can still
@@ -51,9 +54,9 @@ public final class DriveClient {
             .build();
 
     public DriveClient(String baseUrl, String model) {
-        this.baseUrl = baseUrl.replaceAll("/+$", "");
+        this.baseUrl = org.codezaiku.Config.driveBase(baseUrl);   // a --drive flag gets the same treatment as the setting
         this.model = model;
-        this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+        this.http = SHARED_HTTP;
     }
 
     /**
@@ -114,6 +117,13 @@ public final class DriveClient {
      *  SESSION spent", not "this client object". */
     public static final java.util.concurrent.atomic.AtomicLong SESSION_PROMPT_TOKENS =
             new java.util.concurrent.atomic.AtomicLong();
+    /**
+     * Who wants to know how full the context is after each model call: prompt plus completion tokens of the call
+     * just made. Per thread, because an ACP server runs several sessions at once and each one's loop makes its
+     * calls on its own thread; a static sink would report one session's usage to another.
+     */
+    public static final ThreadLocal<java.util.function.IntConsumer> USAGE_SINK = new ThreadLocal<>();
+
     public static final java.util.concurrent.atomic.AtomicLong SESSION_COMPLETION_TOKENS =
             new java.util.concurrent.atomic.AtomicLong();
 
@@ -444,6 +454,11 @@ public final class DriveClient {
                         u.path("total_tokens").asInt());
                 SESSION_PROMPT_TOKENS.addAndGet(u.path("prompt_tokens").asLong(0));
                 SESSION_COMPLETION_TOKENS.addAndGet(u.path("completion_tokens").asLong(0));
+                var usageSink = USAGE_SINK.get();
+                if (usageSink != null) {
+                    int total = u.path("total_tokens").asInt(u.path("prompt_tokens").asInt(0) + u.path("completion_tokens").asInt(0));
+                    try { usageSink.accept(total); } catch (RuntimeException e) { log.debug("usage sink failed: {}", e.toString()); }
+                }
             }
             return (ObjectNode) msg;
         } catch (RuntimeException e) {
@@ -631,7 +646,10 @@ public final class DriveClient {
      * the final message, exactly as with the non-streamed shape. Prose deltas go to the sink as they
      * arrive; tool-call deltas do not, because half a JSON argument is noise on a screen.
      */
-    private ObjectNode chatStreaming(String payload) {
+    private ObjectNode chatStreaming(String payload) { return chatStreaming(payload, driveTimeout()); }
+
+    /** {@code idle}: how long the stream may send nothing before it is given up. */
+    ObjectNode chatStreaming(String payload, Duration idle) {
         var sink = onDelta;
         if (sink == null) return null;
         try {
@@ -642,8 +660,28 @@ public final class DriveClient {
             HttpResponse<java.io.InputStream> resp =
                     http.send(req, HttpResponse.BodyHandlers.ofInputStream());
             if (resp.statusCode() != 200) return null;
+            // The request timeout ends when the headers arrive; after that a body read waits forever. A stream that
+            // sends nothing for a whole drive timeout is dead: the watchdog closes it, the read throws, and the turn
+            // falls back to the plain request.
+            final java.io.InputStream body = resp.body();
+            final long idleNanos = idle.toNanos();
+            final java.util.concurrent.atomic.AtomicLong lastEvent = new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
+            final java.util.concurrent.atomic.AtomicBoolean over = new java.util.concurrent.atomic.AtomicBoolean(false);
+            Thread watchdog = new Thread(() -> {
+                while (!over.get()) {
+                    try { Thread.sleep(Math.min(1000L, Math.max(50L, idleNanos / 4_000_000L))); } catch (InterruptedException e) { return; }
+                    if (!over.get() && System.nanoTime() - lastEvent.get() > idleNanos) {
+                        log.warn("stream idle for {} ms, closing it", idle.toMillis());
+                        try { body.close(); } catch (java.io.IOException ignored) { }
+                        return;
+                    }
+                }
+            }, "drive-stream-watchdog");
+            watchdog.setDaemon(true);
+            watchdog.start();
+            boolean finished = false;
             try (var reader = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(resp.body(), java.nio.charset.StandardCharsets.UTF_8))) {
+                    new java.io.InputStreamReader(body, java.nio.charset.StandardCharsets.UTF_8))) {
                 var content = new StringBuilder();
                 var toolNames = new java.util.TreeMap<Integer, String>();
                 var toolIds = new java.util.TreeMap<Integer, String>();
@@ -653,8 +691,11 @@ public final class DriveClient {
                 while ((line = reader.readLine()) != null) {
                     if (!line.startsWith("data:")) continue;
                     String data = line.substring(5).strip();
-                    if (data.equals("[DONE]")) break;
-                    JsonNode delta = json.readTree(data).path("choices").path(0).path("delta");
+                    lastEvent.set(System.nanoTime());
+                    if (data.equals("[DONE]")) { finished = true; break; }
+                    JsonNode choice = json.readTree(data).path("choices").path(0);
+                    if (choice.hasNonNull("finish_reason")) finished = true;
+                    JsonNode delta = choice.path("delta");
                     String piece = delta.path("content").asText(null);
                     if (piece != null && !piece.isEmpty()) {
                         content.append(piece);
@@ -694,6 +735,9 @@ public final class DriveClient {
                         }
                     }
                 }
+                // A connection that drops mid-answer ends the read the same way a finished stream does. Without this
+                // check half a tool call came back as a whole message, and its cut-off arguments went to the tool.
+                if (!finished) throw new java.io.IOException("the stream ended with no finish_reason and no [DONE] after " + content.length() + " chars");
                 ObjectNode msg = json.createObjectNode();
                 msg.put("role", "assistant");
                 msg.put("content", content.toString());
@@ -709,6 +753,9 @@ public final class DriveClient {
                     });
                 }
                 return msg;
+            } finally {
+                over.set(true);
+                watchdog.interrupt();
             }
         } catch (Exception e) {
             log.warn("streaming failed ({}), falling back to a plain request", e.toString());

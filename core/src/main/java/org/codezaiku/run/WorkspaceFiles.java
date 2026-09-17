@@ -38,7 +38,8 @@ import java.util.concurrent.TimeUnit;
 public final class WorkspaceFiles {
 
     /** A git status reading, or an explicit "git could not tell us". */
-    public record Snapshot(Map<String, String> statusByPath, boolean available) {
+    public record Snapshot(Map<String, String> statusByPath, boolean available, Map<String, String> fingerprintByPath, String head) {
+        public Snapshot(Map<String, String> statusByPath, boolean available) { this(statusByPath, available, Map.of(), null); }
         static Snapshot unavailable() {
             return new Snapshot(Map.of(), false);
         }
@@ -67,7 +68,27 @@ public final class WorkspaceFiles {
             String rel = rebase(top, workspace, raw);
             if (rel != null) byPath.put(rel, code);
         }
-        return new Snapshot(byPath, true);
+        // A status code alone misses two things. A file that was already modified and is edited again is ` M` on
+        // both sides, so each dirty file's content is fingerprinted. A file edited and then COMMITTED during the run
+        // is clean on both sides, so HEAD is recorded and the commits made in between are read in changedSince.
+        Map<String, String> prints = new LinkedHashMap<>();
+        Path ws = real(workspace);
+        for (String rel : byPath.keySet()) prints.put(rel, fingerprint(ws.resolve(rel)));
+        String head = git(workspace, "rev-parse", "--verify", "-q", "HEAD");
+        return new Snapshot(byPath, true, prints, head == null ? null : head.trim());
+    }
+
+    /** Content hash of a file up to 16 MB, size and mtime beyond that, "-" for a path that is not a readable file. */
+    static String fingerprint(Path file) {
+        try {
+            if (!java.nio.file.Files.isRegularFile(file)) return "-";
+            long size = java.nio.file.Files.size(file);
+            if (size > 16L * 1024 * 1024) return size + "@" + java.nio.file.Files.getLastModifiedTime(file).toMillis();
+            var md = java.security.MessageDigest.getInstance("SHA-1");
+            return java.util.HexFormat.of().formatHex(md.digest(java.nio.file.Files.readAllBytes(file)));
+        } catch (Exception e) {
+            return "-";
+        }
     }
 
     /**
@@ -84,6 +105,22 @@ public final class WorkspaceFiles {
             if (was == null || !was.equals(e.getValue())) {
                 if (installedDependency(e.getKey(), e.getValue())) { excluded++; continue; }
                 changed.add(e.getKey());
+            } else {
+                // same status on both sides: dirty before, dirty now. Its content tells whether the run touched it.
+                String print = before.fingerprintByPath().get(e.getKey());
+                if (print != null && !print.equals(after.fingerprintByPath().get(e.getKey()))) changed.add(e.getKey());
+            }
+        }
+        // Commits made during the run: their files are clean on both sides and only the history shows them.
+        if (before.head() != null && after.head() != null && !before.head().equals(after.head())) {
+            String names = git(workspace, "diff", "--name-only", "--no-renames", before.head(), after.head());
+            Path top = repoTop(workspace);
+            if (names != null && top != null) {
+                for (String raw : names.split("\n")) {
+                    if (raw.isBlank()) continue;
+                    String rel = rebase(top, workspace, unquote(raw.trim()));
+                    if (rel != null) changed.add(rel);
+                }
             }
         }
         // A path that was dirty before and is clean now was also touched (e.g. reverted, or committed).
@@ -185,26 +222,49 @@ public final class WorkspaceFiles {
         return s;
     }
 
-    /** Run git in {@code dir}; null on any failure, so "no git" and "not a repo" collapse to unavailable. */
-    private static String git(Path dir, String... args) {
+    /**
+     * Run git in {@code dir}; null on any failure, so "no git" and "not a repo" collapse to unavailable.
+     *
+     * <p>The output is drained on a side thread and stderr is discarded, so the 20-second limit is a real one: read
+     * up front with {@code readAllBytes}, a git that hung (a credential prompt, a wedged filesystem) never reached
+     * the {@code waitFor}. The environment is pinned: a {@code GIT_DIR} or {@code GIT_WORK_TREE} inherited from
+     * whoever launched us (a git hook, a host's own wrapper) points git at THEIR repository, and the file list would
+     * come from the wrong tree. {@code GIT_OPTIONAL_LOCKS=0} keeps {@code status} from taking the index lock under
+     * a user's own git, {@code LC_ALL=C} keeps the output parseable, and nothing may prompt.
+     */
+    static String git(Path dir, String... args) {
         List<String> cmd = new ArrayList<>(List.of("git"));
         cmd.addAll(List.of(args));
+        Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.directory(dir.toFile());
-            pb.redirectErrorStream(false);
-            Process p = pb.start();
-            String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            p.getErrorStream().readAllBytes();
-            if (!p.waitFor(20, TimeUnit.SECONDS)) {
+            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+            pb.redirectInput(ProcessBuilder.Redirect.from(new java.io.File(System.getProperty("os.name", "").toLowerCase().contains("win") ? "NUL" : "/dev/null")));
+            var env = pb.environment();
+            for (String k : List.of("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX")) env.remove(k);
+            env.put("GIT_OPTIONAL_LOCKS", "0");
+            env.put("GIT_TERMINAL_PROMPT", "0");
+            env.put("LC_ALL", "C");
+            p = pb.start();
+            Process proc = p;
+            var buf = new java.io.ByteArrayOutputStream();
+            Thread drain = new Thread(() -> { try { proc.getInputStream().transferTo(buf); } catch (Exception ignored) { } });
+            drain.setDaemon(true);
+            drain.start();
+            if (!p.waitFor(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 p.destroyForcibly();
                 return null;
             }
-            return p.exitValue() == 0 ? out : null;
+            drain.join(2000);
+            return p.exitValue() == 0 ? buf.toString(StandardCharsets.UTF_8) : null;
         } catch (Exception e) {
+            if (p != null) p.destroyForcibly();
             return null;
         }
     }
+
+    static final int GIT_TIMEOUT_SECONDS = 20;
 
     private WorkspaceFiles() { }
 }

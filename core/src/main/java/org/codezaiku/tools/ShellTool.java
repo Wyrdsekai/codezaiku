@@ -248,12 +248,7 @@ public final class ShellTool implements Tool {
         // for credentials or an editor. In a headless shell those wait forever until our timeout kills them,
         // burning a turn and feeding the repeated-timeout/hang loop. Force every tool non-interactive.
         var env = pb.environment();
-        env.put("CI", "true");
-        env.put("DEBIAN_FRONTEND", "noninteractive");
-        env.put("GIT_TERMINAL_PROMPT", "0");
-        env.put("GIT_PAGER", "cat");
-        env.put("PAGER", "cat");
-        env.put("PIP_NO_INPUT", "1");
+        nonInteractive(env);
         // Self-provisioned mise toolchain ahead of /usr/bin (e.g. gradle 8.14.4, not /usr/bin/gradle 4.4.1).
         // Prepend this FIRST so the JDK21 bin below lands ahead of it — `java`/`javac` → JDK21, while `gradle`
         // (absent from the JDK bin) falls through to the mise shim. `bash -l` re-sources the profile but does
@@ -398,5 +393,36 @@ public final class ShellTool implements Tool {
         int half = CAP / 2;
         return s.substring(0, half) + "\n...[trimmed " + (s.length() - CAP) + " chars]...\n"
                 + s.substring(s.length() - half);
+    }
+
+    /**
+     * The environment of every command the model runs: nothing may wait for a person, and git looks at the workspace.
+     *
+     * <p>An editor is the prompt the first list missed. {@code git commit} with no {@code -m}, {@code git rebase
+     * --continue}, {@code git merge} and {@code crontab -e} open {@code $EDITOR} and wait until the timeout kills them.
+     * With {@code true} as the editor the message is left as it is: a merge or a rebase step goes through with its
+     * default message, and a bare commit fails at once with "empty commit message", which tells the model to pass
+     * {@code -m}. An askpass helper of {@code true} answers a password prompt with nothing, so the command fails
+     * instead of waiting, and ssh is told never to ask.
+     *
+     * <p>{@code GIT_DIR} and its relatives are removed. When CodeZaiku is started from a git hook or a host's wrapper
+     * they are set for THAT repository, and every git command the model ran would have acted on it, not on the
+     * workspace.
+     */
+    static void nonInteractive(java.util.Map<String, String> env) {
+        env.put("CI", "true");
+        env.put("DEBIAN_FRONTEND", "noninteractive");
+        env.put("GIT_TERMINAL_PROMPT", "0");
+        env.put("GIT_PAGER", "cat");
+        env.put("PAGER", "cat");
+        env.put("PIP_NO_INPUT", "1");
+        env.put("GIT_EDITOR", "true");
+        env.put("GIT_SEQUENCE_EDITOR", "true");
+        env.put("EDITOR", "true");
+        env.put("VISUAL", "true");
+        env.put("GIT_ASKPASS", "true");
+        env.put("SSH_ASKPASS", "true");
+        env.put("SSH_ASKPASS_REQUIRE", "never");
+        for (String k : java.util.List.of("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX")) env.remove(k);
     }
 }

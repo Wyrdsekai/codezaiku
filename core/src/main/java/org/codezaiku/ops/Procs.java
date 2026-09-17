@@ -13,13 +13,6 @@ final class Procs {
         Process proc = null;
         try {
             proc = new ProcessBuilder(argv).redirectErrorStream(true).start();
-            if (stdin != null) {
-                try (OutputStream os = proc.getOutputStream()) {
-                    os.write(stdin.getBytes(StandardCharsets.UTF_8));
-                }
-            } else {
-                proc.getOutputStream().close();
-            }
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
             // Drain stdout on a side thread so a chatty command can't deadlock on a full pipe while we wait.
             Process p = proc;
@@ -28,6 +21,16 @@ final class Procs {
             });
             drain.setDaemon(true);
             drain.start();
+            // Stdin goes in on its own thread, AFTER the drain has started and while the timeout below is running. Written
+            // up front, a child that never reads its stdin (or fills its stdout first) blocked this write forever, and
+            // the timeout had not started yet.
+            Thread feed = new Thread(() -> {
+                try (OutputStream os = p.getOutputStream()) {
+                    if (stdin != null) os.write(stdin.getBytes(StandardCharsets.UTF_8));
+                } catch (Exception ignored) { }     // the child closed its stdin or was killed: its exit code tells the story
+            });
+            feed.setDaemon(true);
+            feed.start();
             boolean done = proc.waitFor(Math.max(1, timeoutSec), TimeUnit.SECONDS);
             if (!done) {
                 proc.destroyForcibly();

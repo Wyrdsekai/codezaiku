@@ -137,10 +137,17 @@ jobs:
           # Convention: <artifact>.sigstore.json is the sibling bundle of <artifact>.
           OUT="assets/${{ steps.asset.outputs.file }}.sigstore.json"
           cp "$BUNDLE" "$OUT"
-          gh release upload "${{ steps.tag.outputs.tag }}" "$OUT" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
-          echo "Uploaded $(basename "$OUT")"
+          # GitHub's upload endpoint answers 500 now and then. One failed upload fails this job, and the launcher and
+          # registry jobs that wait on it are then skipped (ResearchZosho 0.4.5 lost all three that way).
+          for i in 1 2 3 4 5; do
+            if gh release upload "${{ steps.tag.outputs.tag }}" "$OUT" --repo "$GITHUB_REPOSITORY" --clobber; then
+              echo "Uploaded $(basename "$OUT")"
+              exit 0
+            fi
+            echo "upload failed (try $i of 5); waiting 20 s" >&2
+            sleep 20
+          done
+          exit 1
 
   # The npm launcher (npm/): the package version is the release's; trusted publishing signs it with this workflow's
   # identity (no token; set up once on npmjs.com for the package, after its first publish by hand — RELEASING.md).
@@ -150,10 +157,10 @@ jobs:
     needs: attest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name || github.ref_name }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -178,7 +185,7 @@ jobs:
     needs: launcher
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name || github.ref_name }}
       - name: mcp-publisher
@@ -193,7 +200,8 @@ jobs:
           ./mcp-publisher validate
       - name: Publish
         run: |
-          ./mcp-publisher login github-oidc
-          for i in 1 2 3 4 5 6; do ./mcp-publisher publish && exit 0; echo "retry $i: npm may still be propagating"; sleep 30; done
+          # npm can take minutes to show a new version to the registry, so publishing is retried for up to fifteen.
+          # The registry login lasts only a few minutes: log in again before every attempt, or the later ones are refused.
+          for i in $(seq 1 30); do ./mcp-publisher login github-oidc && ./mcp-publisher publish && exit 0; echo "retry $i: npm may still be propagating"; sleep 30; done
           exit 1
 
