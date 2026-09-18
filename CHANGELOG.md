@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.10
+
+This release is about `codezaiku chat`. It shows you a plan before it builds, lets you steer a running turn, and no longer loses your answer or stops on a full context window.
+
+### Added
+
+- `chat`: a plan you approve before a build starts. When your message asks for something to be built or changed, the model first writes a short plan: the files, the approach, what it would install, what it will leave out. You say `go`, type a change, or `skip`. `/plan auto|on|off` controls it; `auto` is the default and applies to build-sized asks only. A question or a small edit gets no plan step.
+- `chat`: yolo still asks before installing a package, starting a server or downloading from the network when the approved plan did not mention it. One "always" covers that kind for the session.
+- `chat`: ctrl-C now pauses rather than only stopping. After the stop, the chat asks what should change. Type it and the work continues with that change; press Enter to leave it stopped.
+- `chat`: a progress line every ten steps on a long turn: steps so far, time, and the files changed.
+
+### Fixed
+
+- `chat`: when a reply is cut off at the output limit in the middle of a tool call, usually a whole file in one `write_file`, the model is told what happened and to write the file in pieces. It used to be told only "you must act by calling a tool", which invited the same oversized write again. One such call cost 3.5 minutes for nothing.
+- `chat`: a reply that was cut off at the output limit is never acted on. Its tool call has truncated arguments. A cut-off `task_done` used to end the turn with "(done)" and the answer was lost.
+- `chat`: the project description in the prompt takes a tenth of the context window, measured in the model's own tokens, instead of a fifth at a guessed rate. On a 32k window it took 10,000 tokens and the fixed part of every request was 71%. The previous reply carried into the next turn is sized from the window too.
+- `chat`: the task message is never trimmed to make a request fit. It was treated as an old observation, and after one such trim the model no longer knew what it was building.
+- `chat`: the eighth-of-the-window limit on tool output is per step. Parallel calls in one step share it.
+- `chat`: no single tool result may take more than an eighth of the model's context window. The tools capped their output at sizes meant for a 64k window; on a 32k window three parallel shell results filled 60% of it in one step and the request could not be sent. When a request still does not fit, the newest tool results are now trimmed too, not only the older ones.
+- `chat`: a long turn could stop with "context overflow". The loop counted tokens by dividing characters by 3, which undercounts code and shell output, and it did not count the tool descriptions at all. It now uses the token count the server reports after each reply. If the server still rejects a request as too big, the loop trims old tool output and retries once.
+- `chat`: the next turn now sees the previous question and reply. Before, each turn started with only a short restatement (topic, decisions, files seen), so a follow-up like "do everything but 7" referred to a list the model had never seen, and it started over instead of building.
+- `chat`: the reply you see is now the model's own answer. It used to show the short `task_done` note instead ("delivered the analysis in my reply"), and the real answer was lost.
+- `chat`: every turn started with an extra model call that planned the work and was then thrown away, because the context the chat adds in front of your words made the request look like a large task. On a 27B that was 30 to 60 seconds of nothing before the first step. The planning call is now skipped in chat.
+- `chat`: the status line is never written while the chat waits for your answer to an approval question. In the first test build it overwrote the question, so the screen showed "… thinking" while the chat was in fact waiting for you.
+- `chat`: while a turn runs you now see a status line: "… thinking · 23 s" between steps, "… running shell · 8 s" during a step. Each step ends with a short result line like "→ 84 lines". The turn ends with "done · 6 steps · 3 min 40 s". Before, the screen showed nothing between steps.
+- `chat`: a research run the library refused at intake was announced at every start until you ran `/research read` on it, although there was nothing to read. It is now announced once. `/research read all` marks every finished run read, to clear a backlog of notices.
+- `chat` started in a home directory could take minutes to show its prompt. At startup it walked the whole tree under the current directory to guess the project language, including hidden folders such as a 210 GB `.cache`. Every project walk now skips hidden folders and `snap`, stops after 50,000 entries, and the language guess stops after 5,000 files. The chat now starts in under a second there.
+
 ## 0.3.9
 
 This release is about `codezaiku doctor`. Its advice is now easier to follow, and it no longer reports the wrong context window size when the model runs behind llama-swap.

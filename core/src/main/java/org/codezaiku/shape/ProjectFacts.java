@@ -260,7 +260,8 @@ public final class ProjectFacts {
     private static String detectLanguage(Path base, String build) {
         // dominant source extension, with build as a tiebreaker
         int java = 0, py = 0, js = 0, rs = 0, gd = 0;
-        for (Path p : TreeWalk.files(base, IGNORE)) {
+        // a vote over the first few thousand files is as good as one over all of them, and a home directory has millions
+        for (Path p : TreeWalk.files(base, IGNORE, 5_000)) {
             String n = p.getFileName().toString();
             if (n.endsWith(".java")) java++;
             else if (n.endsWith(".py")) py++;

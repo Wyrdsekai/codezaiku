@@ -1,11 +1,8 @@
 package org.codezaiku.shape;
 
 import java.io.IOException;
-import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.SimpleFileVisitor;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -107,39 +104,9 @@ public final class ProjectShape {
         return sb.toString();
     }
 
-    /**
-     * Walk the tree but PRUNE ignored dirs (target/.git/node_modules/…) so we never descend into them,
-     * and TOLERATE files vanishing mid-walk — rust-analyzer's background cargo-check constantly creates
-     * and deletes temp files under target/, which crashed a naive Files.walk with NoSuchFileException.
-     */
+    /** The one bounded, pruned, churn-tolerant walk every shape reader uses (see {@link TreeWalk}). */
     private static List<Path> walkPruned(Path base) {
-        List<Path> out = new ArrayList<>();
-        try {
-            Files.walkFileTree(base, new SimpleFileVisitor<>() {
-                @Override
-                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes a) {
-                    if (!dir.equals(base) && IGNORE_DIRS.contains(dir.getFileName().toString())) {
-                        return FileVisitResult.SKIP_SUBTREE;
-                    }
-                    if (!dir.equals(base)) out.add(dir);
-                    return FileVisitResult.CONTINUE;
-                }
-
-                @Override
-                public FileVisitResult visitFile(Path f, BasicFileAttributes a) {
-                    out.add(f);
-                    return FileVisitResult.CONTINUE;
-                }
-
-                @Override
-                public FileVisitResult visitFileFailed(Path f, IOException e) {
-                    return FileVisitResult.CONTINUE; // a file vanished mid-walk (target/ churn) — ignore
-                }
-            });
-        } catch (IOException ignored) {
-            // whole-walk failure → return whatever we collected
-        }
-        return out;
+        return TreeWalk.entries(base, IGNORE_DIRS);
     }
 
     private static String conflictsBlock(Path base) {

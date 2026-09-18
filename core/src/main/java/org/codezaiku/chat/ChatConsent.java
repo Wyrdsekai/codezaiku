@@ -195,10 +195,62 @@ public final class ChatConsent implements ToolRegistry.Listener {
         return "run_background".equals(tool) ? "shell" : tool;
     }
 
+    /** The plan the person approved for the current turn, lowercased; "" when there is none. */
+    private volatile String approvedPlan = "";
+    public void plan(String plan) { approvedPlan = plan == null ? "" : plan.toLowerCase(java.util.Locale.ROOT); }
+
+    /**
+     * Yolo means "stop asking about edits and ordinary commands", not "do anything". Three kinds of command reach
+     * outside the project — installing packages, starting a server, fetching from the network — and in yolo they
+     * still ask when the approved plan did not name them. One "always" covers that kind for the session. Decided
+     * with the person on 2026-09-18 after a build ask quietly installed FastAPI and set out to write a server.
+     */
+    static final java.util.regex.Pattern INSTALL = java.util.regex.Pattern.compile(
+            "\\b(pip3?|pipx|npm|pnpm|yarn|apt(-get)?|dnf|yum|brew|cargo|gem|conda|poetry|uv)\\s+(install|add|get|-S)\\b|\\bgo\\s+(install|get)\\b");
+    static final java.util.regex.Pattern SERVER = java.util.regex.Pattern.compile(
+            "\\b(uvicorn|gunicorn|flask\\s+run|python3?\\s+-m\\s+http\\.server|npm\\s+(start|run\\s+dev)|docker\\s+(run|compose\\s+up)|docker-compose\\s+up|serve\\b|nohup\\b|systemctl\\s+start)");
+    static final java.util.regex.Pattern DOWNLOAD = java.util.regex.Pattern.compile("\\b(curl|wget)\\b");
+
+    /** "install", "server", "download", or null for a command the plan need not cover. */
+    static String riskyKind(String cmd) {
+        if (cmd == null) return null;
+        String c = cmd.toLowerCase(java.util.Locale.ROOT);
+        if (INSTALL.matcher(c).find()) return "install";
+        if (SERVER.matcher(c).find()) return "server";
+        if (DOWNLOAD.matcher(c).find()) return "download";
+        return null;
+    }
+
+    /** Whether the approved plan names what the command does: any word of the command (3+ letters, not a flag) that the plan mentions. */
+    static boolean inPlan(String plan, String cmd) {
+        if (plan == null || plan.isBlank() || cmd == null) return false;
+        for (String w : cmd.toLowerCase(java.util.Locale.ROOT).split("[^a-z0-9._-]+")) {
+            if (w.length() < 2 || w.startsWith("-")) continue;      // 2, not 3: "d3" and "uv" are package names
+            if (java.util.Set.of("pip", "pip3", "npm", "apt", "apt-get", "brew", "install", "run", "python3", "python", "sudo", "curl", "wget", "http", "https",
+                    "the", "and", "for", "cd", "ls", "sh", "rm", "mv", "cp", "in", "to", "of", "on", "up", "it", "is", "as", "at", "an", "or", "if").contains(w)) continue;
+            if (plan.contains(w)) return true;
+        }
+        return false;
+    }
+
     @Override
     public String permit(String tool, JsonNode args) {
         tool = canonical(tool);
-        if (mode == Mode.YOLO) return null;
+        if (mode == Mode.YOLO) {
+            String cmd = "shell".equals(tool) && args != null ? args.path("command").asText("") : null;
+            String kind = riskyKind(cmd);
+            if (kind == null || inPlan(approvedPlan, cmd)) return null;
+            String key = "yolo:" + kind;
+            Boolean remembered = standing.get(key);
+            if (remembered != null) return remembered ? null : denial(describe(tool, args));
+            String what = describe(tool, args) + "   (a " + kind + (approvedPlan.isEmpty() ? "; yolo still asks about these" : " that the plan did not mention") + ")";
+            return switch (prompter.ask(what, ChatPreview.of(tool, args))) {
+                case YES -> null;
+                case YES_ALWAYS, YES_ALL -> { standing.put(key, true); yield null; }
+                case NO -> denial(describe(tool, args));
+                case NO_ALWAYS -> { standing.put(key, false); yield denial(describe(tool, args)); }
+            };
+        }
 
         boolean isShell = "shell".equals(tool);
         boolean isWrite = "write_file".equals(tool) || "edit_file".equals(tool);

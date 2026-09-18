@@ -72,6 +72,11 @@ public final class ChatRepl {
     private volatile boolean showThinking =
             java.util.List.of("all", "think", "thinking")
                     .contains(org.codezaiku.Config.get("CODEZAIKU_STREAM", "").toLowerCase(java.util.Locale.ROOT));
+    /** The plan step: auto = for build-sized asks (the default), on = every turn, off = never. */
+    enum PlanMode { auto, on, off }
+    private volatile PlanMode planMode = PlanMode.auto;
+    /** A line typed at the stop question that was a command; the main loop takes it before reading the keyboard again. */
+    private String queuedLine = null;
     private ChatSession session;
     // /research mode: the REFINE conversation that produces a Research Requirements Document.
     // Non-null = active. `/research go` hands the brief to the daemon; the deep run happens there.
@@ -198,7 +203,9 @@ public final class ChatRepl {
             lspRef = lsp; libraryRef = library; indexRef = index; ioRef = io;
             while (true) {
                 reportLanded(io);
-                String line = io.readLine(consent.mode() + " > ");
+                String line;
+                if (queuedLine != null) { line = queuedLine; queuedLine = null; io.println(consent.mode() + " > " + line); }
+                else line = io.readLine(consent.mode() + " > ");
                 if (line == null) break;                 // ctrl-D
                 line = line.strip();
                 if (line.isEmpty()) continue;
@@ -344,6 +351,62 @@ public final class ChatRepl {
      * FAMILIAR.md, CLAUDE.md, AGENTS.md, capped — working agreements ride every turn without the
      * person restating them. A colleague knows the house rules.
      */
+    /** A message that will create or change things, as opposed to a question or a small edit. Cheap, and the plan call can still say NO PLAN. */
+    static boolean looksLikeBuild(String text) {
+        if (text == null) return false;
+        String t = text.toLowerCase(java.util.Locale.ROOT);
+        if (t.length() < 12) return false;
+        boolean verb = java.util.regex.Pattern.compile("\\b(build|create|make|write|implement|add|refactor|set ?up|generate|convert|migrate|scaffold|design|develop|port|rewrite|do (it|that|all|everything|the rest|[0-9])|let'?s do|can (u|you) do)\\b").matcher(t).find();
+        boolean small = java.util.regex.Pattern.compile("\\b(one[- ]liner|typo|rename|comment|just (tell|explain|show|answer|say))\\b").matcher(t).find();
+        return verb && !small;
+    }
+
+    /**
+     * Ask the model for a short plan, show it, and let the person say go, change it, or skip. Returns the approved
+     * plan, "" for no plan, or null when the person cancelled the turn. The model may answer NO PLAN for an ask that
+     * turns out to be a question or a one-line edit.
+     */
+    private String planStep(ChatIo io, DriveClient drive, String context, String ask, boolean mayDecline) {
+        String changes = "";
+        for (int round = 1; round <= 3; round++) {
+            io.print("  planning… "); 
+            String plan;
+            try {
+                var json = new com.fasterxml.jackson.databind.ObjectMapper();
+                var msgs = json.createArrayNode();
+                msgs.addObject().put("role", "system").put("content",
+                        "You plan work for a coding assistant that runs in the project directory named below. Write a SHORT plan the person can approve: "
+                        + "under 14 lines. Sections, each one line or a few bullets: FILES (each file you will create or change, with its path); "
+                        + "APPROACH (how, in plain words); INSTALLS (packages or tools you would install, or 'none'); NOT DOING (what you will leave out). "
+                        + "Prefer the simplest thing that meets the ask: no server, framework or extra tool unless the ask needs one. "
+                        // With /plan on the step runs for every message, so the model may wave a question through. For a message
+                        // that already looks like a build there is no such door: the model declined a plain "do all 6" once.
+                        + (mayDecline ? "If the message is a question, an opinion, or a change small enough to just do, reply with exactly: NO PLAN" : "Always write the plan."));
+                msgs.addObject().put("role", "user").put("content", context + "\n\nTHE MESSAGE TO PLAN FOR:\n" + ask
+                        + (changes.isEmpty() ? "" : "\n\nTHE PERSON'S CHANGES TO YOUR LAST PLAN (apply them):\n" + changes));
+                plan = drive.classify(msgs, 700).strip();
+            } catch (RuntimeException e) {
+                io.println("no plan (" + firstLine(String.valueOf(e.getMessage())) + ") — going ahead");
+                return "";
+            }
+            org.slf4j.LoggerFactory.getLogger(ChatRepl.class).info("plan step (round {}): {}", round, plan.replace("\n", " / "));
+            if (plan.isEmpty() || (mayDecline && plan.toUpperCase(java.util.Locale.ROOT).startsWith("NO PLAN"))) { io.println("no plan needed"); return ""; }
+            io.println("");
+            io.println("");
+            io.println("  " + plan.replace("\n", "\n  "));
+            io.println("");
+            String a = io.readLine("  go / type what to change / skip (no plan) / stop > ");
+            org.slf4j.LoggerFactory.getLogger(ChatRepl.class).info("plan step: the person answered [{}]", a);
+            if (session != null) session.log("plan", plan + "\n-- answer: " + a);
+            if (a == null || a.strip().equalsIgnoreCase("stop") || a.strip().equalsIgnoreCase("/quit")) return null;
+            String ans = a.strip();
+            if (ans.isEmpty() || ans.equalsIgnoreCase("go") || ans.equalsIgnoreCase("y") || ans.equalsIgnoreCase("yes") || ans.equalsIgnoreCase("ok")) return plan;
+            if (ans.equalsIgnoreCase("skip")) return "";
+            changes = changes.isEmpty() ? ans : changes + "\n" + ans;
+        }
+        return "";
+    }
+
     private String workingAgreements() {
         for (String name : new String[]{"FAMILIAR.md", "CLAUDE.md", "AGENTS.md"}) {
             java.nio.file.Path f = root.resolve(name);
@@ -375,6 +438,7 @@ public final class ChatRepl {
                 io.println("    ctrl-C stops a running turn (twice quits) · ctrl-D leaves");
                 io.println("  PERMISSIONS");
                 io.println("    /mode [plan|ask|auto-edit|yolo]  how often it asks; bare shows it");
+                io.println("    /plan [auto|on|off]              a plan you approve before a build starts (auto: for build asks)");
                 io.println("    /trust project|global            keep this session's answers beyond it");
                 io.println("    /trusted                         every standing answer and where it lives");
                 io.println("    /forget                          clear this session's standing answers");
@@ -388,7 +452,7 @@ public final class ChatRepl {
                 io.println("    /librarian <question>            what the shelves hold — no model, instant");
                 io.println("    /research <topic>                refine a research brief in conversation; then /research go");
                 io.println("    /research · go · status · off    the brief · file the deep run with the daemon · jobs · discard");
-                io.println("    /research read <J-id|I-id>       print a finished research result here");
+                io.println("    /research read <J-id|I-id|all>   print a finished research result here; all marks every finished run read");
                 io.println("    /commit [msg]                    stage and commit, after showing the command");
                 io.println("    /model [url|name] [id]           show or switch the drive (probes first)");
                 io.println("  SESSIONS");
@@ -404,7 +468,7 @@ public final class ChatRepl {
                 io.println("  WATCHING");
                 io.println("    /thinking on|off                 show the model's reasoning as it streams");
                 io.println("    /logging [level]                 what reaches the screen; the file gets all");
-                io.println("    (CODEZAIKU_STREAM: on=reply as it streams · all=+thinking · unset=quiet)");
+                io.println("    (CODEZAIKU_STREAM: on=the reply as it streams · all=also the thinking · unset=the reply whole, the default)");
                 io.println("  /quit leaves; everything is saved");
             }
             case "/remember" -> {
@@ -626,6 +690,17 @@ public final class ChatRepl {
                     }, () -> io.println("  could not read " + matches.get(0)[0]));
                 }
             }
+            case "/plan" -> {
+                if (arg.equalsIgnoreCase("on")) planMode = PlanMode.on;
+                else if (arg.equalsIgnoreCase("off")) planMode = PlanMode.off;
+                else if (arg.equalsIgnoreCase("auto")) planMode = PlanMode.auto;
+                else if (!arg.isEmpty()) { io.println("  /plan auto|on|off"); break; }
+                io.println("  plan: " + switch (planMode) {
+                    case auto -> "auto — before an ask that builds or changes things, you see the plan and say go";
+                    case on -> "on — every turn starts with a plan you approve";
+                    case off -> "off — no plan step";
+                });
+            }
             case "/thinking" -> {
                 if (arg.equalsIgnoreCase("on")) showThinking = true;
                 else if (arg.equalsIgnoreCase("off")) showThinking = false;
@@ -814,7 +889,9 @@ public final class ChatRepl {
                 io.println("  ! mcp: " + mc.serverName() + " tools/list failed: " + e.getMessage());
             }
         }
-        tools.listener(new Narrator(io, seen, consent, journal));
+        Narrator narrator = new Narrator(io, seen, consent, journal);
+        tools.listener(narrator);
+        Ticker ticker = new Ticker(io, narrator);
 
         String digest = tasks == null ? "" : tasks.digestInto();
         // The library's push: relevant holdings ride into the turn's context (push before pull —
@@ -831,9 +908,22 @@ public final class ChatRepl {
                   + "briefly and ask ONE clarifying question that sharpens the brief — scope, sub-questions, sources, exclusions, "
                   + "what a good result would contain. Reflect back what you now understand the ask to be. The deep research "
                   + "runs later, from the finished brief.\n";
-        String goal = session.restate() + memory.recall() + workingAgreements()
+        // the previous reply gets a sixteenth of the window, in characters: 6,000 was right for a 64k window and a
+        // fifth of the fixed cost on a 32k one
+        int window = drive.contextWindow();
+        int exchangeChars = Math.max(2_000, (int) (window / 16 * 2.5));
+        String goal = session.restate() + session.lastExchange(exchangeChars) + memory.recall() + workingAgreements()
                 + stacks + mapBlock + digest + attachments + text;
         abandoned.set(false);
+        // THE PLAN STEP. Before a build starts, the model says what it will do and the person says go or changes
+        // it. Decided 2026-09-18 after a build ask installed FastAPI and set out to write a server nobody wanted.
+        String approvedPlan = "";
+        if (planMode == PlanMode.on || (planMode == PlanMode.auto && looksLikeBuild(text))) {
+            approvedPlan = planStep(io, drive, goal, text, planMode == PlanMode.on);
+            if (approvedPlan == null) return;           // the person cancelled the turn at the plan
+            if (!approvedPlan.isEmpty()) goal = goal + "\n\n[THE PLAN THE PERSON APPROVED — do exactly this; anything not in it, such as installing a package or starting a server, asks first]\n" + approvedPlan + "\n";
+        }
+        consent.plan(approvedPlan);
         // Streamed prose appears as it is generated, when CODEZAIKU_STREAM is on. What streams is
         // the finishing tool's summary, decoded out of the argument fragments — the loop runs
         // tool_choice=required, so plain content never exists (measured: the first live streaming
@@ -847,9 +937,11 @@ public final class ChatRepl {
                     // otherwise, and the seam between them is exactly what a reader needs to see.
                     if (thinking.getAndSet(false)) io.print("\n\n");
                     synchronized (streamed) { streamed.append(piece); }
+                    ticker.quiet();               // the answer is arriving; no status line under it
                     io.print(piece);
                 },
                 piece -> {
+                    ticker.quiet();
                     if (!showThinking) return;
                     if (!thinking.getAndSet(true)) io.printThinkingStart();
                     io.printThinking(piece);
@@ -873,11 +965,16 @@ public final class ChatRepl {
         })) {
             // research mode: a bounded turn (a few searches, then answer); otherwise the person is the cap
             int turnBudget = brief != null ? Math.min(maxTurns, RESEARCH_TURN_STEPS) : maxTurns;
-            result = new FamiliarLoop(drive, tools, root, goal, turnBudget, library, index)
-                    .chat()          // one task_done ends the turn — the person is the verifier
-                    .lsp(lsp)
-                    .cancelIf(abandoned::get)
-                    .run();
+            ticker.start();
+            try {
+                result = new FamiliarLoop(drive, tools, root, goal, turnBudget, library, index)
+                        .chat()          // one task_done ends the turn — the person is the verifier
+                        .lsp(lsp)
+                        .cancelIf(abandoned::get)
+                        .run();
+            } finally {
+                ticker.stop();
+            }
         } catch (RuntimeException e) {
             // A drive that is down, or a request that will not fit, must not end the conversation —
             // the person can change the rung, or start the server, and carry on.
@@ -892,10 +989,16 @@ public final class ChatRepl {
 
         org.codezaiku.drive.DriveClient.streamTo(null);
         io.println("");
+        String continueWith = null;
         if (abandoned.get()) {
             // Say the turn was cut short. A partial result presented as a finished one is how
             // someone ends up believing work happened that did not.
             io.println("(stopped — whatever had already been applied is still applied)");
+            // ctrl-C is the pause. What the person types here goes straight into a continuation turn, so a run
+            // that is drifting can be steered without starting over ("no server — plain HTML and JS").
+            String note = io.readLine("  What should change? (Enter to leave it stopped) > ");
+            if (note != null && note.strip().startsWith("/")) queuedLine = note.strip();     // a command, not a note: the main loop runs it
+            else if (note != null && !note.isBlank()) continueWith = note.strip();
         }
         // Print the summary UNLESS the stream already showed it — compared by content, not by
         // count. "Anything streamed" was the first rule, and it ate a real answer: a turn that hit
@@ -924,10 +1027,19 @@ public final class ChatRepl {
                 && (shown.endsWith(sum) || sum.endsWith(shown) || sum.contains(shown));
         if (!alreadyShown) io.println(summary);
         io.println("");
+        io.println("\u001b[2m  " + (abandoned.get() ? "stopped" : "done") + " · " + narrator.steps() + " step(s) · " + Ticker.elapsed(ticker.startedAt()) + "\u001b[0m");
+        io.println("");
 
         seen.forEach(session::sawFile);
         session.turnDone();
         session.log("agent", result.summary());
+        if (continueWith != null) {
+            session.turnDone();
+            session.save();
+            turn(io, drive, lsp, library, index, "Continue the work you were doing, with this change: " + continueWith
+                    + "\nKeep what is already done and fits; redo only what the change touches.");
+            return;
+        }
         if (result.done() && result.summary() != null) session.decided(firstLine(result.summary()));
         session.save();
 
@@ -1012,9 +1124,13 @@ public final class ChatRepl {
                 int cut = q.indexOf('\n');
                 io.println("  ◆ research " + id + ("done".equals(st) ? " landed" : " FAILED") + " — "
                         + org.codezaiku.research.LibraryBridge.compress(cut > 0 ? q.substring(0, cut) : q, 100));
-                if ("done".equals(st)) {
-                    io.println("    " + (j.hasNonNull("investigation") ? j.get("investigation").asText() + " is in the library.  /research read " + id + " prints it (and marks it read)"
-                            : "refused at intake (see the library's open questions);") + " the library's housekeeping extracts its findings");
+                if ("done".equals(st) && !j.hasNonNull("investigation")) {
+                    // nothing came of it and there is nothing to read, so this is said once; before, it was said at
+                    // every start until the person ran /research read on each one (eight of them, 2026-09-18)
+                    io.println("    the library refused it at intake, so there is no report to read. Its question is on the library's open questions page.");
+                    markRead(id);
+                } else if ("done".equals(st)) {
+                    io.println("    " + j.get("investigation").asText() + " is in the library.  /research read " + id + " prints it (and marks it read); the library's housekeeping extracts its findings");
                 } else {
                     io.println("    " + firstLine(j.path("result").asText("")) + "   (/research read " + id + " marks it read)");
                 }
@@ -1029,6 +1145,13 @@ public final class ChatRepl {
         if (!org.codezaiku.research.LibraryBridge.answers()) { io.println("    no library answers on " + org.codezaiku.research.LibraryBridge.url()); return; }
         try {
             var client = org.codezaiku.research.LibraryBridge.client();
+            if (ref.equals("all")) {
+                // clear the backlog of notices without printing eight reports
+                int n = 0;
+                for (var j : client.jobs(50, null).path("finished")) { String id = j.path("job_id").asText(""); if (!id.isEmpty() && !readJobs().contains(id)) { markRead(id); n++; } }
+                io.println("    " + n + " finished run(s) marked read; their notices will not show again. /research read <J-id> still prints any of them.");
+                return;
+            }
             String invId = ref;
             if (ref.startsWith("J-")) {
                 JsonNode j = client.job(ref);
@@ -1074,11 +1197,65 @@ public final class ChatRepl {
      * Live tool narration. This is the seam ACP already drives, reused rather than reinvented — and
      * it is what makes a 30-second turn watchable without token streaming.
      */
+    /**
+     * The status line under a working turn: "… thinking · 23 s" between tool calls, "… running shell · 8 s" during
+     * one. A daemon thread rewrites it once a second and the terminal clears it before any real output. Off while
+     * the answer streams, and gone when the turn ends.
+     */
+    static final class Ticker {
+        private final ChatIo io;
+        private final Narrator narrator;
+        private volatile boolean on = false, quiet = false;
+        private volatile long startedAt = System.nanoTime();
+        private Thread thread;
+
+        Ticker(ChatIo io, Narrator narrator) { this.io = io; this.narrator = narrator; }
+        long startedAt() { return startedAt; }
+        void quiet() { quiet = true; }
+
+        void start() {
+            startedAt = System.nanoTime();
+            on = true; quiet = false;
+            thread = new Thread(() -> {
+                while (on) {
+                    try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
+                    if (!on || quiet) continue;
+                    String tool = narrator.running();
+                    long since = tool == null ? startedAt : narrator.runningSince();
+                    io.status("  … " + (tool == null ? "thinking" : "running " + tool) + " · " + elapsed(since));
+                }
+            }, "chat-status");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        void stop() {
+            on = false;
+            if (thread != null) thread.interrupt();
+            io.clearStatus();
+        }
+
+        static String elapsed(long sinceNanos) {
+            long s = (System.nanoTime() - sinceNanos) / 1_000_000_000L;
+            return s < 60 ? s + " s" : s < 3600 ? (s / 60) + " min " + (s % 60) + " s" : (s / 3600) + " h " + ((s % 3600) / 60) + " min";
+        }
+    }
+
     static final class Narrator implements ToolRegistry.Listener {
         private final ChatIo io;
         private final java.util.Set<String> files;
         private final ChatConsent consent;
         private final ChatJournal journal;
+
+        /** What is running now, for the status line: null between tool calls (the model is thinking). */
+        private volatile String running = null;
+        private volatile long runningSince = 0;
+        private final java.util.concurrent.atomic.AtomicInteger steps = new java.util.concurrent.atomic.AtomicInteger();
+        private final java.util.Set<String> changed = new java.util.LinkedHashSet<>();
+        private final long turnStart = System.nanoTime();
+        String running() { return running; }
+        long runningSince() { return runningSince; }
+        int steps() { return steps.get(); }
 
         Narrator(ChatIo io, java.util.Set<String> files, ChatConsent consent, ChatJournal journal) {
             this.io = io;
@@ -1129,10 +1306,29 @@ public final class ChatRepl {
             // The leading newline is for streaming: reasoning arrives without a trailing break, and
             // without this the tool line glues onto the middle of a streamed sentence.
             io.println("\n  · " + tool + (detail.isEmpty() ? "" : "  " + detail));
+            int n = steps.incrementAndGet();
+            runningSince = System.nanoTime();
+            running = tool;
+            if (n % 10 == 0) {
+                // a line to steer by on a long turn: how far, how long, what has changed on disk
+                io.println("\u001b[2m    progress · " + n + " steps · " + Ticker.elapsed(turnStart)
+                        + (changed.isEmpty() ? "" : " · changed: " + String.join(", ", changed)) + "\u001b[0m");
+            }
+            if ("write_file".equals(tool) || "edit_file".equals(tool)) { if (path != null) changed.add(path); }
         }
 
         @Override public void finished(String callId, String tool, String result, boolean failed) {
-            if (failed) { io.println("    failed"); return; }
+            running = null;
+            if (failed) { io.println("    failed" + (result == null || result.isBlank() ? "" : ": " + firstLineOf(result))); return; }
+            // one line on what came back, so a step reads as progress rather than a command that vanished
+            if ("shell".equals(tool) || "read_file".equals(tool)) {
+                if (result != null && !result.isBlank()) {
+                    long lines = result.lines().count();
+                    io.println("    → " + (lines == 1 ? firstLineOf(result).length() > 100 ? firstLineOf(result).substring(0, 97) + "..." : firstLineOf(result) : lines + " lines"));
+                }
+                return;
+            }
+            if ("write_file".equals(tool) || "edit_file".equals(tool)) { io.println("    ✓"); return; }
             if ("web_search".equals(tool)) {
                 io.println("    " + searchDigest(result));
             } else if ("web_fetch".equals(tool) && result != null && result.startsWith("source: ")) {

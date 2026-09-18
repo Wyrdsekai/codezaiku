@@ -124,6 +124,15 @@ public final class DriveClient {
      */
     public static final ThreadLocal<java.util.function.IntConsumer> USAGE_SINK = new ThreadLocal<>();
 
+    /** The server's own count of the last request's prompt tokens, 0 until a reply carried one. The loop calibrates its estimate on it. */
+    private volatile int lastPromptTokens = 0;
+    public int lastPromptTokens() { return lastPromptTokens; }
+    /** The last reply's completion tokens and finish reason ("stop", "tool_calls", "length"…): "length" means the reply was cut off at max_tokens. */
+    private volatile int lastCompletionTokens = 0;
+    private volatile String lastFinishReason = "";
+    public int lastCompletionTokens() { return lastCompletionTokens; }
+    public String lastFinishReason() { return lastFinishReason; }
+
     public static final java.util.concurrent.atomic.AtomicLong SESSION_COMPLETION_TOKENS =
             new java.util.concurrent.atomic.AtomicLong();
 
@@ -308,6 +317,8 @@ public final class DriveClient {
     }
 
     private static boolean streamingOn() {
+        // Off unless asked for, as in ResearchZosho (decided 2026-09-18). The status line says what is happening
+        // while the person waits; the answer arrives whole.
         String v = org.codezaiku.Config.get("CODEZAIKU_STREAM", "");
         return onDelta != null && !v.isBlank() && !v.equalsIgnoreCase("off")
                 && !v.equalsIgnoreCase("false") && !v.equals("0");
@@ -442,6 +453,7 @@ public final class DriveClient {
             }
             JsonNode parsed = json.readTree(resp.body());
             JsonNode msg = parsed.path("choices").path(0).path("message");
+            lastFinishReason = parsed.path("choices").path(0).path("finish_reason").asText("");
             if (!msg.isObject()) {
                 throw new IllegalStateException("no choices[0].message in response: " + resp.body());
             }
@@ -453,6 +465,8 @@ public final class DriveClient {
                         u.path("prompt_tokens").asInt(), u.path("completion_tokens").asInt(),
                         u.path("total_tokens").asInt());
                 SESSION_PROMPT_TOKENS.addAndGet(u.path("prompt_tokens").asLong(0));
+                lastPromptTokens = u.path("prompt_tokens").asInt(0);
+                lastCompletionTokens = u.path("completion_tokens").asInt(0);
                 SESSION_COMPLETION_TOKENS.addAndGet(u.path("completion_tokens").asLong(0));
                 var usageSink = USAGE_SINK.get();
                 if (usageSink != null) {

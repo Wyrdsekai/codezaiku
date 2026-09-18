@@ -90,6 +90,23 @@ public final class FamiliarLoop {
      * surface reached the same constant the same way.
      */
     static final int CHARS_PER_TOKEN = 3;
+
+    /**
+     * Characters per token as THIS model tokenizes THIS conversation, learned from the server's own prompt_tokens
+     * after each reply, with a 5% safety margin. The constant above is a guess; Java source and shell output
+     * tokenize denser than prose, and the tool schemas ride along with every request without appearing in the
+     * messages at all. Measured 2026-09-18: a request the estimate put under the window was 34,395 tokens into
+     * 32,768, and the turn died. Clamped to a sane range so one odd reply cannot swing it.
+     */
+    private double charsPerToken = CHARS_PER_TOKEN;
+    /** Tokens the tool schemas add to every request, counted at the start of each turn. */
+    private int schemaTokens = 0;
+
+    private void calibrate(int requestChars, int promptTokens) {
+        if (promptTokens <= 0 || requestChars <= 0) return;
+        double measured = (double) requestChars / promptTokens * 0.95;
+        charsPerToken = Math.max(1.5, Math.min(6.0, measured));
+    }
     private final ObjectMapper j;
     // Per-project working memory: external, harness-owned, tracks persistent build errors so the
     // compiler-suggested fix stays pinned across compaction.
@@ -216,9 +233,20 @@ public final class FamiliarLoop {
         this.bootGate = false;
         this.deadlineTurn = true;
         this.chatMode = true;
+        // No planning turn. isMultiConcern() judges the goal's LENGTH, and a chat goal carries the session
+        // restatement, the library's push and the working agreements in front of the person's words, so it is
+        // always long: every chat turn opened with a model call whose prose plan was parsed as "0 steps" and
+        // thrown away — 30 to 60 seconds of nothing on a 27B before the first real step, and the acceptance
+        // script's first scripted reply eaten (2026-09-18). In a chat the person is the planner.
+        this.multiConcern = false;
         return this;
     }
     private boolean chatMode = false;
+    // In chat the model writes its answer to the person as prose CONTENT, then calls task_done with a short
+    // restatement as the summary. The person's answer is the prose, not the restatement — so the richest prose
+    // content seen this turn is kept, and task_done shows it instead of the thinner summary (2026-09-18: the real
+    // analysis was a full page of content; the summary said only "delivered the analysis in my reply").
+    private String bestChatProse = "";
 
     /**
      * ARTIFACT mode: the deliverable is a single named file, and there is nothing to verify beyond
@@ -1651,12 +1679,10 @@ public final class FamiliarLoop {
      */
     private boolean computePreexistingCodebase() {
         int files = 0; long bytes = 0;
-        try (var w = Files.walk(projectRoot, 12)) {
-            for (Path p : (Iterable<Path>) w.filter(Files::isRegularFile)::iterator) {
+        // Runs in the constructor, so on every chat turn: bounded, and never into hidden directories (see TreeWalk).
+        try {
+            for (Path p : org.codezaiku.shape.TreeWalk.files(projectRoot, java.util.Set.of(".venv", "venv", "node_modules", "target", "build", ".git", "__pycache__", "dist"), 20_000)) {
                 String rel = projectRoot.relativize(p).toString().replace('\\','/');
-                if (rel.contains(".venv/") || rel.contains("node_modules/") || rel.contains("/target/")
-                        || rel.contains("/build/") || rel.contains(".git/") || rel.contains("__pycache__/")
-                        || rel.contains("/dist/")) continue;
                 if (rel.contains("test") || rel.endsWith("__init__.py")) continue;   // exclude tests + trivial pkg markers
                 String name = p.getFileName().toString();
                 int dot = name.lastIndexOf('.'); if (dot < 0) continue;
@@ -1734,6 +1760,15 @@ public final class FamiliarLoop {
                 || m.contains("context length exceeded")
                 || m.contains("maximum context length")
                 || (m.contains("context") && m.contains("token") && m.contains("exceed"));
+    }
+
+    /** How many tokens the server counted in the refused request, or null when it did not say. */
+    static Integer overflowUsed(String message) {
+        if (message == null) return null;
+        var m = java.util.regex.Pattern.compile("(\\d+)\\s*tokens?[^0-9]{0,40}?(\\d+)\\s*tokens?").matcher(message);
+        if (m.find()) { int a = Integer.parseInt(m.group(1)), b = Integer.parseInt(m.group(2)); return Math.max(a, b); }
+        var one = java.util.regex.Pattern.compile("(\\d{3,7})\\s*tokens?").matcher(message);
+        return one.find() ? Integer.parseInt(one.group(1)) : null;
     }
 
     /** The server's own numbers if it gave any — they are more use than anything we could restate. */
@@ -1940,6 +1975,21 @@ public final class FamiliarLoop {
 
             int outBudget = outputBudget(messages);
             log.info("turn {}/{}  (out_budget={})", turn, maxTurns, outBudget);
+            if (turn == 1) {
+                // The fixed part of every request, by piece, so a window that is half full before the first step can be
+                // read from the log instead of guessed at (2026-09-18: 53% fixed on a 32k window, and compaction had
+                // nothing old enough to cut for the whole turn).
+                String sys = systemPrompt();
+                int shapeAt = sys.indexOf("PROJECT SHAPE");
+                String task = history.size() > 0 ? history.get(0).path("content").asText("") : "";
+                log.info("fixed part of the request: system {} tokens (of which project shape {}), task {} tokens, tool schemas {} tokens; window {}",
+                        (int) (sys.length() / charsPerToken), shapeAt < 0 ? 0 : (int) ((sys.length() - shapeAt) / charsPerToken),
+                        (int) (task.length() / charsPerToken), schemaTokens, nctx);
+                for (String part : new String[]{"[session so far", "[the previous turn", "[working agreements", "LIBRARY", "[THE PLAN THE PERSON APPROVED", "TASK:"}) {
+                    int at = task.indexOf(part);
+                    if (at >= 0) log.info("  task part {} starts at {} chars", part.replace("[", "").strip(), at);
+                }
+            }
 
             // TURN-BUDGET AWARENESS (research). Measured on SimpleQA: 21 of 30 baseline runs produced NO
             // answer at all — not because they were starved (out_budget stayed full) but because the model
@@ -1987,6 +2037,7 @@ public final class FamiliarLoop {
             // 16,384-token window. The tell was already in the log: outputBudget() had bottomed out
             // at its 512 floor, which only happens when the input alone has overrun the window, and
             // the request went out anyway.
+            schemaTokens = (int) (turnTools.toString().length() / charsPerToken);
             int trimmed = fitToWindow(messages);
             if (trimmed > 0) {
                 log.info("turn {}: trimmed {} chars of older observations so the request fits {} tokens",
@@ -1994,8 +2045,24 @@ public final class FamiliarLoop {
                 outBudget = outputBudget(messages);
             }
             try {
-                assistant = drive.chat(messages, turnTools, outBudget,
-                        (planTurn || proseAnswerTurn) ? "none" : "required");
+                try {
+                    assistant = drive.chat(messages, turnTools, outBudget,
+                            (planTurn || proseAnswerTurn) ? "none" : "required");
+                } catch (RuntimeException first) {
+                    // The server counted more tokens than we did. It said how many: learn the real ratio from that,
+                    // shrink the older observations to fit, and send once more. Only a second refusal ends the turn.
+                    Integer counted = contextOverflow(first.getMessage()) ? overflowUsed(first.getMessage()) : null;
+                    if (counted == null) throw first;
+                    calibrate(requestChars(messages) + turnTools.toString().length(), counted);
+                    schemaTokens = (int) (turnTools.toString().length() / charsPerToken);
+                    int again = fitToWindow(messages);
+                    log.warn("turn {}: the server counted {} tokens where the estimate said less; ratio now {} chars/token, trimmed {} more chars, sending again",
+                            turn, counted, String.format("%.2f", charsPerToken), again);
+                    outBudget = outputBudget(messages);
+                    assistant = drive.chat(messages, turnTools, outBudget,
+                            (planTurn || proseAnswerTurn) ? "none" : "required");
+                }
+                calibrate(requestChars(messages) + turnTools.toString().length(), drive.lastPromptTokens());
             } catch (RuntimeException e) {
                 // A single bad model response (e.g. malformed tool-call JSON the server rejected) must NOT
                 // abort the run. Nudge and skip the turn; the re-sample next turn almost always succeeds.
@@ -2051,6 +2118,10 @@ public final class FamiliarLoop {
             history.add(assistant);
             consecutiveDriveFailures = 0;
             observePlan(assistant.path("content").asText("")); // parse the plan (orientation only)
+            if (chatMode) {
+                String c = unwrapToolMarkup(assistant.path("content").asText("").strip());
+                if (c.length() > bestChatProse.length()) bestChatProse = c;   // the longest is the real reply, not the "let me look" chatter
+            }
 
             if (proseAnswerTurn) {
                 // The prose written on this turn IS the final answer (see the artifact bounce above).
@@ -2095,12 +2166,36 @@ public final class FamiliarLoop {
             }
 
             var calls = assistant.path("tool_calls");
+            if ("length".equals(drive.lastFinishReason()) && calls.isArray() && !calls.isEmpty()) {
+                // The reply hit max_tokens, so its tool call is cut off: the arguments the server managed to parse are a
+                // truncated JSON. Executed, a task_done whose summary was cut lands as "(done)" and the person's answer
+                // is gone (2026-09-18, out_budget 1,478 at 93% of the window). Nothing from a cut-off reply runs.
+                log.warn("turn {}: the reply was cut off at max_tokens={} in the middle of {} — not executed", turn, outBudget,
+                        calls.get(0).path("function").path("name").asText("a tool call"));
+                history.addObject().put("role", "user").put("content",
+                        "Your last reply was cut off at the output limit of about " + outBudget + " tokens before the tool call was "
+                        + "complete, so nothing ran. Keep each tool call well under that: write a file in pieces (a first write_file, then "
+                        + "edit_file calls that add the rest), and give task_done a summary of a few paragraphs at most — a long "
+                        + "answer goes in a file or in your message text, not in the summary.");
+                continue;
+            }
             if (!calls.isArray() || calls.isEmpty()) {
                 // Under tool_choice=required this is rare; treat as an honest anomaly and re-prompt.
-                log.warn("turn {}: assistant returned no tool_calls — content=[{}]", turn,
-                        assistant.path("content").asText(""));
-                history.addObject().put("role", "user")
-                        .put("content", "You must act by calling a tool.");
+                // A reply that filled the whole output budget and arrived with nothing is a tool call that was CUT
+                // OFF mid-way: the model was writing a whole file in one write_file, the server hit max_tokens and
+                // dropped the half-written call. Measured 2026-09-18: 3.5 minutes and 7,407 tokens for nothing, and
+                // "You must act by calling a tool" would have invited the same write again. Say what happened and
+                // how to do it in pieces.
+                boolean cutOff = "length".equals(drive.lastFinishReason())
+                        || (drive.lastCompletionTokens() > 0 && drive.lastCompletionTokens() >= outBudget - 8);
+                log.warn("turn {}: assistant returned no tool_calls — content=[{}]{}", turn,
+                        assistant.path("content").asText(""), cutOff ? " (cut off at max_tokens=" + outBudget + ")" : "");
+                history.addObject().put("role", "user").put("content", cutOff
+                        ? "Your last reply was cut off: it reached the output limit of about " + outBudget + " tokens before the tool "
+                          + "call was complete, so nothing happened. Do not repeat it. Write the file in PIECES: one write_file with the "
+                          + "first part (under 1,500 words), then edit_file calls that add the next parts, or append with the shell "
+                          + "(`cat >> FILE <<'EOF' … EOF`). Each tool call must stay well under the limit."
+                        : "You must act by calling a tool.");
                 continue;
             }
 
@@ -2157,6 +2252,7 @@ public final class FamiliarLoop {
                         observation = red.text() + red.note();
                         log.info("  ↳ redacted {} secret/PII value(s) from {} output", red.count(), name);
                     }
+                    observation = boundToWindow(observation, name, calls.size());
                     log.info("  ↳ {}({}) → {}", name, preview(argsRaw), preview(observation));
 
                     // Any non-write tool call (a build, a read, a test run) is real interleaved progress —
@@ -2588,7 +2684,9 @@ public final class FamiliarLoop {
                     // The self-verify reflection below re-engages the model and can thrash a solved task to red (30B M1:
                     // reached 12/12 + task_done, then reflection rounds broke it to an IndentationError). restoreBestGreen()
                     // at exit makes the FINAL on-disk state the best green one. Ground-truth = tests, not self-judgment.
-                    if (devAnswersPath == null && ProjectTests.testsGreen(projectRoot)) {
+                    // Not in chat: the person is the verifier, and the snapshot walks and copies the project tree —
+                    // started in a home directory it walked a 210 GB .cache and the turn never came back (2026-09-18).
+                    if (!chatMode && devAnswersPath == null && ProjectTests.testsGreen(projectRoot)) {
                         String g = snapshotCheckpoint(9000 + turn);
                         if (g != null) { bestGreenCheckpoint = g; bestGreenTurn = turn;
                             log.info("  keep-best-green: tests pass at task_done -> snapshot saved (turn {})", turn); }
@@ -2596,9 +2694,10 @@ public final class FamiliarLoop {
                     // SELF-VERIFICATION REFLECTION (research-backed, positive): before any harness check, ask the
                     // model to RUN its deliverable end-to-end on real inputs and inspect the ACTUAL output — the
                     // one thing that catches a stubbed/hollow last link (its own shape-tests can't). One-shot.
-                    String artifactFinding = deliverableArtifactFinding(); // AutoMind filesystem check (objective)
-                    String fakeCore = fakeCoreFinding();                    // anti reward-hacking: real work, not stub (objective)
-                    String metricFinding = validationMetricFinding();       // AIDE val-metric check (objective)
+                    // These three walk and read the project tree, and only the self-verify reflection below uses them.
+                    String artifactFinding = selfVerifyOn ? deliverableArtifactFinding() : null; // AutoMind filesystem check (objective)
+                    String fakeCore = selfVerifyOn ? fakeCoreFinding() : null;                    // anti reward-hacking: real work, not stub (objective)
+                    String metricFinding = selfVerifyOn ? validationMetricFinding() : null;       // AIDE val-metric check (objective)
                     // Priority: completeness (is there output) → realness (is the core real) → quality (beats baseline).
                     // NB: the harness-computed DEV-METRIC check is a separate hard gate BELOW (own bounce budget) so it
                     // isn't starved by these soft rounds sharing one cap (sv13 bug: 3× artifact-gap consumed the cap).
@@ -2782,7 +2881,16 @@ public final class FamiliarLoop {
                     restoreBestGreen();      // keep-best-green: a solved-then-thrashed run ships its green state
                     restoreBestArtifact();   // ship the run's BEST adapter, not whatever was last overwritten
                     log.info("task_done at turn {}: {}", turn, observation);
-                    return new Result(true, withDraft(observation), turn);
+                    // In chat the answer the person reads is the model's own prose reply, not the task_done
+                    // restatement. Use the prose when the model wrote a substantial one; keep the summary when it
+                    // did not (a turn that was pure tool work ends with the summary as its only words).
+                    String answer = observation;
+                    if (chatMode) {
+                        String prose = unwrapToolMarkup(assistant.path("content").asText("").strip());
+                        if (prose.length() < bestChatProse.length()) prose = bestChatProse;
+                        if (prose.length() > 200 && prose.length() > (observation == null ? 0 : observation.length())) answer = prose;
+                    }
+                    return new Result(true, withDraft(answer), turn);
                 }
                 if (TaskBlockedTool.NAME.equals(name)) {
                     // RESEARCH BLOCKED-BOUNCE (one-shot): in research mode there is nothing to be blocked
@@ -2987,7 +3095,9 @@ public final class FamiliarLoop {
                 // turn and compaction never touches it, so on a big repository an unbounded one
                 // consumed the context before the task was even read. A fifth of the window is
                 // enough to place a file and leaves room for the work.
-                + "\n\n" + ProjectShape.render(projectRoot, nctx / 5 * CHARS_PER_TOKEN)
+                // A tenth of the window, in this model's own characters per token. It was a fifth at a guessed 3 chars per
+                // token: on a 32k window the block came to 10,382 tokens and the fixed part of every request was 71%.
+                + "\n\n" + ProjectShape.render(projectRoot, (int) (nctx / 10 * charsPerToken))
                 + "\n\nGOAL:\n" + goal;
     }
 
@@ -3156,11 +3266,17 @@ public final class FamiliarLoop {
 
         String note = "\n...[trimmed to fit the context window — re-read a narrower range if you need more]";
         int removed = 0;
+        // The first user message is the TASK (with the plan the person approved). Trimmed, the model builds
+        // something else: a checkpoint written after such a trim said "exact deliverable was in the trimmed text"
+        // (2026-09-18). It is never cut; if the task alone does not fit, the warning below says so.
+        int task = -1;
+        for (int i = 0; i < messages.size(); i++) if ("user".equals(messages.get(i).path("role").asText())) { task = i; break; }
         // Repeat, shrinking harder each pass. One pass is not enough and quietly leaves the request
         // over the window — measured: four observations trimmed to a quarter each still came to 8,384
         // tokens against 8,192, which the server would refuse exactly as before.
         for (int keepChars = 2000; keepChars >= 120 && estimateTokens(messages) > limit; keepChars /= 4) {
             for (int i = 1; i < messages.size() - 2 && estimateTokens(messages) > limit; i++) {
+                if (i == task) continue;
                 JsonNode m = messages.get(i);
                 if (!m.isObject() || !m.path("content").isTextual()) continue;
                 String body = m.path("content").asText();
@@ -3169,7 +3285,44 @@ public final class FamiliarLoop {
                 removed += body.length() - keepChars - note.length();
             }
         }
+        // Still over: the bulk is in the NEWEST messages, which the pass above leaves alone because the model has not
+        // seen them yet. A request that cannot be sent shows the model nothing at all, so they are trimmed too, more
+        // gently, keeping the head. Only the system prompt (index 0) is never touched.
+        for (int keepChars = 6000; keepChars >= 500 && estimateTokens(messages) > limit; keepChars /= 2) {
+            for (int i = Math.max(1, messages.size() - 2); i < messages.size() && estimateTokens(messages) > limit; i++) {
+                if (i == task) continue;
+                JsonNode m = messages.get(i);
+                if (!m.isObject() || !m.path("content").isTextual()) continue;
+                String body = m.path("content").asText();
+                if (body.length() <= keepChars + note.length()) continue;
+                ((ObjectNode) m).put("content", body.substring(0, keepChars) + note);
+                removed += body.length() - keepChars - note.length();
+            }
+        }
+        if (estimateTokens(messages) > limit) log.warn("the request still does not fit after trimming every tool result: the system prompt and the task alone are {} tokens of {}", estimateTokens(messages), nctx);
         return removed;
+    }
+
+    /**
+     * No single tool result may take more than an eighth of the context window. The tools cap their own output
+     * (shell 20k chars, read 12k) at sizes chosen for a 64k window; on a 32k window three parallel shell results at
+     * the cap were 60% of the window in one step, compaction kept them as the newest messages, and the request
+     * overflowed with nothing left to trim (2026-09-18, twice). The head and the tail are kept: the head carries
+     * the shape, the tail the exit status and the last error.
+     */
+    String boundToWindow(String observation, String tool) { return boundToWindow(observation, tool, 1); }
+
+    /** The eighth is per STEP: a batch of {@code batch} parallel calls shares it, or two results at the bound filled a quarter of the window in one step. */
+    String boundToWindow(String observation, String tool, int batch) {
+        if (observation == null) return null;
+        int maxChars = Math.max(3_000, (int) (nctx * charsPerToken / 8 / Math.max(1, batch)));
+        if (observation.length() <= maxChars) return observation;
+        int head = maxChars * 6 / 10, tail = maxChars - head;
+        int cut = observation.length() - maxChars;
+        log.info("  ↳ {} output of {} chars bounded to {} for the context window", tool, observation.length(), maxChars);
+        return observation.substring(0, head)
+                + "\n...[" + cut + " chars cut from the middle so the result fits the context window; run a narrower command if you need them]...\n"
+                + observation.substring(observation.length() - tail);
     }
 
     /** Reserve ~half the window for output, but never let input+output overflow n_ctx. */
@@ -3359,7 +3512,7 @@ public final class FamiliarLoop {
     private int ctxHighWater = 0;
 
     private void compact(ArrayNode history) {
-        int sysTokens = systemPrompt().length() / CHARS_PER_TOKEN;
+        int sysTokens = (int) (systemPrompt().length() / charsPerToken);
         int used = sysTokens + estimateTokens(history);
         // How close a run actually gets to the compaction threshold. Kept because it answered a
         // question cheaply and will keep answering it: MEASURED on read-heavy coding tasks, the high
@@ -3395,13 +3548,13 @@ public final class FamiliarLoop {
         int tailBudget = (int) (nctx * 0.30);
         int acc = 0, cut = -1;
         for (int i = history.size() - 1; i >= 1; i--) {
-            acc += history.get(i).toString().length() / CHARS_PER_TOKEN;
+            acc += (int) (history.get(i).toString().length() / charsPerToken);
             if (acc >= tailBudget && "assistant".equals(history.get(i).path("role").asText())) {
                 cut = i;
                 break;
             }
         }
-        if (cut < 2) return;
+        if (cut < 2) { log.info("compaction: {}% of the window but no turn boundary old enough to cut ({} msgs) — elision only", pct, history.size()); return; }
 
         ArrayNode oldSpan = j.createArrayNode();
         ArrayNode tail = j.createArrayNode();
@@ -3553,9 +3706,13 @@ public final class FamiliarLoop {
     }
 
     private int estimateTokens(ArrayNode messages) {
+        return (int) (requestChars(messages) / charsPerToken) + schemaTokens;
+    }
+
+    private static int requestChars(ArrayNode messages) {
         int chars = 0;
         for (var m : messages) chars += m.toString().length();
-        return chars / CHARS_PER_TOKEN;
+        return chars;
     }
 
     private static String preview(String s) {

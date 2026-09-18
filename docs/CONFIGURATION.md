@@ -184,6 +184,7 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 | `CODEZAIKU_FETCH_MAX_BYTES` | The largest document `web_fetch` reads (default 25 MB); the body and its decompression are capped. |
 | `CODEZAIKU_RESEARCH_WORKERS` / `_WORKER_TURNS` / `_ROUNDS` | Fan-out research: parallel sub-researchers (4), their turn budget (14), critic rounds (2). |
 | `CODEZAIKU_DELEGATE_DRIVE` / `CODEZAIKU_DELEGATE_MODEL` | Sub-agents from `delegate` run HERE instead of the chat's drive — frontier judgment, local labor. |
+| `CODEZAIKU_STREAM` | Unset: the chat shows the whole reply when it is ready (the default). `on`: the reply as it is written. `all`: also the model's thinking, dimmed. |
 | `CODEZAIKU_MCP_SERVERS` | `name=command;name2=command2` — spawns MCP stdio servers whose tools join chat as `mcp_<server>_<tool>`, consent-gated per call. |
 | `CODEZAIKU_MCP_TIMEOUT_SECONDS` | How long a call to an MCP server waits with no answer and no progress notification. Default 60. |
 | `CODEZAIKU_ACP_MCP_MAX_TOOLS` | How many tools the MCP servers an ACP client passes may add to a session. Default 40. |

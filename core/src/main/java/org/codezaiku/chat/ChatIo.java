@@ -51,6 +51,17 @@ public interface ChatIo extends AutoCloseable {
     default void printThinkingStart() { println("[thinking]"); }
 
     /**
+     * One line that is rewritten in place while a turn works — "… thinking · 23 s", "… running shell · 8 s" — and
+     * is gone the moment real output arrives. The screen between two tool lines used to be blank for as long as a
+     * 27B takes to think, and a blank screen reads as a hang. A pipe shows nothing: a transcript should not carry a
+     * hundred carriage returns.
+     */
+    default void status(String s) { }
+
+    /** Take the status line off the screen, if one is showing. */
+    default void clearStatus() { }
+
+    /**
      * Run {@code onInterrupt} when the person presses ctrl-C, until the returned handle is closed.
      *
      * <p>Exists because a turn that cannot be stopped is the worst thing in a chat. Between messages
@@ -94,6 +105,26 @@ public interface ChatIo extends AutoCloseable {
     final class Jline implements ChatIo {
         private final Terminal terminal;
         private final LineReader reader;
+        private volatile boolean statusShown = false;
+        /** True while readLine waits for the person: an approval question, or the prompt between turns. */
+        private volatile boolean reading = false;
+
+        @Override public synchronized void status(String s) {
+            // Never over a question. The approval prompt ("[y]es / [a]lways … > ") is printed without a newline and
+            // waits; a status line written on top of it erased it, and the person saw "… thinking · 7 min" while the
+            // chat was in fact waiting for their answer (2026-09-18).
+            if (reading) return;
+            terminal.writer().print("\r\u001b[2m" + s + "\u001b[0m\u001b[K");
+            terminal.writer().flush();
+            statusShown = true;
+        }
+
+        @Override public synchronized void clearStatus() {
+            if (!statusShown) return;
+            terminal.writer().print("\r\u001b[K");
+            terminal.writer().flush();
+            statusShown = false;
+        }
 
         Jline(Terminal terminal) {
             this.terminal = terminal;
@@ -107,16 +138,19 @@ public interface ChatIo extends AutoCloseable {
         }
 
         @Override public void print(String s) {
+            clearStatus();
             terminal.writer().print(s);
             terminal.writer().flush();
         }
 
         @Override public void printThinking(String s) {
+            clearStatus();
             terminal.writer().print("\u001b[2m" + s + "\u001b[0m");
             terminal.writer().flush();
         }
 
         @Override public void printThinkingStart() {
+            clearStatus();
             terminal.writer().print("\u001b[2m[thinking]\u001b[0m\n");
             terminal.writer().flush();
         }
@@ -133,6 +167,8 @@ public interface ChatIo extends AutoCloseable {
         }
 
         @Override public String readLine(String prompt) {
+            clearStatus();
+            reading = true;
             try {
                 return reader.readLine(prompt);
             } catch (UserInterruptException e) {
@@ -142,10 +178,13 @@ public interface ChatIo extends AutoCloseable {
                 return "";
             } catch (EndOfFileException e) {
                 return null;                       // ctrl-D leaves
+            } finally {
+                reading = false;
             }
         }
 
         @Override public void println(String s) {
+            clearStatus();
             terminal.writer().println(s);
             terminal.writer().flush();
         }

@@ -66,4 +66,15 @@ class ContextOverflowTest {
         assertEquals("size not reported", detail("context length exceeded"));
         assertEquals("size not reported", detail(null));
     }
+
+    /** The retry needs the server's own count; the loop learns its ratio from it. */
+    @Test
+    void theServersCountIsReadOutOfTheMessage() throws Exception {
+        Method f = FamiliarLoop.class.getDeclaredMethod("overflowUsed", String.class);
+        f.setAccessible(true);
+        assertEquals(23461, f.invoke(null, LLAMA_CPP));
+        assertEquals(34395, f.invoke(null, "the assembled request does not fit (34395 tokens into a 32768-token window)"));
+        assertEquals(9000, f.invoke(null, "This model's maximum context length is 8192 tokens, however you requested 9000 tokens"));
+        assertEquals(null, f.invoke(null, "context length exceeded"));
+    }
 }

@@ -376,6 +376,43 @@ public final class ChatSession {
     }
 
     /** Append one line to the transcript. Never re-sent to the model — this is for people. */
+    /**
+     * The previous exchange, for the next turn's context: what the person asked and what the model replied. Each
+     * turn is a fresh loop, and until now it saw only the restatement (topic, decisions, files), never the reply
+     * itself. So "do everything but 7" referred to a numbered list the model had never seen, and it started the
+     * analysis over instead of building (2026-09-18). Read from the transcript, so it survives a resume. The reply
+     * is cut in the middle past {@code maxChars}; the head carries the structure, the tail the offer or question.
+     */
+    public String lastExchange(int maxChars) {
+        try {
+            Path f = transcriptFile();
+            if (!Files.isRegularFile(f)) return "";
+            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            String ask = null, reply = null, pendingAsk = null;
+            for (String line : Files.readAllLines(f, StandardCharsets.UTF_8)) {
+                if (line.isBlank()) continue;
+                com.fasterxml.jackson.databind.JsonNode n;
+                try { n = mapper.readTree(line); } catch (Exception e) { continue; }
+                String role = n.path("role").asText(""), text = n.path("text").asText("");
+                if (role.equals("user")) pendingAsk = text;
+                else if (role.equals("agent") && !text.isBlank()) { reply = text; ask = pendingAsk; }
+            }
+            if (reply == null) return "";
+            String r = reply.strip();
+            if (r.length() > maxChars) {
+                int head = maxChars * 3 / 4, tail = maxChars - head;
+                r = r.substring(0, head) + "\n…[the middle of the reply is cut here]…\n" + r.substring(r.length() - tail);
+            }
+            String a = ask == null ? "" : ask.strip();
+            if (a.length() > 600) a = a.substring(0, 600) + "…";
+            return "[the previous turn — the person may refer to it: \"the list\", \"option 3\", \"do that\"]\n"
+                    + (a.isEmpty() ? "" : "They asked: " + a + "\n")
+                    + "You replied:\n" + r + "\n\n";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     public void log(String role, String text) {
         try {
             Files.createDirectories(storeDir(projectRoot));
