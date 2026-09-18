@@ -3,10 +3,11 @@ package org.codezaiku.drive;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.*;
+
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** Behind llama-swap, /props names no model; the upstream server's /props does, and carries the real window. */
 class DriveContextWindowTest {
@@ -27,6 +28,10 @@ class DriveContextWindowTest {
             String base = "http://127.0.0.1:" + s.getAddress().getPort();
             // the test task may pin CODEZAIKU_CTX, so the probe is asked directly
             assertEquals(32768, new DriveClient(base, "qwen3.8-27b").fromLlamaCppProps());
+            // and with no model name there is nothing to ask the proxy for: this is why doctor must pass the configured
+            // model, which it did not (it reported 8192 behind llama-swap while every run read 32768)
+            assertNull(new DriveClient(base, "").fromLlamaCppProps());
+            assertFalse(java.nio.file.Files.readString(java.nio.file.Path.of("src/main/java/org/codezaiku/Doctor.java")).contains("new DriveClient(driveUrl, \"\")"), "doctor asks with the configured model");
         } finally { s.stop(0); }
     }
 }

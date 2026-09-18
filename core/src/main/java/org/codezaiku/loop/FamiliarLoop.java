@@ -2486,7 +2486,7 @@ public final class FamiliarLoop {
                         break;
                     }
                     // CHAT CITATION BOUNCE: the turn RESEARCHED (web tools ran — ground truth)
-                    // and the reply carries no source URL. Measured on the first real dolores ask
+                    // and the reply carries no source URL. Measured on the first real ask from a second machine
                     // (2026-08-31): 9 searches, correct standards cited, zero attribution — the
                     // person cannot tell researched fact from weights-knowledge. The register's
                     // "findings WITH sources" line lost to synthesis pressure, as prompt-level

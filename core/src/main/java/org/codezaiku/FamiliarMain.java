@@ -110,7 +110,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.8";
+    public static final String VERSION = "0.3.9";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is

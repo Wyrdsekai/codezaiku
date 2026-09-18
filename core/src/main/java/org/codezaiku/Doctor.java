@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Environment check — "why doesn't this work yet".
@@ -25,6 +26,18 @@ import java.util.List;
 final class Doctor {
 
     private record Check(String name, boolean required, boolean ok, String detail, String fix) { }
+
+    /** How to install trivy on this operating system, as a command a person can copy. */
+    static String trivyInstall() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        String how;
+        if (os.contains("mac")) how = "brew install trivy";
+        else if (os.contains("win")) how = "download trivy_<version>_windows-64bit.zip from https://github.com/aquasecurity/trivy/releases, unzip it, and put trivy.exe in a folder on your PATH";
+        else how = "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin"
+                + "   (Debian and Ubuntu can use Aqua's apt repository instead: https://trivy.dev/docs/latest/getting-started/installation/)";
+        return "install trivy, then run doctor again: " + how
+                + ". CodeZaiku only reports vulnerabilities a scanner found, never ones the model remembers.";
+    }
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5)).build();
@@ -42,8 +55,9 @@ final class Doctor {
         String java = System.getProperty("java.version", "?");
         int major = major(java);
         checks.add(new Check("java " + java, true, major >= 21,
-                major >= 21 ? "" : "CodeZaiku targets JDK 21",
-                "install a JDK 21+ and put it on PATH"));
+                major >= 21 ? "" : "CodeZaiku needs Java 21 or newer",
+                "install Java 21 or newer (https://adoptium.net) and make sure the `java` on your PATH is that one. "
+                + "Or use the download that carries its own Java, which needs no Java on the machine: https://codezaiku.org/download/"));
 
         // Which shell commands actually run through. Worth naming because on Windows it is not
         // obvious: System32\bash.exe is the WSL launcher and CreateProcess finds it before anything
@@ -52,8 +66,8 @@ final class Doctor {
         boolean wsl = org.codezaiku.exec.Shell.isWsl();
         checks.add(new Check("shell: " + org.codezaiku.exec.Shell.describe(), false, !wsl,
                 wsl ? "commands run inside WSL, not natively" : "",
-                "set CODEZAIKU_SHELL to the shell you want (e.g. a Git Bash bash.exe), or run "
-                + "CodeZaiku inside the WSL distribution if that is what you intend"));
+                "commands the model runs go through WSL, not Windows itself. If you want Windows, set CODEZAIKU_SHELL to a Windows "
+                + "bash, for example Git for Windows' bash.exe. If you want WSL, run CodeZaiku inside the WSL distribution."));
 
         // /v1/models is the cheap probe and every local server answers it — but it is NOT what
         // CodeZaiku requires, and some hosted providers do not serve it to this credential at all.
@@ -81,7 +95,7 @@ final class Doctor {
             String latest = org.codezaiku.ResearchZoshoInstall.latestCached();
             boolean newer = latest != null && org.codezaiku.ResearchZoshoInstall.compareVersions(latest, rzHave) > 0;
             checks.add(new Check("researchzosho " + rzHave + (answers ? ", daemon answering at " + org.codezaiku.research.LibraryBridge.url() : ", daemon not answering at " + org.codezaiku.research.LibraryBridge.url()),
-                    false, !newer, newer ? latest + " is available" : "", newer ? "codezaiku install researchzosho  (updates it; the library and settings stay)" : answers ? "" : "researchzosho service install, or researchzosho serve"));
+                    false, !newer, newer ? latest + " is available" : "", newer ? "codezaiku install researchzosho  (updates it; the library and settings stay)" : answers ? "" : "the library is installed but not running: `researchzosho service install` starts it now and at every login, `researchzosho serve` runs it in this terminal"));
         }
         // no drive: when this machine can serve one on demand, that is the fix to name (ModelServer); the docker line otherwise
         String offer = drive ? null : ModelServer.offer();
@@ -90,10 +104,14 @@ final class Doctor {
 
         if (drive) {
             int ctx = 0;
-            try { ctx = new DriveClient(driveUrl, "").contextWindow(); } catch (Exception ignored) { }
+            // The model's name matters here: behind llama-swap, /props names no model and answers 404, and the window
+            // is at /upstream/<model>/props. With "" this check fell back to 8192 and warned, while every real run,
+            // which passes the model, read the true window (found on a second machine, 2026-09-17).
+            try { ctx = new DriveClient(driveUrl, Config.get("CODEZAIKU_MODEL", "local-model")).contextWindow(); } catch (Exception ignored) { }
             checks.add(new Check("model context window", true, ctx >= 8192,
                     ctx > 0 ? ctx + " tokens" : "could not determine",
-                    "8k is the practical floor; 32k is comfortable. Restart the server with a larger --ctx-size"));
+                    "CodeZaiku needs at least 8192 tokens of context to work at all, and 32768 to work well. "
+                    + "Start the model server with a bigger window (llama.cpp: --ctx-size 32768)."));
             // A SECOND, softer floor, because 8k passes the check above and still cannot complete a
             // single backend run. A host dispatch carries its own task preamble on top of our pinned
             // project block: one measured at 8k refused before its first turn — 9,619 tokens into
@@ -101,29 +119,32 @@ final class Doctor {
             // provably does not work, which is the exact shape of instrument this project keeps
             // getting wrong. Optional rather than required: 8k does answer a small interactive task,
             // and failing that user would be its own kind of wrong.
-            checks.add(new Check("context window for a host dispatch", false, ctx >= 12288,
+            checks.add(new Check("context window when another program drives CodeZaiku", false, ctx >= 12288,
                     ctx > 0 ? ctx + " tokens" : "could not determine",
-                    "a host's task preamble sits on top of the pinned project block — 8k refuses "
-                    + "before the first turn. 12k is the floor for `run`/MCP/ACP, 16k comfortable"));
+                    "When an editor or another agent sends CodeZaiku a task (through run, MCP or ACP), that task comes with "
+                    + "its own instructions, and they take room in the context. With 8192 tokens there was not enough room left, "
+                    + "and the first request was refused. Give the model server at least 12288 tokens for that; 16384 is comfortable."));
         }
 
         // ── optional, per surface ───────────────────────────────────────────
         boolean docker = exec.run("docker info", 15).ok();
         checks.add(new Check("docker", false, docker,
-                docker ? "" : "the ops and security surfaces operate on containers",
-                "install docker, or use CodeZaiku only for coding/research"));
+                docker ? "" : "the ops commands (fix, serve, watch, triage, investigate) and the security check work on containers",
+                "install Docker (https://docs.docker.com/get-docker/). Without it, coding, review and research still work; the ops commands and the security check do not."));
 
         String searx = Config.get("CODEZAIKU_SEARXNG", "http://localhost:8888");
-        boolean search = httpOk(searx + "/search?q=probe&format=json");
-        checks.add(new Check("search backend at " + searx, false, search,
-                search ? "" : "the research surface needs it",
-                "docker run -d --name codezaiku-searxng -p 8888:8080 \\\n"
-                + "        -v $PWD/deploy/searxng:/etc/searxng searxng/searxng:latest\n"
-                + "      (the shipped config enables the JSON API, which is off by default)"));
+        String brave = Config.get("CODEZAIKU_BRAVE_KEY");
+        boolean haveBrave = brave != null && !brave.isBlank();
+        boolean searxAnswers = httpOk(searx + "/search?q=probe&format=json");
+        checks.add(new Check(haveBrave ? "web search: Brave Search key set" : "web search: SearXNG at " + searx, false, haveBrave || searxAnswers,
+                haveBrave || searxAnswers ? "" : "research runs search the web with it; without it they only reach Wikipedia, Crossref and OpenAlex",
+                "either a Brave Search API key (free plan at https://brave.com/search/api/): codezaiku config set CODEZAIKU_BRAVE_KEY <key>\n"
+                + "      or a SearXNG server with its JSON API turned on: codezaiku config set CODEZAIKU_SEARXNG http://<host>:8888\n"
+                + "      `codezaiku setup` asks for either."));
 
         boolean git = exec.run("git --version", 10).ok();
-        checks.add(new Check("git", false, git, git ? "" : "the coding surface commits its work",
-                "install git"));
+        checks.add(new Check("git", false, git, git ? "" : "the coding commands commit their work with it, and `run` uses it to list the files a task changed",
+                "install git (https://git-scm.com/downloads) and make sure `git` is on your PATH"));
 
         for (String[] lsp : new String[][]{
                 {"pyright", "python"}, {"rust-analyzer", "rust"}, {"gopls", "go"}, {"jdtls", "java"}}) {
@@ -134,8 +155,8 @@ final class Doctor {
 
         boolean trivy = exec.run("command -v trivy || command -v grype", 10).ok();
         checks.add(new Check("vulnerability scanner", false, trivy,
-                trivy ? "" : "image CVE checks are skipped without one",
-                "install trivy (https://trivy.dev) — CodeZaiku never infers CVE status from model memory"));
+                trivy ? "" : "without one, the security check cannot look for known vulnerabilities in container images",
+                trivyInstall()));
 
         // ── report ──────────────────────────────────────────────────────────
         int failedRequired = 0;
@@ -174,12 +195,9 @@ final class Doctor {
     /** The fix line for a missing drive: the on-demand install when this machine can do it, the server line otherwise. */
     static String driveFix(String offer) {
         if (offer != null) return offer + "\n      codezaiku model serve install   (or say yes below)";
-        return "start any OpenAI-compatible server, e.g.\n"
-                + "      docker run -d --name codezaiku-drive -p 8200:8200 \\\n"
-                + "        -v /path/to/models:/models ghcr.io/ggml-org/llama.cpp:server-cuda \\\n"
-                + "        -m /models/<your-model>.gguf --port 8200 --host 0.0.0.0 --jinja\n"
-                + "      then: export CODEZAIKU_DRIVE=http://localhost:8200\n"
-                + "      (on a Linux machine with an NVIDIA card and Docker, `codezaiku model serve install` does it for you, on demand)";
+        return "no model server answered. Run `codezaiku setup`: it finds a server running on this machine, can start one for you on a Linux\n"
+                + "      machine with an NVIDIA card and Docker, or takes the address and key of a hosted API (OpenAI, DeepSeek, Gemini, OpenRouter…).\n"
+                + "      To point at a server by hand: codezaiku config set CODEZAIKU_DRIVE http://<host>:<port>";
     }
 
     /** What a one-token request to the endpoint CodeZaiku actually uses told us. */

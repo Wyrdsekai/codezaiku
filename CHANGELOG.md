@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.9
+
+This release is about `codezaiku doctor`. Its advice is now easier to follow, and it no longer reports the wrong context window size when the model runs behind llama-swap.
+
+### Fixed
+
+- `doctor`: every "fix:" line now says what to do in plain words, with the command to run. The vulnerability scanner line gives the trivy install command for this operating system. The web search check passes when a Brave Search key is set, and no longer prints a `docker run` for a folder the download does not contain. The missing-model-server line points at `codezaiku setup` instead of a `docker run` with placeholders.
+- `doctor`: the two context window checks now say in plain words what the numbers mean and what to do. The second one used to read "a host's task preamble sits on top of the pinned project block".
+- `doctor` reported the model's context window as 8192 behind llama-swap, with a warning that no server reported one. It asked without the model's name, and llama-swap only answers for a named model. Runs were not affected; they always passed the name and read the real window.
+
 ## 0.3.8
 
 This release fixes `codezaiku setup` choosing a model that cannot chat.

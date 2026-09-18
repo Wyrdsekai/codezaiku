@@ -64,15 +64,16 @@ Two hard requirements and one soft one.
 calls cannot drive it at all. With llama.cpp you need `--jinja` so the server applies the model's own
 chat template; without it, tool calls come back as prose and nothing works.
 
-**2. A context window of at least 8k for interactive use, 12k to be driven by another agent, 32k if
-you have it.** The loop keeps a growing conversation and compacts it, but small windows force
-compaction so often that the model loses the thread. `codezaiku doctor` reports the window it detects
-and flags both floors.
+**2. A context window of at least 8192 tokens, 12288 if another program drives CodeZaiku, 32768 if
+you have it.** The conversation grows as the model works. CodeZaiku shortens it when it gets long, but
+with a small window that happens so often that the model loses track of what it was doing.
+`codezaiku doctor` reports the window it finds and says whether it meets both numbers.
 
-The second number is not a guess. A host dispatch carries its own task preamble on top of the pinned
-project block, and one measured at 8k refused before its first turn — 9,619 tokens into 8,192. The
-request is bounded before it is sent rather than retried, so it fails as one clean refusal naming
-both counts, not as a run that quietly degrades. Provision 16k for a backend.
+The second number comes from a measurement. When an editor or another agent sends CodeZaiku a task
+(through `run`, MCP or ACP), the task comes with its own instructions, and they take room in the
+context. At 8192 tokens one such task needed 9,619 tokens before the model's first turn, so it was
+refused. CodeZaiku checks the size before sending, so this fails once with a clear message rather than
+running badly. Give a model server 16384 tokens when other programs will use it.
 
 **3. Instruction-following on long, structured prompts** (soft). The operator prompts carry sensor
 output, logs and card content; models that drift on long inputs localize badly.

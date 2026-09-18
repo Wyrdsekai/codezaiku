@@ -2,10 +2,10 @@ package org.codezaiku;
 
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.*;
+
 import java.lang.reflect.Method;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * `doctor` used to probe only `/v1/models` and report anything else as "nothing answered". Measured
@@ -70,6 +70,7 @@ class DriveProbeMessageTest {
         String offer = "Serve gpt-oss-20b on this machine on demand: it downloads once (about 14 GB), starts when a run needs it, and stops after 20 idle minutes.";
         assertTrue(Doctor.driveFix(offer).startsWith(offer) && Doctor.driveFix(offer).contains("codezaiku model serve install"), Doctor.driveFix(offer));
         String plain = Doctor.driveFix(null);
-        assertTrue(plain.contains("docker run") && plain.contains("model serve install"), plain);
+        assertTrue(plain.contains("codezaiku setup") && plain.contains("config set CODEZAIKU_DRIVE"), "names the wizard and the by-hand setting: " + plain);
+        assertFalse(plain.contains("<your-model>"), "no placeholder command a person has to finish by hand");
     }
 }
