@@ -8,6 +8,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.file.Path;
 /**
  * First-class code search, so the model stops paying for exploration with its context window.
  *
@@ -64,7 +67,7 @@ public final class SearchCodeTool implements Tool {
         String pattern = args.path("pattern").asText("");
         if (pattern.isBlank()) return "ERROR: empty pattern";
         String rel = args.path("path").asText(".");
-        java.nio.file.Path target;
+        Path target;
         try {
             target = rel.equals(".") ? scope.root() : scope.resolve(rel);
         } catch (IllegalArgumentException e) {
@@ -89,8 +92,8 @@ public final class SearchCodeTool implements Tool {
                 .redirectErrorStream(true).start();
         List<String> lines = new ArrayList<>();
         int total = 0;
-        try (var r = new java.io.BufferedReader(
-                new java.io.InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
+        try (var r = new BufferedReader(
+                new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
             String l;
             while ((l = r.readLine()) != null) {
                 total++;

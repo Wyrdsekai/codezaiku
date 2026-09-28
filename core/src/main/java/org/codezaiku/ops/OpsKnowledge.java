@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.stream.Stream;
 
+import org.codezaiku.Config;
 /**
  * The ops KNOWLEDGE layer: fault-class → fix-procedure cards, PUSHED by the harness.
  *
@@ -302,7 +303,7 @@ public final class OpsKnowledge {
      * applicable. Narrower than the misfire above, and not yet observed.
      */
     private static final boolean APPLICABILITY_FILTER =
-            !"off".equalsIgnoreCase(org.codezaiku.Config.get("CODEZAIKU_OPS_CARD_APPLICABILITY"));
+            !"off".equalsIgnoreCase(Config.get("CODEZAIKU_OPS_CARD_APPLICABILITY"));
 
     /**
      * {@link #missingTool} as a POLICY: the same verdict, but only when the filter is enabled. The

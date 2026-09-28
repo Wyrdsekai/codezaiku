@@ -6,11 +6,12 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.util.Arrays;
 /** The steerer is arithmetic over the run's own queries and hosts, so every rule is pinnable. */
 class SearchSteerTest {
 
     private static List<String> urls(String... hosts) {
-        return java.util.Arrays.stream(hosts).map(h -> "https://" + h + "/page").toList();
+        return Arrays.stream(hosts).map(h -> "https://" + h + "/page").toList();
     }
 
     @Test

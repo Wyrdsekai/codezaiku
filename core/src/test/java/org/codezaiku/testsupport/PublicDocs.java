@@ -5,6 +5,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
+import java.util.Optional;
 /**
  * Where the public documentation lives — which differs between the two trees this suite runs in.
  *
@@ -51,10 +52,10 @@ public final class PublicDocs {
     }
 
     /** A named public page, wherever it lives. Empty when this tree does not carry it. */
-    public static java.util.Optional<Path> page(String name) {
+    public static Optional<Path> page(String name) {
         for (Path p : files()) {
-            if (p.getFileName().toString().equals(name)) return java.util.Optional.of(p);
+            if (p.getFileName().toString().equals(name)) return Optional.of(p);
         }
-        return java.util.Optional.empty();
+        return Optional.empty();
     }
 }

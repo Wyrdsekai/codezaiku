@@ -16,6 +16,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import java.util.concurrent.atomic.AtomicInteger;
+import org.codezaiku.FamiliarMain;
 /**
  * The scholarly literature, with no key and no install: Crossref (the DOI registry) and OpenAlex (a scholarly index).
  * Measured 2026-09-09 from a home box on the same queries as the web engines: both answered in under a second with
@@ -30,8 +32,8 @@ public final class ScholarSearch {
 
     private static final ObjectMapper M = new ObjectMapper();
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).build();
-    public static final java.util.concurrent.atomic.AtomicInteger SCHOLAR_USED = new java.util.concurrent.atomic.AtomicInteger();
-    static final String UA = "CodeZaiku/" + org.codezaiku.FamiliarMain.VERSION + " (a research library; https://codezaiku.org; mailto:support@codezaiku.org)";
+    public static final AtomicInteger SCHOLAR_USED = new AtomicInteger();
+    static final String UA = "CodeZaiku/" + FamiliarMain.VERSION + " (a research library; https://codezaiku.org; mailto:support@codezaiku.org)";
 
     /** One work: the title, where to read it (a DOI URL when there is one), and a line of context. */
     public record Row(String title, String url, String snippet, String doi) { }

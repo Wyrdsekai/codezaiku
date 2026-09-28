@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Set;
 import org.codezaiku.Config;
 
+import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Web search via a self-hosted SearXNG meta-search instance (keyless, aggregates many engines — fits
  * CodeZaiku's self-hosted ethos: local model, local embeddings, local search). Returns a compact ranked list
@@ -31,13 +32,13 @@ public final class WebSearchTool implements Tool {
      *  run to judge the run's SUBSTRATE (a refused draft names infrastructure, not the model).
      *  Same pattern as DriveClient's SESSION_*_TOKENS. Shared across parallel fan workers on
      *  purpose: the gate judges the whole run's substrate, not one worker's. */
-    public static final java.util.concurrent.atomic.AtomicInteger DEGRADED_EVENTS =
-            new java.util.concurrent.atomic.AtomicInteger();
+    public static final AtomicInteger DEGRADED_EVENTS =
+            new AtomicInteger();
 
     /** Which backend answered, session-wide; and searches that found no backend at all. */
-    public static final java.util.concurrent.atomic.AtomicInteger BRAVE_USED = new java.util.concurrent.atomic.AtomicInteger(),
-            SEARXNG_USED = new java.util.concurrent.atomic.AtomicInteger(), FALLBACK_USED = new java.util.concurrent.atomic.AtomicInteger(),
-            UNREACHABLE = new java.util.concurrent.atomic.AtomicInteger();
+    public static final AtomicInteger BRAVE_USED = new AtomicInteger(),
+            SEARXNG_USED = new AtomicInteger(), FALLBACK_USED = new AtomicInteger(),
+            UNREACHABLE = new AtomicInteger();
     private static volatile long searxDownAt;
 
     /** The built-in fallback (Wikipedia plus Crossref and OpenAlex; no key, no install) is on unless CODEZAIKU_FALLBACK_SEARCH=off. */
@@ -111,7 +112,7 @@ public final class WebSearchTool implements Tool {
 
     /** Append the steerer's note (if any) to a formatted result; hosts parsed from its url lines. */
     private String steered(String query, String result) {
-        var urls = new java.util.ArrayList<String>();
+        var urls = new ArrayList<String>();
         for (String line : result.split("\n")) if (line.startsWith("   http")) urls.add(line.strip());
         return result + steer.observe(query, urls);
     }

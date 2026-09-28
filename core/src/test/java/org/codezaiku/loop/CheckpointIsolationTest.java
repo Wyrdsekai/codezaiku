@@ -13,6 +13,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.codezaiku.drive.DriveClient;
+import org.codezaiku.library.Library;
+import org.codezaiku.tools.ToolRegistry;
 /**
  * Checkpoints are snapshots of the project's own source that restore-on-regression and
  * keep-best-green copy back OVER the working tree. Round numbers are deterministic per run
@@ -75,9 +78,9 @@ class CheckpointIsolationTest {
      *  back to its default window. Nothing here sends a request. */
     private static Object newLoop(Path project) throws Exception {
         Constructor<?> c = FamiliarLoop.class.getConstructor(
-                org.codezaiku.drive.DriveClient.class, org.codezaiku.tools.ToolRegistry.class,
-                Path.class, String.class, int.class, org.codezaiku.library.Library.class);
-        var drive = new org.codezaiku.drive.DriveClient("http://127.0.0.1:1", "test-model");
+                DriveClient.class, ToolRegistry.class,
+                Path.class, String.class, int.class, Library.class);
+        var drive = new DriveClient("http://127.0.0.1:1", "test-model");
         return c.newInstance(drive, null, project, "goal", 1, null);
     }
 

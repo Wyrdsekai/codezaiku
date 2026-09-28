@@ -8,6 +8,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
+import java.util.concurrent.atomic.AtomicInteger;
+import org.codezaiku.Config;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 /**
  * The STEERER — the search controller's first half, built against what the librarian's own
  * survey found (I-0003, 2026-09-01): 77–94% of search episodes add no new evidence and
@@ -35,11 +39,11 @@ public final class SearchSteer {
 
     /** Session counters, so a run log / a battery can count how often the steerer fired — the
      *  note itself sits at the END of a result the loop logs truncated, hence invisible there. */
-    public static final java.util.concurrent.atomic.AtomicInteger STEER_EVENTS =
-            new java.util.concurrent.atomic.AtomicInteger();
-    public static final java.util.concurrent.atomic.AtomicInteger SATURATION_EVENTS =
-            new java.util.concurrent.atomic.AtomicInteger();
-    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(SearchSteer.class);
+    public static final AtomicInteger STEER_EVENTS =
+            new AtomicInteger();
+    public static final AtomicInteger SATURATION_EVENTS =
+            new AtomicInteger();
+    private static final Logger log = LoggerFactory.getLogger(SearchSteer.class);
 
     private final List<Set<String>> priorTerms = new ArrayList<>();
     private final List<String> priorQueries = new ArrayList<>();
@@ -54,10 +58,10 @@ public final class SearchSteer {
     /** Session counters for the run summary: every query, and every query issued AFTER the
      *  steerer had already declared saturation — the over-search index (RUC's DAS frames
      *  over-search and under-search as the two errors of one decision boundary). */
-    public static final java.util.concurrent.atomic.AtomicInteger QUERIES =
-            new java.util.concurrent.atomic.AtomicInteger();
-    public static final java.util.concurrent.atomic.AtomicInteger QUERIES_AFTER_SATURATION =
-            new java.util.concurrent.atomic.AtomicInteger();
+    public static final AtomicInteger QUERIES =
+            new AtomicInteger();
+    public static final AtomicInteger QUERIES_AFTER_SATURATION =
+            new AtomicInteger();
 
     /**
      * The STOP RULE, mechanical: the patch is exhausted once saturation has fired twice — six
@@ -82,7 +86,7 @@ public final class SearchSteer {
     /** CODEZAIKU_SEARCH_STEER=off silences the controller — the A/B's OFF arm. Counters still run,
      *  so the off arm reports what the steerer WOULD have said; only the notes and the stop are off. */
     static boolean enabled() {
-        return !"off".equalsIgnoreCase(org.codezaiku.Config.get("CODEZAIKU_SEARCH_STEER", "on"));
+        return !"off".equalsIgnoreCase(Config.get("CODEZAIKU_SEARCH_STEER", "on"));
     }
 
     /** Observe one search; return "" or a steering note to append to the result. */

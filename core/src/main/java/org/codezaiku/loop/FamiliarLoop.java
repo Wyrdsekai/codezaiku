@@ -50,6 +50,11 @@ import org.codezaiku.verify.ProjectTests;
 import org.codezaiku.Config;
 import org.codezaiku.exec.Shell;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Locale;
+import org.codezaiku.run.ResultDocument;
+import org.codezaiku.shape.TreeWalk;
 /**
  * The execute → observe → act loop. ONE growing conversation — no episodic wipe (L1: the conversation
  * IS the memory). Every turn the derived structure map + goal are re-pinned into a fresh system message
@@ -416,8 +421,8 @@ public final class FamiliarLoop {
      *  found round-N already on disk, skipped the snapshot, and handed back the PREVIOUS run's
      *  copy — which restore-on-regression and keep-best-green then wrote over the working tree.
      *  Timestamp first so the directory names sort chronologically for pruning. */
-    private final String runId = java.time.LocalDateTime.now()
-            .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+    private final String runId = LocalDateTime.now()
+            .format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
             + "-" + Integer.toHexString(System.identityHashCode(this));
     private int bestGreenTurn = -1;
     private int restores = 0;                 // restore-on-regression, decoupled from the bounded 30B re-localization
@@ -1681,7 +1686,7 @@ public final class FamiliarLoop {
         int files = 0; long bytes = 0;
         // Runs in the constructor, so on every chat turn: bounded, and never into hidden directories (see TreeWalk).
         try {
-            for (Path p : org.codezaiku.shape.TreeWalk.files(projectRoot, java.util.Set.of(".venv", "venv", "node_modules", "target", "build", ".git", "__pycache__", "dist"), 20_000)) {
+            for (Path p : TreeWalk.files(projectRoot, Set.of(".venv", "venv", "node_modules", "target", "build", ".git", "__pycache__", "dist"), 20_000)) {
                 String rel = projectRoot.relativize(p).toString().replace('\\','/');
                 if (rel.contains("test") || rel.endsWith("__init__.py")) continue;   // exclude tests + trivial pkg markers
                 String name = p.getFileName().toString();
@@ -1754,7 +1759,7 @@ public final class FamiliarLoop {
     /** True when the server refused because the request is larger than the context window. */
     static boolean contextOverflow(String message) {
         if (message == null) return false;
-        String m = message.toLowerCase(java.util.Locale.ROOT);
+        String m = message.toLowerCase(Locale.ROOT);
         return m.contains("exceed_context_size_error")
                 || m.contains("exceeds the available context size")
                 || m.contains("context length exceeded")
@@ -1765,19 +1770,19 @@ public final class FamiliarLoop {
     /** How many tokens the server counted in the refused request, or null when it did not say. */
     static Integer overflowUsed(String message) {
         if (message == null) return null;
-        var m = java.util.regex.Pattern.compile("(\\d+)\\s*tokens?[^0-9]{0,40}?(\\d+)\\s*tokens?").matcher(message);
+        var m = Pattern.compile("(\\d+)\\s*tokens?[^0-9]{0,40}?(\\d+)\\s*tokens?").matcher(message);
         if (m.find()) { int a = Integer.parseInt(m.group(1)), b = Integer.parseInt(m.group(2)); return Math.max(a, b); }
-        var one = java.util.regex.Pattern.compile("(\\d{3,7})\\s*tokens?").matcher(message);
+        var one = Pattern.compile("(\\d{3,7})\\s*tokens?").matcher(message);
         return one.find() ? Integer.parseInt(one.group(1)) : null;
     }
 
     /** The server's own numbers if it gave any — they are more use than anything we could restate. */
     static String overflowDetail(String message) {
         if (message == null) return "size not reported";
-        var m = java.util.regex.Pattern
+        var m = Pattern
                 .compile("(\\d+)\\s*tokens?[^0-9]{0,40}?(\\d+)\\s*tokens?").matcher(message);
         if (m.find()) return m.group(1) + " tokens into a " + m.group(2) + "-token window";
-        var n = java.util.regex.Pattern.compile("n_ctx[\"'\\s:=]+(\\d+)").matcher(message);
+        var n = Pattern.compile("n_ctx[\"'\\s:=]+(\\d+)").matcher(message);
         if (n.find()) return "window is " + n.group(1) + " tokens";
         return "size not reported";
     }
@@ -2076,7 +2081,7 @@ public final class FamiliarLoop {
                     log.error("turn {}: the assembled request does not fit the model's context window "
                             + "({}). Stopping rather than resending it {} more times.",
                             turn, overflowDetail(msg), maxTurns - turn);
-                    return new Result(false, org.codezaiku.run.ResultDocument.UNRECOVERABLE + " the assembled request exceeds the "
+                    return new Result(false, ResultDocument.UNRECOVERABLE + " the assembled request exceeds the "
                             + "model's context window (" + overflowDetail(msg) + "). The task itself may be "
                             + "small — in a large repository the project-shape block dominates the prompt. "
                             + "Use a model server with a bigger window, set CODEZAIKU_CTX to the real one, "
@@ -2086,7 +2091,7 @@ public final class FamiliarLoop {
                     log.error("turn {}: {} consecutive drive failures — the endpoint is not serving "
                             + "this request shape. Stopping instead of retrying forever. Last: {}",
                             turn, consecutiveDriveFailures, e.getMessage());
-                    return new Result(false, org.codezaiku.run.ResultDocument.UNRECOVERABLE
+                    return new Result(false, ResultDocument.UNRECOVERABLE
                             + " the drive failed " + consecutiveDriveFailures + " times in a row ("
                             + String.valueOf(e.getMessage()).replaceAll("\s+", " ")
                             + "). Check CODEZAIKU_DRIVE — for hosted APIs the base URL takes no "
@@ -2953,7 +2958,7 @@ public final class FamiliarLoop {
             // history. Stable-partition what the batch appended: tool responses first (their
             // original order), then the interjections (theirs).
             if (history.size() > batchStart) {
-                var batch = new java.util.ArrayList<JsonNode>();
+                var batch = new ArrayList<JsonNode>();
                 for (int bi = batchStart; bi < history.size(); bi++) batch.add(history.get(bi));
                 boolean mixed = false;
                 for (int bi = 1; bi < batch.size(); bi++) {
@@ -2988,7 +2993,7 @@ public final class FamiliarLoop {
      *  file with an extension next to a write-verb. Misses cost nothing (no bounce); false
      *  positives cost one bounce turn. */
     static boolean observationClaimsWrite(String summary) {
-        return java.util.regex.Pattern.compile(
+        return Pattern.compile(
                 "(?i)\\b(wrote|created|saved|written to|added)\\b[^.\\n]{0,40}?\\b[\\w][\\w./-]*\\.[A-Za-z]{1,6}\\b")
                 .matcher(summary).find();
     }

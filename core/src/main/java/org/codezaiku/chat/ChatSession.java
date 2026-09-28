@@ -15,6 +15,11 @@ import java.util.regex.Pattern;
 
 import org.codezaiku.Config;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.file.StandardOpenOption;
+import java.util.Comparator;
+import java.util.Optional;
 /**
  * What a chat remembers between turns — and, deliberately, what it forgets.
  *
@@ -304,9 +309,9 @@ public final class ChatSession {
      * <p>Returns empty when the file is missing or unreadable. A session that cannot be resumed is
      * reported to the person, never silently replaced by a blank one wearing its name.
      */
-    public static java.util.Optional<ChatSession> load(Path projectRoot, String id) {
+    public static Optional<ChatSession> load(Path projectRoot, String id) {
         Path f = storeDir(projectRoot).resolve(id + ".md");
-        if (!Files.isRegularFile(f)) return java.util.Optional.empty();
+        if (!Files.isRegularFile(f)) return Optional.empty();
         try {
             List<String> lines = Files.readAllLines(f, StandardCharsets.UTF_8);
             String title = lines.isEmpty() ? id : lines.get(0).replaceFirst("^#\\s*", "");
@@ -334,9 +339,9 @@ public final class ChatSession {
                     default -> { }
                 }
             }
-            return java.util.Optional.of(s);
+            return Optional.of(s);
         } catch (IOException e) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
     }
 
@@ -350,7 +355,7 @@ public final class ChatSession {
                     // trust-me" ambiguous against the very handoff that told you to type it.
                     .filter(n -> n.endsWith(".md") && !n.endsWith(".handoff.md"))
                     .map(n -> n.substring(0, n.length() - 3))
-                    .sorted(java.util.Comparator.reverseOrder())
+                    .sorted(Comparator.reverseOrder())
                     .toList();
             var out = new ArrayList<String[]>();
             for (String id : ids) {
@@ -387,11 +392,11 @@ public final class ChatSession {
         try {
             Path f = transcriptFile();
             if (!Files.isRegularFile(f)) return "";
-            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            var mapper = new ObjectMapper();
             String ask = null, reply = null, pendingAsk = null;
             for (String line : Files.readAllLines(f, StandardCharsets.UTF_8)) {
                 if (line.isBlank()) continue;
-                com.fasterxml.jackson.databind.JsonNode n;
+                JsonNode n;
                 try { n = mapper.readTree(line); } catch (Exception e) { continue; }
                 String role = n.path("role").asText(""), text = n.path("text").asText("");
                 if (role.equals("user")) pendingAsk = text;
@@ -420,8 +425,8 @@ public final class ChatSession {
                     .replace("\n", "\\n").replace("\r", "");
             Files.writeString(transcriptFile(),
                     "{\"turn\":" + turns + ",\"role\":\"" + role + "\",\"text\":\"" + esc + "\"}\n",
-                    StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE,
-                    java.nio.file.StandardOpenOption.APPEND);
+                    StandardCharsets.UTF_8, StandardOpenOption.CREATE,
+                    StandardOpenOption.APPEND);
         } catch (IOException ignored) {
             // as above
         }

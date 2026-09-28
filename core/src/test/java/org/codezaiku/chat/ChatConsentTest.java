@@ -14,6 +14,9 @@ import org.codezaiku.tools.ToolRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import java.nio.file.Files;
+import java.util.stream.StreamSupport;
 /**
  * Consent is the safety story now, so these pin it directly: what gets asked, what does not, what a
  * standing answer covers, and — for {@link Mode#PLAN} — that the guarantee is structural rather than
@@ -40,11 +43,11 @@ class ChatConsentTest {
         }
     }
 
-    private static com.fasterxml.jackson.databind.JsonNode shell(String cmd) {
+    private static JsonNode shell(String cmd) {
         return J.createObjectNode().put("command", cmd);
     }
 
-    private static com.fasterxml.jackson.databind.JsonNode path(String p) {
+    private static JsonNode path(String p) {
         return J.createObjectNode().put("path", p);
     }
 
@@ -217,7 +220,7 @@ class ChatConsentTest {
         // promised to refuse would look identical to one that works, right up until the promise
         // was not kept — and the wyrdsekai access audit found exactly that shape of hole: a consent
         // model fully built, with nothing wired to it.
-        var names = java.util.stream.StreamSupport
+        var names = StreamSupport
                 .stream(ToolRegistry.readOnly(root, null).toolsArray(J).spliterator(), false)
                 .map(n -> n.path("function").path("name").asText())
                 .toList();
@@ -274,7 +277,7 @@ class ChatConsentTest {
     void theSessionAnswerBeatsThePersistedOne(@TempDir Path dir) throws Exception {
         // Most specific wins. A person saying "no" NOW outranks a yes they persisted last month.
         var pf = dir.resolve("consent");
-        java.nio.file.Files.writeString(pf, "allow run `npm test`\n");
+        Files.writeString(pf, "allow run `npm test`\n");
         var c = new ChatConsent(Mode.ASK, new Script(Answer.NO), pf, null);
         assertThat(c.permit("shell", shell("npm test"))).isNull();      // persisted allow holds...
         // ...until the session says otherwise about something it was actually asked. (The persisted
@@ -290,7 +293,7 @@ class ChatConsentTest {
     void aMalformedConsentLineIsIgnoredNotGuessedAt(@TempDir Path dir) throws Exception {
         // A junk line must never become an allowance — unreadable consent means "ask".
         var pf = dir.resolve("consent");
-        java.nio.file.Files.writeString(pf, "alow run `rm -rf`\nrun `git push`\nallow\n");
+        Files.writeString(pf, "alow run `rm -rf`\nrun `git push`\nallow\n");
         var probe = new Script(Answer.NO);
         var c = new ChatConsent(Mode.ASK, probe, pf, null);
         assertThat(c.permit("shell", shell("rm -rf x"))).isNotNull();

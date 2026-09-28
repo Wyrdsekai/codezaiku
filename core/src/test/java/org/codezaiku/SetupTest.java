@@ -16,6 +16,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import org.junit.jupiter.api.Assertions;
 /** The wizard, scripted: a found server, a machine that serves one on demand, a hosted API with a key, and the registrations. */
 class SetupTest {
 
@@ -173,10 +174,10 @@ class SetupTest {
         assertTrue(out.contains("The built-in fallback it is"), out);
     }
 
-    @org.junit.jupiter.api.Test
+    @Test
     void theHelloTestReadsAReasoningModelAsAnswered() {
-        org.junit.jupiter.api.Assertions.assertEquals("ready", Setup.helloReply("{\"choices\":[{\"message\":{\"content\":\" ready \"}}]}"));
-        org.junit.jupiter.api.Assertions.assertTrue(Setup.helloReply("{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning_content\":\"thinking about the word\"}}]}").startsWith("(it answered"));
-        org.junit.jupiter.api.Assertions.assertTrue(Setup.helloReply("{\"choices\":[{\"message\":{\"content\":\"\"}}]}").contains("the address works"));
+        Assertions.assertEquals("ready", Setup.helloReply("{\"choices\":[{\"message\":{\"content\":\" ready \"}}]}"));
+        Assertions.assertTrue(Setup.helloReply("{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning_content\":\"thinking about the word\"}}]}").startsWith("(it answered"));
+        Assertions.assertTrue(Setup.helloReply("{\"choices\":[{\"message\":{\"content\":\"\"}}]}").contains("the address works"));
     }
 }

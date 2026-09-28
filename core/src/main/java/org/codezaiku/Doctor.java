@@ -13,6 +13,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.codezaiku.drive.aws.Bedrock;
+import org.codezaiku.exec.Shell;
+import org.codezaiku.research.LibraryBridge;
 /**
  * Environment check — "why doesn't this work yet".
  *
@@ -63,8 +67,8 @@ final class Doctor {
         // obvious: System32\bash.exe is the WSL launcher and CreateProcess finds it before anything
         // on PATH, so a bare "bash" silently dispatches every command into a Linux distribution.
         // Reporting it turns "why does this box behave differently" into a one-line answer.
-        boolean wsl = org.codezaiku.exec.Shell.isWsl();
-        checks.add(new Check("shell: " + org.codezaiku.exec.Shell.describe(), false, !wsl,
+        boolean wsl = Shell.isWsl();
+        checks.add(new Check("shell: " + Shell.describe(), false, !wsl,
                 wsl ? "commands run inside WSL, not natively" : "",
                 "commands the model runs go through WSL, not Windows itself. If you want Windows, set CODEZAIKU_SHELL to a Windows "
                 + "bash, for example Git for Windows' bash.exe. If you want WSL, run CodeZaiku inside the WSL distribution."));
@@ -76,8 +80,19 @@ final class Doctor {
         // reported a working endpoint as "nothing answered" and sent the operator to fix a server
         // that was fine. Fall back to asking for one token from the endpoint we actually use.
         String driveDetail = "";
-        boolean drive = httpOk(driveUrl + "/v1/models");
-        if (!drive) {
+        boolean onBedrock = Bedrock.is(driveUrl);
+        boolean drive = !onBedrock && httpOk(driveUrl + "/v1/models");
+        if (onBedrock) {
+            // Amazon Bedrock with the person's own AWS sign-in: one token from the model they chose, and AWS's own words when it refuses
+            try {
+                var bedrock = new Bedrock(Bedrock.settings(driveUrl, Config::get, System.getenv()));
+                var body = new ObjectMapper().createObjectNode();
+                body.putArray("messages").addObject().put("role", "user").put("content", "hi");
+                body.put("max_tokens", 1);
+                bedrock.chat(Config.get("CODEZAIKU_MODEL", "local-model"), body, Duration.ofSeconds(60));
+                drive = true;
+            } catch (RuntimeException e) { driveDetail = e.getMessage(); }
+        } else if (!drive) {
             ChatProbe probe = chatProbe(driveUrl);
             drive = probe.ok();
             driveDetail = probe.detail();
@@ -87,15 +102,15 @@ final class Doctor {
         boolean czNewer = czLatest != null && ResearchZoshoInstall.compareVersions(czLatest, FamiliarMain.VERSION) > 0;
         checks.add(new Check("codezaiku " + FamiliarMain.VERSION + (czNewer ? " (" + czLatest + " is available)" : czLatest == null ? "" : " (the latest)"), false, !czNewer, czNewer ? czLatest + " is available" : "", czNewer ? SelfUpdate.howToUpdate() : ""));
         // ResearchZosho, the research library, is a separate program: say whether it is here, whether its daemon answers, and whether a newer release exists
-        String rzHave = org.codezaiku.ResearchZoshoInstall.installedVersion();
+        String rzHave = ResearchZoshoInstall.installedVersion();
         if (rzHave == null) {
             checks.add(new Check("researchzosho (the research library)", false, false, "not installed; research keeps its findings in the research memory only", "codezaiku install researchzosho"));
         } else {
-            boolean answers = org.codezaiku.research.LibraryBridge.answers();
-            String latest = org.codezaiku.ResearchZoshoInstall.latestCached();
-            boolean newer = latest != null && org.codezaiku.ResearchZoshoInstall.compareVersions(latest, rzHave) > 0;
-            checks.add(new Check("researchzosho " + rzHave + (answers ? ", daemon answering at " + org.codezaiku.research.LibraryBridge.url() : ", daemon not answering at " + org.codezaiku.research.LibraryBridge.url()),
-                    false, !newer, newer ? latest + " is available" : "", newer ? "codezaiku install researchzosho  (updates it; the library and settings stay)" : answers ? "" : "the library is installed but not running: `researchzosho service install` starts it now and at every login, `researchzosho serve` runs it in this terminal"));
+            boolean answers = LibraryBridge.answers();
+            String latest = ResearchZoshoInstall.latestCached();
+            boolean newer = latest != null && ResearchZoshoInstall.compareVersions(latest, rzHave) > 0;
+            checks.add(new Check("researchzosho " + rzHave + (answers ? ", daemon answering at " + LibraryBridge.url() : ", daemon not answering at " + LibraryBridge.url()),
+                    false, !newer, newer ? latest + " is available" : "", newer ? "codezaiku update now  (has ResearchZosho's own updater install it; the library and settings stay)" : answers ? "" : "the library is installed but not running: `researchzosho service install` starts it now and at every login, `researchzosho serve` runs it in this terminal"));
         }
         // no drive: when this machine can serve one on demand, that is the fix to name (ModelServer); the docker line otherwise
         String offer = drive ? null : ModelServer.offer();
@@ -214,7 +229,7 @@ final class Doctor {
                 + "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
         try {
             HttpResponse<String> r = HTTP.send(
-                    org.codezaiku.drive.DriveClient.auth(
+                    DriveClient.auth(
                             HttpRequest.newBuilder(URI.create(base + "/v1/chat/completions"))
                                     .timeout(Duration.ofSeconds(20))
                                     .header("Content-Type", "application/json"))
@@ -258,7 +273,7 @@ final class Doctor {
             // key, which this would otherwise report as "nothing answered" — sending the operator
             // hunting for a dead server instead of a missing credential.
             HttpResponse<String> r = HTTP.send(
-                    org.codezaiku.drive.DriveClient.auth(
+                    DriveClient.auth(
                             HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(8))).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
             return r.statusCode() >= 200 && r.statusCode() < 400;

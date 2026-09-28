@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.11
+
+This release adds Amazon Bedrock as a model, with your own AWS account. `codezaiku update now` updates ResearchZosho too, through ResearchZosho's own updater, and programs that keep CodeZaiku up to date get a JSON answer and exit codes to act on.
+
+### Added
+
+- Amazon Bedrock as the model, with your own AWS account. `codezaiku bedrock models` lists what Bedrock offers your account in a region, `codezaiku bedrock test <model>` sends one small request with a tool in it to see that you may use the model, and `codezaiku bedrock use <model>` makes it CodeZaiku's model. Claude, Llama, Nova, Qwen, Mistral and the other chat models go through Bedrock's Converse API, with tools and pictures.
+- It uses your own AWS sign-in through the AWS command line (single sign-on, an assumed role, keys), signs each request itself, and saves nothing of that sign-in. What you may use is decided in your AWS account. When AWS refuses, the message says what AWS answered and which of the usual causes it is. `docs/BEDROCK.md` has the steps, and the policy for whoever manages the AWS account. AWS GovCloud and the China regions work by naming the region.
+- `codezaiku doctor` checks a Bedrock drive by asking the chosen model for one token.
+- `codezaiku update --json` and `codezaiku update now --json`, for a program that keeps CodeZaiku up to date, such as Wyrdsekai. Each prints one JSON document on stdout, with the same fields as ResearchZosho's updater, and progress goes to stderr. The exit code says what happened: 0 updated or already current, 75 another update is running (ask again later), 3 this install cannot update itself, 1 failed. With `--json`, only CodeZaiku is updated. `docs/DEPLOYING_AS_A_BACKEND.md` has the fields.
+- One update at a time. An update holds a lock file in `~/.codezaiku` from start to end, and checks the version again against the installed files once it has the lock, because another program may have updated them in the meantime. A second update started meanwhile answers "busy" and changes nothing.
+
+### Changed
+
+- `codezaiku update now` keeps ResearchZosho up to date too. It updates CodeZaiku, then, when ResearchZosho is installed, asks ResearchZosho's own updater to update it and says what came of each. A failure of one does not stop the other. When another program is updating ResearchZosho at that moment, it says so and leaves it alone.
+- Each program's own updater replaces its files. Once ResearchZosho is installed, CodeZaiku never downloads or replaces it: `codezaiku install researchzosho` asks its updater instead, which restarts its own service, so the advice to reinstall the service by hand is gone. A ResearchZosho older than 0.5.0 is asked the same way; its updater answers in words, and "already" there means up to date.
+- `codezaiku update` shows ResearchZosho's installed and latest versions and its update setting below CodeZaiku's.
+- Auto mode (`CODEZAIKU_UPDATE=auto`) updates CodeZaiku only. ResearchZosho's own service updates ResearchZosho, with its own setting. `doctor` and the chat name `codezaiku update now` when a newer ResearchZosho is out.
+- The README's opening, the npm package's description and keywords, and the MCP Registry entry say what CodeZaiku does and which model servers it works with.
+- The source uses imports instead of fully-qualified class names, 616 of them in 68 files. The program works the same.
+
+### Fixed
+
+- `codezaiku install researchzosho` updated an installed ResearchZosho by unpacking the plain tarball over it. On a machine without Java 21, a ResearchZosho that carried its own Java then no longer started. Its own updater now does the update and keeps that kind of build. A first install beside a CodeZaiku that runs on its own Java now takes ResearchZosho's build with its own Java too.
+- On Windows, `codezaiku update now` downloaded the release and then failed, because the running program holds its own files, and its advice to try again from a new terminal could not work. It now says at once to close CodeZaiku and run the installer again, and exits with 3.
+
 ## 0.3.10
 
 This release is about `codezaiku chat`. It shows you a plan before it builds, lets you steer a running turn, and no longer loses your answer or stops on a full context window.

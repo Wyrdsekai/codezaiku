@@ -22,6 +22,7 @@ import org.codezaiku.lsp.LspClient;
 import org.codezaiku.shape.ProjectFacts;
 import org.codezaiku.tools.ToolRegistry;
 
+import org.codezaiku.FamiliarMain;
 /**
  * OpenAI-compatible {@code /v1/chat/completions} over one project — front end #2 from the chat
  * research: point Open WebUI (or any OpenAI client) at this port and the browser is the GUI.
@@ -99,7 +100,7 @@ public final class V1Server {
         boolean stream = req.path("stream").asBoolean(false);
 
         String reply;
-        try (LibraryIndex index = new LibraryIndex(org.codezaiku.FamiliarMain.libraryIndexDir())) {
+        try (LibraryIndex index = new LibraryIndex(FamiliarMain.libraryIndexDir())) {
             DriveClient drive = new DriveClient(driveUrl, model);
             LspClient lsp = LspClient.forProject(root, ProjectFacts.language(root));
             FamiliarLoop.Result r = new FamiliarLoop(drive, ToolRegistry.readOnly(root, lsp),

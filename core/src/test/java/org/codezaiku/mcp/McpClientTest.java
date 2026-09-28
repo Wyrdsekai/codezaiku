@@ -7,13 +7,19 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.io.TempDir;
 /** The client half of MCP, against a minimal scripted stdio server. */
 class McpClientTest {
 
     /** The minimal scripted server, written by the test itself so the suite is self-contained. */
-    private static String mini(java.nio.file.Path dir) throws java.io.IOException {
-        java.nio.file.Path f = dir.resolve("mini-mcp.py");
-        java.nio.file.Files.writeString(f, """
+    private static String mini(Path dir) throws IOException {
+        Path f = dir.resolve("mini-mcp.py");
+        Files.writeString(f, """
                 import json, sys
                 for line in sys.stdin:
                     try: m = json.loads(line)
@@ -35,7 +41,7 @@ class McpClientTest {
     }
 
     @Test
-    void initializeListCallRoundTrip(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+    void initializeListCallRoundTrip(@TempDir Path tmp) throws Exception {
         try (McpClient c = new McpClient("mini", List.of("python3", mini(tmp)))) {
             var tools = c.listTools();
             assertEquals(1, tools.size());
@@ -48,8 +54,8 @@ class McpClientTest {
     }
 
     @Test
-    void aBrokenConfigEntryIsReportedNotFatal(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
-        var reports = new java.util.ArrayList<String>();
+    void aBrokenConfigEntryIsReportedNotFatal(@TempDir Path tmp) throws Exception {
+        var reports = new ArrayList<String>();
         var clients = McpClient.fromConfig("bad-entry-no-equals;ok=python3 " + mini(tmp),
                 reports::add);
         assertEquals(1, clients.size(), "the good entry started");
@@ -58,9 +64,9 @@ class McpClientTest {
     }
 
     /** A server that misbehaves the ways real ones do: pages its tools, logs a lot, asks us things, goes silent. */
-    private static String awkward(java.nio.file.Path dir) throws java.io.IOException {
-        java.nio.file.Path f = dir.resolve("awkward-mcp.py");
-        java.nio.file.Files.writeString(f, """
+    private static String awkward(Path dir) throws IOException {
+        Path f = dir.resolve("awkward-mcp.py");
+        Files.writeString(f, """
                 import json, sys, time
                 def send(o): print(json.dumps(o), flush=True)
                 for line in sys.stdin:
@@ -97,7 +103,7 @@ class McpClientTest {
     }
 
     @Test
-    void aChattySilentPagingAskingServerIsHandled(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+    void aChattySilentPagingAskingServerIsHandled(@TempDir Path tmp) throws Exception {
         var m = new ObjectMapper();
         long t0 = System.nanoTime();
         try (McpClient c = new McpClient("awkward", List.of("python3", awkward(tmp)), 2)) {
@@ -111,17 +117,17 @@ class McpClientTest {
             assertEquals("done after progress", c.callTool("slow", m.createObjectNode()), "4.5 s of work against a 2 s timeout: each progress notification pushes the deadline out");
             long before = System.nanoTime();
             String out = c.callTool("silent", m.createObjectNode());
-            long waited = java.util.concurrent.TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - before);
+            long waited = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - before);
             assertTrue(out.startsWith("ERROR: no response from mcp server awkward within 2s"), out);
             assertTrue(waited <= 6, "the wait is a real timeout, it took " + waited + " s");
         }
     }
 
     @Test
-    void aServerThatDiesSaysWhy(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
-        java.nio.file.Path f = tmp.resolve("dies.py");
-        java.nio.file.Files.writeString(f, "import sys\nsys.stderr.write('no API key configured\\n')\nsys.exit(3)\n");
-        var e = assertThrows(java.io.IOException.class, () -> new McpClient("dies", List.of("python3", f.toString()), 5));
+    void aServerThatDiesSaysWhy(@TempDir Path tmp) throws Exception {
+        Path f = tmp.resolve("dies.py");
+        Files.writeString(f, "import sys\nsys.stderr.write('no API key configured\\n')\nsys.exit(3)\n");
+        var e = assertThrows(IOException.class, () -> new McpClient("dies", List.of("python3", f.toString()), 5));
         assertTrue(e.getMessage().contains("did not answer initialize") && e.getMessage().contains("no API key configured"), e.getMessage());
     }
 }

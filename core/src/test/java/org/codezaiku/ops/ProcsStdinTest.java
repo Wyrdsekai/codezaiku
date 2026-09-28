@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import org.codezaiku.tools.ContainerExec;
 /** Stdin is fed while the timeout runs and the output drains, not before either has started. */
 class ProcsStdinTest {
 
@@ -27,7 +28,7 @@ class ProcsStdinTest {
 
     @Test
     void theContainerRunnerHasTheSameTwoProperties() throws Exception {
-        var run = org.codezaiku.tools.ContainerExec.class.getDeclaredMethod("run", String.class, int.class, String[].class);
+        var run = ContainerExec.class.getDeclaredMethod("run", String.class, int.class, String[].class);
         run.setAccessible(true);
         Object hung = run.invoke(null, "x".repeat(4 * 1024 * 1024), 2, new String[]{"bash", "-c", "sleep 30"});
         assertTrue(hung.toString().contains("exit=124"), "the hung child");

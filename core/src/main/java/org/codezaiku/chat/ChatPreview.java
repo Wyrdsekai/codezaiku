@@ -36,7 +36,7 @@ public final class ChatPreview {
             case "edit_file"  -> edit(args);
             case "write_file" -> write(args);
             case "shell", "run_background" -> shell(args);
-            case "delegate" -> java.util.List.of(
+            case "delegate" -> List.of(
                     "a background sub-agent will work in this project with FULL tools and no",
                     "per-action questions. Its complete instructions:",
                     "  " + (args == null ? "" : args.path("task").asText("")

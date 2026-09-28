@@ -1,7 +1,7 @@
 {
   "name": "@wyrdsekai/codezaiku-mcp",
-  "version": "0.3.10",
-  "description": "Starts CodeZaiku, the coding and development harness for local models and hosted APIs, as an MCP server over stdio: npx @wyrdsekai/codezaiku-mcp",
+  "version": "0.3.11",
+  "description": "Runs CodeZaiku, a coding and development harness on local models (Ollama, llama.cpp) or hosted APIs, as an MCP server, so Claude Code, Codex or Gemini CLI can hand it coding, review and ops tasks.",
   "mcpName": "io.github.Wyrdsekai/codezaiku",
   "bin": {
     "codezaiku-mcp": "bin/index.js"
@@ -29,7 +29,14 @@
   "keywords": [
     "mcp",
     "modelcontextprotocol",
+    "mcp-server",
     "coding-agent",
+    "ai-coding-assistant",
+    "code-review",
+    "ollama",
+    "llama.cpp",
+    "local-llm",
+    "docker-compose",
     "sre",
     "local-model"
   ],

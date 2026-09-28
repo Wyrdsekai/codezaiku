@@ -9,6 +9,7 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.codezaiku.Config;
 /**
  * SCOPE DISCOVERY — makes "point CodeZaiku at a stack and go" work on ANY compose project, not just a
  * hand-wired one. The two things that were stack-specific — the app readiness endpoint and the verify
@@ -38,7 +39,7 @@ public final class OpsDiscovery {
         // breaking the promise. The fix loop asks here for the endpoint that decides whether the stack
         // is still degraded, so ignoring the operator's URL let a round end with "stack GREEN" while
         // the endpoint they nominated was returning 503. Measured on a live stack.
-        String explicit = org.codezaiku.Config.get("CODEZAIKU_OPS_APP_HEALTH");
+        String explicit = Config.get("CODEZAIKU_OPS_APP_HEALTH");
         if (explicit != null && !explicit.isBlank()) return explicit;
         if (project == null || project.isBlank()) return null;
         Exec.Result r = exec.run("docker ps --filter label=com.docker.compose.project=" + project

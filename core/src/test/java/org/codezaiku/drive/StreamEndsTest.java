@@ -11,6 +11,8 @@ import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.io.IOException;
+import java.util.concurrent.Executors;
 /** A stream is a whole message only when the server said it was finished; a stream that stalls is given up. */
 class StreamEndsTest {
 
@@ -35,9 +37,9 @@ class StreamEndsTest {
                 os.write(FINISH.getBytes(StandardCharsets.UTF_8));
                 if (mode.equals("whole")) os.write("data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8));
                 os.flush();
-            } catch (java.io.IOException ignored) { }
+            } catch (IOException ignored) { }
         });
-        s.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
+        s.setExecutor(Executors.newCachedThreadPool());
         s.start();
         return s;
     }

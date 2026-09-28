@@ -5,9 +5,12 @@
 
 # CodeZaiku
 
-A coding and development harness that runs on **local models or hosted APIs**, through real work:
-writing and maintaining code, reviewing diffs, operating a service stack, checking security posture,
-and researching questions against live sources.
+A coding and development harness that runs on **local models or hosted APIs**. It is an AI coding
+agent for your terminal, like Claude Code or aider, that works with a small model on Ollama, llama.cpp,
+LM Studio or any OpenAI-compatible server. It also reviews git diffs, repairs a broken docker compose
+stack with rollback when you allow it, reports security problems in a server's Docker containers,
+researches questions with cited sources, and runs as an MCP server, an ACP agent or a command that
+prints JSON for other agents.
 
 Most agents like this assume a frontier model behind someone else's API. CodeZaiku is built the
 other way round — a 9B on hardware you own — and the harness does the work that makes that viable:
@@ -103,9 +106,14 @@ be reaching for `sudo`. They check for one; when it is missing they install the 
 that carries its own runtime (`codezaiku-<version>-<platform>.tar.gz`, from 0.3.2; `CODEZAIKU_RUNTIME=1`
 asks for it outright), and `codezaiku update` keeps such an install on its own kind.
 
-**To upgrade, run the same command again.** The installers resolve the latest release each time and
-replace the old install rather than writing over it, so nothing stale is left behind. Your config and
-data in `~/.codezaiku` are untouched. The `.deb` upgrades in place with
+**To upgrade, run `codezaiku update now`**, or the same install command again. `update now` takes the
+latest release, checks it against the release's `SHA256SUMS` and swaps it in; the next start runs it.
+When ResearchZosho is installed, it then asks ResearchZosho's own updater to do the same, and says what
+came of each. Each program's own updater replaces its files, so two programs updating at once never
+collide: the second finds the first at work and leaves it alone. On Windows, CodeZaiku cannot replace
+its own files while it runs, so there you run the install command again. The installers resolve the
+latest release each time and replace the old install rather than writing over it, so nothing stale is
+left behind. Your config and data in `~/.codezaiku` are untouched. The `.deb` upgrades in place with
 `sudo apt install ./codezaiku_<new>_all.deb` and keeps `/var/lib/codezaiku`; if you enabled
 `codezaiku.service`, the upgrade does not restart it, it tells you to when it suits you.
 
@@ -162,6 +170,8 @@ docker run -d --name codezaiku-drive -p 8200:8200 \
   -v /path/to/models:/models ghcr.io/ggml-org/llama.cpp:server-cuda \
   -m /models/<your-model>.gguf --port 8200 --host 0.0.0.0 --jinja --ctx-size 32768
 ```
+
+To use the models in your own AWS account (Amazon Bedrock) with your own AWS sign-in, see **[BEDROCK.md](docs/BEDROCK.md)**.
 
 `--jinja` is required — without it the model returns tool calls as prose and nothing works.
 See **[MODELS.md](docs/MODELS.md)** for what the harness needs from a model, what we measured on,
@@ -261,8 +271,8 @@ For real research, the kind that takes hours and comes back with a report you ca
 install researchzosho` fetches it, verifies it and runs its setup. From then on the chat's
 `/research` files runs with it, `/librarian` asks what it holds, and what it holds is pushed into
 every turn. The questions in the research memory are handed to it as open questions. `codezaiku doctor`
-and the chat say when a newer ResearchZosho is released; `codezaiku install researchzosho` updates it, and
-the library and settings stay.
+and the chat say when a newer ResearchZosho is released; `codezaiku update now` has ResearchZosho's own
+updater install it, and the library and settings stay.
 
 **Work on a codebase**
 

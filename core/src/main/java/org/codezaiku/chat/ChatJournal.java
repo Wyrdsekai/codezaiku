@@ -8,6 +8,12 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import org.codezaiku.Config;
 /**
  * CodeZaiku's own undo: pre-images journaled per STEP, no git anywhere.
  *
@@ -88,7 +94,7 @@ final class ChatJournal {
         this.store = store;
         int d = Math.max(1, suggestedDepth);
         try {
-            String v = org.codezaiku.Config.get("CODEZAIKU_UNDO_DEPTH", "");
+            String v = Config.get("CODEZAIKU_UNDO_DEPTH", "");
             if (!v.isBlank()) d = Math.max(1, Integer.parseInt(v.strip()));
         } catch (NumberFormatException ignored) {
             // A bad value keeps the suggestion rather than disabling undo.
@@ -168,7 +174,7 @@ final class ChatJournal {
         if (n < 1) n = 1;
         int restored = 0, created = 0, removed = 0;
         boolean partial = false;
-        var labels = new java.util.ArrayList<String>();
+        var labels = new ArrayList<String>();
         for (int i = 0; i < n && !records.isEmpty(); i++) {
             TurnRecord r = records.pop();
             labels.add(r.label);
@@ -182,14 +188,14 @@ final class ChatJournal {
                     // by the battery: edit-then-shell in one turn "rewound" to the edited text.
                     // Capture order is restore priority, oldest last.
                     var now = listTree();
-                    var then = new java.util.HashSet<String>();
+                    var then = new HashSet<String>();
                     try (var st = Files.walk(r.treeCopy)) {
                         for (Path p : (Iterable<Path>) st.filter(Files::isRegularFile)::iterator) {
                             String rel = r.treeCopy.relativize(p).toString();
                             then.add(rel);
                             Path to = projectRoot.resolve(rel);
                             Files.createDirectories(to.getParent());
-                            Files.copy(p, to, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            Files.copy(p, to, StandardCopyOption.REPLACE_EXISTING);
                             restored++;
                         }
                     }
@@ -206,7 +212,7 @@ final class ChatJournal {
                         if (e.getValue()) {
                             Files.createDirectories(f.getParent());
                             Files.copy(r.preImages.get(e.getKey()), f,
-                                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                                    StandardCopyOption.REPLACE_EXISTING);
                             restored++;
                         } else if (Files.deleteIfExists(f)) {
                             removed++;
@@ -231,8 +237,8 @@ final class ChatJournal {
     }
 
     /** Non-ignored project files, relative. Skips {@code .git} and the store's own droppings. */
-    private java.util.List<Path> listTree() throws IOException {
-        var out = new java.util.ArrayList<Path>();
+    private List<Path> listTree() throws IOException {
+        var out = new ArrayList<Path>();
         try (var st = Files.walk(projectRoot)) {
             for (Path p : (Iterable<Path>) st::iterator) {
                 if (!Files.isRegularFile(p)) continue;
@@ -251,7 +257,7 @@ final class ChatJournal {
         try {
             if (Files.isDirectory(r.dir)) {
                 try (var st = Files.walk(r.dir)) {
-                    st.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
+                    st.sorted(Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
                 }
             }
         } catch (IOException ignored) {

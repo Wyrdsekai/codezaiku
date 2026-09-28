@@ -13,6 +13,12 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
+import org.junit.jupiter.api.Assumptions;
 /**
  * The model server on demand, on all three platforms: the row for the memory, the files an install writes, and the install
  * itself with every seam faked — the platform included, so a Linux host exercises the macOS and Windows paths too.
@@ -21,9 +27,9 @@ class ModelServerTest {
     final ModelServer.Os realOs = ModelServer.os;
     final ModelServer.Runner realRunner = ModelServer.runner;
     final ModelServer.Downloader realDownloader = ModelServer.downloader;
-    final java.util.function.Predicate<String> realHealth = ModelServer.health;
+    final Predicate<String> realHealth = ModelServer.health;
     final ModelServer.Detacher realDetach = ModelServer.detach;
-    final java.util.Map<String, String> realSums = new java.util.HashMap<>(ModelServer.sums);
+    final Map<String, String> realSums = new HashMap<>(ModelServer.sums);
     @AfterEach void restore() { ModelServer.sums.clear(); ModelServer.sums.putAll(realSums); ModelServer.os = realOs; ModelServer.runner = realRunner; ModelServer.downloader = realDownloader; ModelServer.health = realHealth; ModelServer.detach = realDetach; }
 
     @Test
@@ -93,11 +99,11 @@ class ModelServerTest {
     void onLinuxInstallWritesTheFilesStartsTheServiceAndPointsTheDriveAtTheProxy(@TempDir Path home) throws Exception {
         String realHome = System.getProperty("user.home");
         System.setProperty("user.home", home.toString());
-        org.codezaiku.Config.invalidate();
+        Config.invalidate();
         boolean[] started = {false}; List<String> fetched = new ArrayList<>();
         try {
             List<List<String>> ran = fakeMachine(ModelServer.Os.linux, started, fetched);
-            org.codezaiku.Config.set("CODEZAIKU_DRIVE", "http://elsewhere:8211");   // a drive the person had set, to be put back on uninstall
+            Config.set("CODEZAIKU_DRIVE", "http://elsewhere:8211");   // a drive the person had set, to be put back on uninstall
             assertTrue(ModelServer.offer().startsWith("Serve gpt-oss-20b on this machine on demand (CUDA in Docker): it downloads once (about 14 GB)"), ModelServer.offer());
             var out = new ByteArrayOutputStream();
             String r = ModelServer.install(null, "all", 20, false, new PrintStream(out, true));
@@ -109,19 +115,19 @@ class ModelServerTest {
             assertTrue(Files.isExecutable(dir.resolve("run.sh")));
             assertTrue(Files.readString(home.resolve(".config/systemd/user/codezaiku-model.service")).contains("--listen 127.0.0.1:8211"));
             assertTrue(ran.stream().anyMatch(c -> c.equals(List.of("systemctl", "--user", "enable", "--now", "codezaiku-model"))), ran.toString());
-            assertEquals("http://127.0.0.1:8211", org.codezaiku.Config.get("CODEZAIKU_DRIVE"));
-            assertEquals("gpt-oss-20b", org.codezaiku.Config.get("CODEZAIKU_MODEL"));
+            assertEquals("http://127.0.0.1:8211", Config.get("CODEZAIKU_DRIVE"));
+            assertEquals("gpt-oss-20b", Config.get("CODEZAIKU_MODEL"));
             ModelServer.health = base -> false;
             String u = ModelServer.uninstall();
             assertTrue(u.contains("the drive is back to http://elsewhere:8211"), u);
-            assertEquals("http://elsewhere:8211", org.codezaiku.Config.get("CODEZAIKU_DRIVE"));
+            assertEquals("http://elsewhere:8211", Config.get("CODEZAIKU_DRIVE"));
             assertFalse(Files.exists(ModelServer.dir()));
             ModelServer.health = base -> true;
             assertEquals("local-model", ModelServer.install(null, "all", 20, false, new PrintStream(new ByteArrayOutputStream())));
             assertTrue(ModelServer.offer().startsWith("A model proxy already answers"));
         } finally {
             System.setProperty("user.home", realHome);
-            org.codezaiku.Config.invalidate();
+            Config.invalidate();
         }
     }
 
@@ -129,7 +135,7 @@ class ModelServerTest {
     void onMacOsInstallFetchesTheMetalBuildSizesByUnifiedMemoryAndLoadsALaunchAgent(@TempDir Path home) throws Exception {
         String realHome = System.getProperty("user.home");
         System.setProperty("user.home", home.toString());
-        org.codezaiku.Config.invalidate();
+        Config.invalidate();
         boolean[] started = {false}; List<String> fetched = new ArrayList<>();
         try {
             List<List<String>> ran = fakeMachine(ModelServer.Os.macos, started, fetched);
@@ -145,10 +151,10 @@ class ModelServerTest {
             Path plist = home.resolve("Library/LaunchAgents/org.codezaiku.model.plist");
             assertTrue(Files.readString(plist).contains("<string>org.codezaiku.model</string>"));
             assertTrue(ran.stream().anyMatch(c -> c.size() >= 4 && c.get(0).equals("launchctl") && c.get(1).equals("bootstrap") && c.get(3).equals(plist.toString())), ran.toString());
-            assertEquals("http://127.0.0.1:8211", org.codezaiku.Config.get("CODEZAIKU_DRIVE"));
+            assertEquals("http://127.0.0.1:8211", Config.get("CODEZAIKU_DRIVE"));
         } finally {
             System.setProperty("user.home", realHome);
-            org.codezaiku.Config.invalidate();
+            Config.invalidate();
         }
     }
 
@@ -156,11 +162,11 @@ class ModelServerTest {
     void onWindowsInstallFetchesTheVulkanBuildSizesByRamWithoutAnNvidiaCardAndRegistersALogonTask(@TempDir Path home) throws Exception {
         String realHome = System.getProperty("user.home");
         System.setProperty("user.home", home.toString());
-        org.codezaiku.Config.invalidate();
+        Config.invalidate();
         boolean[] started = {false}; List<String> fetched = new ArrayList<>();
         try {
             List<List<String>> ran = fakeMachine(ModelServer.Os.windows, started, fetched);
-            org.junit.jupiter.api.Assumptions.assumeTrue(System.getProperty("os.arch", "").contains("64") && !System.getProperty("os.arch", "").contains("aarch"), "the Windows path is x64");
+            Assumptions.assumeTrue(System.getProperty("os.arch", "").contains("64") && !System.getProperty("os.arch", "").contains("aarch"), "the Windows path is x64");
             assertEquals(6, (int) ModelServer.budgetGb(), "half of 13 GB RAM when no NVIDIA card answers");
             assertTrue(ModelServer.offer().startsWith("Serve gemma-4-e4b on this machine on demand (Vulkan)"), ModelServer.offer());
             String r = ModelServer.install(null, "all", 20, false, new PrintStream(new ByteArrayOutputStream()));
@@ -173,10 +179,10 @@ class ModelServerTest {
             assertTrue(Files.readString(dir.resolve("start.ps1")).contains("Start-Process -FilePath '" + dir.resolve("llama-swap.exe") + "'"));
             assertTrue(ran.stream().anyMatch(c -> c.get(0).equals("schtasks") && c.contains("/create") && c.contains("CodeZaikuModel") && c.contains("onlogon")), ran.toString());
             assertTrue(ran.stream().anyMatch(c -> c.get(0).equals("powershell") && c.contains("-File") && c.contains(dir.resolve("start.ps1").toString())), "started now, detached: " + ran);
-            assertEquals("http://127.0.0.1:8211", org.codezaiku.Config.get("CODEZAIKU_DRIVE"));
+            assertEquals("http://127.0.0.1:8211", Config.get("CODEZAIKU_DRIVE"));
         } finally {
             System.setProperty("user.home", realHome);
-            org.codezaiku.Config.invalidate();
+            Config.invalidate();
         }
     }
 
@@ -184,7 +190,7 @@ class ModelServerTest {
     void withoutDockerOnLinuxItSaysWhy() {
         ModelServer.os = ModelServer.Os.linux;
         ModelServer.health = base -> false;
-        ModelServer.runner = cmd -> { throw new java.io.IOException("docker: not found"); };
+        ModelServer.runner = cmd -> { throw new IOException("docker: not found"); };
         assertTrue(ModelServer.unsupported().contains("docker"), ModelServer.unsupported());
         assertNull(ModelServer.offer());
         ModelServer.runner = cmd -> cmd.get(0).equals("docker") ? new ModelServer.Result(0, "map[runc:{...}]") : new ModelServer.Result(0, "16380");
@@ -195,7 +201,7 @@ class ModelServerTest {
     void aDownloadThatDoesNotMatchItsRecordedHashIsRefusedAndDeleted(@TempDir Path home) throws Exception {
         String realHome = System.getProperty("user.home");
         System.setProperty("user.home", home.toString());
-        org.codezaiku.Config.invalidate();
+        Config.invalidate();
         boolean[] started = {false}; List<String> fetched = new ArrayList<>();
         try {
             fakeMachine(ModelServer.Os.linux, started, fetched);
@@ -203,10 +209,10 @@ class ModelServerTest {
             String r = ModelServer.install(null, "all", 20, false, new PrintStream(new ByteArrayOutputStream()));
             assertTrue(r.startsWith("!checksum mismatch for gpt-oss-20b-F16.gguf"), r);
             assertFalse(Files.exists(home.resolve("models/gpt-oss-20b-F16.gguf")), "nothing kept");
-            assertNull(org.codezaiku.Config.get("CODEZAIKU_DRIVE"), "the drive was not touched");
+            assertNull(Config.get("CODEZAIKU_DRIVE"), "the drive was not touched");
         } finally {
             System.setProperty("user.home", realHome);
-            org.codezaiku.Config.invalidate();
+            Config.invalidate();
         }
     }
 
@@ -214,7 +220,7 @@ class ModelServerTest {
     void uninstallRefusesWhileTheOtherProductStillPointsAtTheProxy(@TempDir Path home) throws Exception {
         String realHome = System.getProperty("user.home");
         System.setProperty("user.home", home.toString());
-        org.codezaiku.Config.invalidate();
+        Config.invalidate();
         try {
             ModelServer.os = ModelServer.Os.linux;
             ModelServer.runner = cmd -> new ModelServer.Result(0, "");
@@ -227,7 +233,7 @@ class ModelServerTest {
             assertFalse(ModelServer.uninstall(true).startsWith("!"), "forced");
         } finally {
             System.setProperty("user.home", realHome);
-            org.codezaiku.Config.invalidate();
+            Config.invalidate();
         }
     }
 
@@ -248,7 +254,7 @@ class ModelServerTest {
     void checkReadsARateLimitAsUncheckedNotGone() {
         ModelServer.os = ModelServer.Os.linux;
         ModelServer.checkBackoffMs = 0;
-        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var calls = new AtomicInteger();
         ModelServer.runner = cmd -> { String u = cmd.get(cmd.size() - 1); if (u.contains("gemma-4-E2B")) calls.incrementAndGet(); return new ModelServer.Result(0, u.contains("gemma-4-E2B") ? "429" : "200"); };
         var out = new ByteArrayOutputStream();
         assertEquals(0, ModelServer.check(new PrintStream(out, true)), "a 429 is not a missing file: the release gate does not fail on it");

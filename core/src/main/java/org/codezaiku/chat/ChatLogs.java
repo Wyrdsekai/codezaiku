@@ -8,6 +8,7 @@ import java.util.Locale;
 
 import org.slf4j.LoggerFactory;
 
+import org.slf4j.Logger;
 /**
  * Chat's logging: quiet screen, complete file.
  *
@@ -47,7 +48,7 @@ final class ChatLogs {
         try {
             if (!(LoggerFactory.getILoggerFactory() instanceof ch.qos.logback.classic.LoggerContext lc)) return;
             this.ctx = lc;
-            var root = lc.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+            var root = lc.getLogger(Logger.ROOT_LOGGER_NAME);
 
             // The file first, so nothing is lost even if the console part fails.
             Files.createDirectories(logDir);
@@ -81,7 +82,7 @@ final class ChatLogs {
         if (ctx == null) return "logging is not adjustable with this backend";
         String l = level == null ? "" : level.strip().toUpperCase(Locale.ROOT);
         if (!l.matches("OFF|ERROR|WARN|INFO|DEBUG")) return null;
-        var root = ctx.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        var root = ctx.getLogger(Logger.ROOT_LOGGER_NAME);
         var console = root.getAppender(CONSOLE_APPENDER);
         if (console == null) return "no console appender to adjust";
         // Root only ever LOWERS (debug needs the events to exist); it never rises above INFO, or

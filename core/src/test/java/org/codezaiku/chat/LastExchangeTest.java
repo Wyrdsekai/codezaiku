@@ -8,6 +8,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import org.junit.jupiter.api.AfterEach;
 /** The next turn sees the previous reply, so "do everything but 7" refers to a list the model has in front of it. */
 class LastExchangeTest {
 
@@ -19,7 +20,7 @@ class LastExchangeTest {
         Files.createDirectories(root.resolve(".codezaiku"));
         return ChatSession.start(root, "test");
     }
-    @org.junit.jupiter.api.AfterEach void home() { System.setProperty("user.home", REAL_HOME); }
+    @AfterEach void home() { System.setProperty("user.home", REAL_HOME); }
 
     @Test
     void thePreviousAskAndReplyAreInTheNextTurnsContext(@TempDir Path root) throws Exception {

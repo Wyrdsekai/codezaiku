@@ -10,6 +10,7 @@ import java.util.stream.Stream;
 import org.codezaiku.shape.ProjectFacts;
 import org.codezaiku.exec.Shell;
 
+import java.io.File;
 /**
  * The drive gate's cheap, model-blind "are the project's own tests GREEN right now?" check: resolve the
  * real (split-brain-safe) work dir + the stack's test command from {@link org.codezaiku.shape.ProjectFacts}
@@ -187,7 +188,7 @@ public final class ProjectTests {
             // turning a passing suite into testsPassed=0 / status=failed. ProcessBuilder's directory is
             // translated by the launcher, which is why the model's own ShellTool never hit this.
             Process p = Shell.pb("( " + command + " )")
-                    .directory(new java.io.File(cwd))
+                    .directory(new File(cwd))
                     .redirectErrorStream(true).start();
             String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             boolean done = p.waitFor(RUN_BUDGET_MS + 20_000L, TimeUnit.MILLISECONDS);

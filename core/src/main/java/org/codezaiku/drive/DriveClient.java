@@ -19,6 +19,19 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Locale;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import java.util.function.IntConsumer;
+import org.codezaiku.drive.aws.AwsCredentials;
+import org.codezaiku.drive.aws.Bedrock;
 /**
  * Thin client over the llama.cpp drive at :8200 (OpenAI-compatible).
  *
@@ -54,10 +67,16 @@ public final class DriveClient {
             .build();
 
     public DriveClient(String baseUrl, String model) {
-        this.baseUrl = org.codezaiku.Config.driveBase(baseUrl);   // a --drive flag gets the same treatment as the setting
+        this.baseUrl = Config.driveBase(baseUrl);   // a --drive flag gets the same treatment as the setting
         this.model = model;
         this.http = SHARED_HTTP;
+        // drive = bedrock: the person's own AWS account, through Converse, instead of an OpenAI-style server
+        this.bedrock = Bedrock.is(this.baseUrl)
+                ? new Bedrock(Bedrock.settings(this.baseUrl, Config::get, System.getenv())) : null;
     }
+
+    /** Amazon Bedrock behind this client, or null for every other drive. */
+    private final Bedrock bedrock;
 
     /**
      * Bearer credential for the endpoint, or null when none is configured.
@@ -115,14 +134,14 @@ public final class DriveClient {
     /** Process-lifetime token counters, for /cost on metered drives. Static on purpose: a chat
      *  session swaps DriveClient instances on /model, and the person's question is "what has this
      *  SESSION spent", not "this client object". */
-    public static final java.util.concurrent.atomic.AtomicLong SESSION_PROMPT_TOKENS =
-            new java.util.concurrent.atomic.AtomicLong();
+    public static final AtomicLong SESSION_PROMPT_TOKENS =
+            new AtomicLong();
     /**
      * Who wants to know how full the context is after each model call: prompt plus completion tokens of the call
      * just made. Per thread, because an ACP server runs several sessions at once and each one's loop makes its
      * calls on its own thread; a static sink would report one session's usage to another.
      */
-    public static final ThreadLocal<java.util.function.IntConsumer> USAGE_SINK = new ThreadLocal<>();
+    public static final ThreadLocal<IntConsumer> USAGE_SINK = new ThreadLocal<>();
 
     /** The server's own count of the last request's prompt tokens, 0 until a reply carried one. The loop calibrates its estimate on it. */
     private volatile int lastPromptTokens = 0;
@@ -133,15 +152,15 @@ public final class DriveClient {
     public int lastCompletionTokens() { return lastCompletionTokens; }
     public String lastFinishReason() { return lastFinishReason; }
 
-    public static final java.util.concurrent.atomic.AtomicLong SESSION_COMPLETION_TOKENS =
-            new java.util.concurrent.atomic.AtomicLong();
+    public static final AtomicLong SESSION_COMPLETION_TOKENS =
+            new AtomicLong();
 
     /** Per-request HTTP timeout. Five minutes suits every drive we had — until a 744B with
      *  CPU-resident experts needed 10-20 min per long generation and every call "failed" at
      *  exactly 300s (measured 2026-08-31: 8 identical 5-minute-spaced failures ended the run).
      *  CODEZAIKU_DRIVE_TIMEOUT (seconds) raises it for slow drives. */
     private static Duration driveTimeout() {
-        int s = org.codezaiku.Config.getInt("CODEZAIKU_DRIVE_TIMEOUT", 300);
+        int s = Config.getInt("CODEZAIKU_DRIVE_TIMEOUT", 300);
         return Duration.ofSeconds(Math.max(30, s));
     }
 
@@ -153,8 +172,10 @@ public final class DriveClient {
     public int contextWindow() {
         // An explicit setting wins: the operator knows what they launched the server with, and a
         // server's self-report can be the model's maximum rather than the context it was started with.
-        int forced = org.codezaiku.Config.getInt("CODEZAIKU_CTX", 0);
+        int forced = Config.getInt("CODEZAIKU_CTX", 0);
         if (forced > 0) return forced;
+        // Bedrock has no way to ask a model for its window: a setting, or what is known of the model's family
+        if (bedrock != null) return Bedrock.contextWindow(model, Config.getInt("CODEZAIKU_BEDROCK_CONTEXT", 0));
 
         Integer n = fromLlamaCppProps();
         if (n != null) return n;
@@ -213,6 +234,7 @@ public final class DriveClient {
 
     /** Did anything answer at all? Any HTTP status counts — a 404 is a live server with another API. */
     private boolean reachable() {
+        if (bedrock != null) { try { AwsCredentials.get(bedrock.settings().profile()); return true; } catch (RuntimeException e) { return false; } }
         for (String path : new String[]{"/v1/models", "/"}) {
             try {
                 HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + path)))
@@ -235,7 +257,7 @@ public final class DriveClient {
             // server's own properties are at /upstream/<model>/props (every `model serve install` sits behind llama-swap,
             // and the fallback of 8192 had the loop compacting at a quarter of the real window, 2026-09-14)
             if (model != null && !model.isBlank()) {
-                n = propsAt(baseUrl + "/upstream/" + java.net.URLEncoder.encode(model, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20") + "/props");
+                n = propsAt(baseUrl + "/upstream/" + URLEncoder.encode(model, StandardCharsets.UTF_8).replace("+", "%20") + "/props");
                 if (n != null) { log.info("context window {} (from llama-swap's upstream /props for {})", n, model); return n; }
             }
             return null;
@@ -298,10 +320,10 @@ public final class DriveClient {
      * message shape the non-streaming path returns, tool-call deltas included, so downstream code
      * cannot tell which path ran.
      */
-    private static volatile java.util.function.Consumer<String> onDelta;
-    private static volatile java.util.function.Consumer<String> onThink;
+    private static volatile Consumer<String> onDelta;
+    private static volatile Consumer<String> onThink;
 
-    public static void streamTo(java.util.function.Consumer<String> sink) { streamTo(sink, sink); }
+    public static void streamTo(Consumer<String> sink) { streamTo(sink, sink); }
 
     /**
      * Separate channels for the reply and the thinking. They are different voices: the reply is the
@@ -310,8 +332,8 @@ public final class DriveClient {
      * renderer decides how the inner voice looks (dimmed, in a terminal); this layer only keeps the
      * two from arriving indistinguishable.
      */
-    public static void streamTo(java.util.function.Consumer<String> sink,
-                                java.util.function.Consumer<String> thinking) {
+    public static void streamTo(Consumer<String> sink,
+                                Consumer<String> thinking) {
         onDelta = sink;
         onThink = sink == null ? null : thinking;
     }
@@ -319,7 +341,7 @@ public final class DriveClient {
     private static boolean streamingOn() {
         // Off unless asked for, as in ResearchZosho (decided 2026-09-18). The status line says what is happening
         // while the person waits; the answer arrives whole.
-        String v = org.codezaiku.Config.get("CODEZAIKU_STREAM", "");
+        String v = Config.get("CODEZAIKU_STREAM", "");
         return onDelta != null && !v.isBlank() && !v.equalsIgnoreCase("off")
                 && !v.equalsIgnoreCase("false") && !v.equals("0");
     }
@@ -376,7 +398,7 @@ public final class DriveClient {
         // CODEZAIKU_TEMP=none omits the field entirely — claude-fable-5 400s on ANY temperature
         // ("deprecated for this model", measured 2026-08-29); a number overrides the caller's
         // choice for engines whose default sampling is better left alone.
-        String tempCfg = org.codezaiku.Config.get("CODEZAIKU_TEMP");
+        String tempCfg = Config.get("CODEZAIKU_TEMP");
         if ("none".equalsIgnoreCase(tempCfg)) {
             // omitted
         } else if (tempCfg != null && !tempCfg.isBlank()) {
@@ -390,10 +412,10 @@ public final class DriveClient {
         // CONTAINER, but an engine with no such flag (FreeToken 0.1.2) leaves a reasoning model
         // thinking at full length through every loop turn — measured 2026-08-29: the same weights
         // spent a 25-turn budget mid-write. An explicit noThink turn still wins the merge.
-        String tk = org.codezaiku.Config.get("CODEZAIKU_DRIVE_TEMPLATE_KWARGS");
+        String tk = Config.get("CODEZAIKU_DRIVE_TEMPLATE_KWARGS");
         if (tk != null && !tk.isBlank()) {
             try {
-                com.fasterxml.jackson.databind.JsonNode kw = json.readTree(tk);
+                JsonNode kw = json.readTree(tk);
                 if (kw.isObject()) body.set("chat_template_kwargs", kw.deepCopy());
             } catch (Exception e) {
                 throw new IllegalStateException(
@@ -405,6 +427,12 @@ public final class DriveClient {
                     ? (ObjectNode) body.get("chat_template_kwargs")
                     : body.putObject("chat_template_kwargs");
             kw.put("enable_thinking", false);
+        }
+        if (bedrock != null) {
+            // Converse is asked for the whole reply at once: a chat shows it when it arrives, not as it is written
+            log.info("drive → bedrock {} in {}: {} msgs, max_tokens={}, tools={}, tool_choice={}", model, bedrock.settings().region(), messages.size(), maxTokens, tools == null ? 0 : tools.size(), toolChoice);
+            try { return accept(bedrock.chat(model, body, driveTimeout()), "bedrock"); }
+            catch (Bedrock.Refused | AwsCredentials.Unavailable e) { throw new IllegalStateException(e.getMessage(), e); }
         }
         body.put("stream", streamingOn());
         try {
@@ -451,11 +479,21 @@ public final class DriveClient {
                 }
                 throw new IllegalStateException("drive HTTP " + resp.statusCode() + ": " + resp.body());
             }
-            JsonNode parsed = json.readTree(resp.body());
+            return accept(json.readTree(resp.body()), resp.body());
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("chat() failed against " + baseUrl, e);
+        }
+    }
+
+    /** A chat completion taken in: its message handed back, how it ended kept, and what it cost counted. */
+    private ObjectNode accept(JsonNode parsed, String raw) {
+        {
             JsonNode msg = parsed.path("choices").path(0).path("message");
             lastFinishReason = parsed.path("choices").path(0).path("finish_reason").asText("");
             if (!msg.isObject()) {
-                throw new IllegalStateException("no choices[0].message in response: " + resp.body());
+                throw new IllegalStateException("no choices[0].message in response: " + raw);
             }
             // Usage, when the server reports it. On a metered drive this line IS the meter:
             // grep 'usage ←' over a run log and sum. Local llama.cpp reports it too — harmless.
@@ -475,10 +513,6 @@ public final class DriveClient {
                 }
             }
             return (ObjectNode) msg;
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("chat() failed against " + baseUrl, e);
         }
     }
 
@@ -498,6 +532,13 @@ public final class DriveClient {
         body.put("temperature", 0.0);
         body.putObject("chat_template_kwargs").put("enable_thinking", false);
         body.put("stream", false);
+        if (bedrock != null) {
+            try {
+                ObjectNode msg = accept(bedrock.chat(model, body, driveTimeout()), "bedrock");
+                String content = msg.path("content").asText("");
+                return content.isBlank() ? msg.path("reasoning_content").asText("") : content;
+            } catch (RuntimeException e) { log.warn("classify() failed against bedrock: {}", e.getMessage()); return ""; }
+        }
         try {
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
                     .timeout(driveTimeout()).header("Content-Type", "application/json")
@@ -671,22 +712,22 @@ public final class DriveClient {
                     .timeout(driveTimeout())
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
-            HttpResponse<java.io.InputStream> resp =
+            HttpResponse<InputStream> resp =
                     http.send(req, HttpResponse.BodyHandlers.ofInputStream());
             if (resp.statusCode() != 200) return null;
             // The request timeout ends when the headers arrive; after that a body read waits forever. A stream that
             // sends nothing for a whole drive timeout is dead: the watchdog closes it, the read throws, and the turn
             // falls back to the plain request.
-            final java.io.InputStream body = resp.body();
+            final InputStream body = resp.body();
             final long idleNanos = idle.toNanos();
-            final java.util.concurrent.atomic.AtomicLong lastEvent = new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
-            final java.util.concurrent.atomic.AtomicBoolean over = new java.util.concurrent.atomic.AtomicBoolean(false);
+            final AtomicLong lastEvent = new AtomicLong(System.nanoTime());
+            final AtomicBoolean over = new AtomicBoolean(false);
             Thread watchdog = new Thread(() -> {
                 while (!over.get()) {
                     try { Thread.sleep(Math.min(1000L, Math.max(50L, idleNanos / 4_000_000L))); } catch (InterruptedException e) { return; }
                     if (!over.get() && System.nanoTime() - lastEvent.get() > idleNanos) {
                         log.warn("stream idle for {} ms, closing it", idle.toMillis());
-                        try { body.close(); } catch (java.io.IOException ignored) { }
+                        try { body.close(); } catch (IOException ignored) { }
                         return;
                     }
                 }
@@ -694,13 +735,13 @@ public final class DriveClient {
             watchdog.setDaemon(true);
             watchdog.start();
             boolean finished = false;
-            try (var reader = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(body, java.nio.charset.StandardCharsets.UTF_8))) {
+            try (var reader = new BufferedReader(
+                    new InputStreamReader(body, StandardCharsets.UTF_8))) {
                 var content = new StringBuilder();
-                var toolNames = new java.util.TreeMap<Integer, String>();
-                var toolIds = new java.util.TreeMap<Integer, String>();
-                var toolArgs = new java.util.TreeMap<Integer, StringBuilder>();
-                var summaries = new java.util.TreeMap<Integer, SummaryStream>();
+                var toolNames = new TreeMap<Integer, String>();
+                var toolIds = new TreeMap<Integer, String>();
+                var toolArgs = new TreeMap<Integer, StringBuilder>();
+                var summaries = new TreeMap<Integer, SummaryStream>();
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (!line.startsWith("data:")) continue;
@@ -751,7 +792,7 @@ public final class DriveClient {
                 }
                 // A connection that drops mid-answer ends the read the same way a finished stream does. Without this
                 // check half a tool call came back as a whole message, and its cut-off arguments went to the tool.
-                if (!finished) throw new java.io.IOException("the stream ended with no finish_reason and no [DONE] after " + content.length() + " chars");
+                if (!finished) throw new IOException("the stream ended with no finish_reason and no [DONE] after " + content.length() + " chars");
                 ObjectNode msg = json.createObjectNode();
                 msg.put("role", "assistant");
                 msg.put("content", content.toString());
@@ -789,14 +830,14 @@ public final class DriveClient {
      */
     static final class SummaryStream {
         private final String needle;
-        private final java.util.function.Consumer<String> sink;
+        private final Consumer<String> sink;
         private final StringBuilder window = new StringBuilder();
         private int state = 0;         // 0=looking for key, 1=looking for opening quote, 2=in value, 3=done
         private boolean escaping = false;
         private int uLeft = 0;
         private final StringBuilder uHex = new StringBuilder();
 
-        SummaryStream(String field, java.util.function.Consumer<String> sink) {
+        SummaryStream(String field, Consumer<String> sink) {
             this.needle = "\"" + field + "\"";
             this.sink = sink;
         }

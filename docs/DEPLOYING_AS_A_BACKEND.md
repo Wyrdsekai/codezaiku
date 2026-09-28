@@ -402,6 +402,53 @@ CodeZaiku's.
 CodeZaiku bounds a run by turns (`--max-turns`, default 40), not by wallclock. If your host enforces a
 wallclock limit, hard-kill with SIGTERM — that path is handled and still reports.
 
+### Updating CodeZaiku from your program
+
+A host that keeps CodeZaiku up to date runs its updater and reads a JSON answer instead of the words:
+
+```bash
+codezaiku update --json          # where it stands; changes nothing
+codezaiku update now --json      # update to the latest release (or: update now 0.3.11 --json)
+```
+
+`update --json` prints one document:
+
+```json
+{"program":"codezaiku","installed":"0.3.10","running":"0.3.10","latest":"0.3.11","newer":true,
+ "mode":"check","root":"/home/user/.local/share/codezaiku","canUpdate":true,"updating":false}
+```
+
+`installed` is the version whose files are in place, which another program may have changed since
+this one started; `running` is the one answering. `canUpdate` is false for a run from the source tree,
+a package manager's install and Windows. `updating` is true while another update runs.
+
+`update now --json` prints one document on stdout, and its progress lines on stderr:
+
+```json
+{"result":"updated","code":0,"from":"0.3.10","to":"0.3.11","finishesAfterExit":false,"note":"CodeZaiku was updated from 0.3.10 to 0.3.11. ..."}
+```
+
+| exit code | `result` | what it means |
+|---|---|---|
+| 0 | `updated` | the new version is in place; the next start runs it |
+| 0 | `current` | nothing to do: the files are already that version or newer |
+| 75 | `busy` | another program is updating CodeZaiku now; nothing was changed. Ask again later |
+| 3 | `not-here` | this install cannot update itself: a run from the source tree, a Debian package (apt updates it), or Windows (run the installer again) |
+| 1 | `failed` | not updated; `note` says why, and the installed version stays |
+| 2 | — | a usage mistake |
+
+The update holds a lock file, `update.lock` in CodeZaiku's state folder (`~/.codezaiku`), from its
+start to its end, and checks the version again under the lock against the files. So two programs that
+both update CodeZaiku never swap files over each other: the second gets `busy`, or `current` when the
+first has finished. `finishesAfterExit` is always false for CodeZaiku: it swaps its files before it
+ends, or not at all.
+
+These are the same fields and codes that ResearchZosho's updater gives (`researchzosho update --json`,
+`researchzosho update now --json`, from ResearchZosho 0.5.0), so one reader serves both. Each program's
+own updater replaces its files: with `--json`, `codezaiku update now` updates CodeZaiku alone, and a
+host that keeps ResearchZosho up to date asks ResearchZosho's updater itself. Without `--json`, for a
+person, `codezaiku update now` asks ResearchZosho's updater after its own.
+
 ### What to log
 
 `stderr` carries the narration (task mode, conventions, library size, per-turn progress). Capture it

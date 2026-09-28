@@ -12,6 +12,8 @@ import org.jline.reader.UserInterruptException;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 
+import java.lang.reflect.Proxy;
+import java.nio.file.Path;
 /**
  * The terminal seam.
  *
@@ -132,7 +134,7 @@ public interface ChatIo extends AutoCloseable {
             // week's prompts, which little-coder ships and which costs one variable here.
             this.reader = LineReaderBuilder.builder().terminal(terminal)
                     .variable(LineReader.HISTORY_FILE,
-                            java.nio.file.Path.of(System.getProperty("user.home"),
+                            Path.of(System.getProperty("user.home"),
                                     ".codezaiku", "chat", "history"))
                     .build();
         }
@@ -241,7 +243,7 @@ public interface ChatIo extends AutoCloseable {
                 Class<?> sig = Class.forName("sun.misc.Signal");
                 Class<?> sigHandler = Class.forName("sun.misc.SignalHandler");
                 Object intSig = sig.getConstructor(String.class).newInstance("INT");
-                Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+                Object proxy = Proxy.newProxyInstance(
                         getClass().getClassLoader(), new Class<?>[]{sigHandler},
                         (pr, m, a) -> { if ("handle".equals(m.getName())) handler.run(); return null; });
                 Object previous = sig.getMethod("handle", sig, sigHandler)

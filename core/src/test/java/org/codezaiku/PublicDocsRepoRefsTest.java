@@ -13,6 +13,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.codezaiku.testsupport.PublicDocs;
 /**
  * Two things that are invisible until someone tries to use the release.
  *
@@ -42,7 +43,7 @@ class PublicDocsRepoRefsTest {
 
     private static List<Path> shippedText() throws Exception {
         List<Path> out = new ArrayList<>();
-        out.addAll(org.codezaiku.testsupport.PublicDocs.files());
+        out.addAll(PublicDocs.files());
         for (Path root : List.of(Path.of("../.github"), Path.of("../packaging"))) {
             if (!Files.isDirectory(root)) continue;
             try (Stream<Path> s = Files.walk(root)) {

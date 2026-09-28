@@ -5,6 +5,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import org.codezaiku.Config;
 
+import java.util.concurrent.TimeUnit;
 /**
  * Env-gated bridge that routes the file + shell tools INTO a Docker container instead of the host
  * filesystem, so CodeZaiku's loop can operate on a Terminal-Bench (or any) task container from the host.
@@ -97,7 +98,7 @@ public final class ContainerExec {
             });
             feed.setDaemon(true);
             feed.start();
-            if (!proc.waitFor(Math.max(1, timeoutSeconds), java.util.concurrent.TimeUnit.SECONDS)) {
+            if (!proc.waitFor(Math.max(1, timeoutSeconds), TimeUnit.SECONDS)) {
                 proc.destroyForcibly();
                 drain.join(1000);
                 return new Result(124, buf.toString(StandardCharsets.UTF_8) + "\n[timed out after " + timeoutSeconds + "s]");

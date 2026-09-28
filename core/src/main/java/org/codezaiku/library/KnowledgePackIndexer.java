@@ -23,6 +23,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import org.apache.lucene.index.Term;
 /**
  * Indexes the EVERGREEN knowledge-packs (conceptual patterns, language gotchas, ecosystem
  * anti-patterns) into the Lucene library so the push surfaces them. Only version-INDEPENDENT idiom
@@ -54,7 +55,7 @@ public final class KnowledgePackIndexer {
         try (IndexWriter w = new IndexWriter(dir, cfg);
              Stream<Path> walk = Files.walk(root)) {
             // Idempotent re-index: drop the previous evergreen docs before re-adding (no duplicates).
-            w.deleteDocuments(new org.apache.lucene.index.Term("trust_tier", "evergreen-idiom"));
+            w.deleteDocuments(new Term("trust_tier", "evergreen-idiom"));
             List<Path> files = walk.filter(p -> p.toString().endsWith(".md"))
                     .filter(Files::isRegularFile).filter(include).toList();
             for (Path f : files) total += indexFile(w, root, f);

@@ -10,6 +10,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import org.codezaiku.tools.ToolRegistry;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Collections;
+import java.util.Optional;
+import java.util.Set;
+import java.util.regex.Pattern;
 /**
  * Ask the person, in the moment, instead of making them choose a mode up front.
  *
@@ -63,11 +71,11 @@ public final class ChatConsent implements ToolRegistry.Listener {
 
         @Override public String toString() { return name().toLowerCase(Locale.ROOT).replace('_', '-'); }
 
-        public static java.util.Optional<Mode> parse(String s) {
-            if (s == null) return java.util.Optional.empty();
+        public static Optional<Mode> parse(String s) {
+            if (s == null) return Optional.empty();
             String k = s.trim().toUpperCase(Locale.ROOT).replace('-', '_');
-            for (Mode m : values()) if (m.name().equals(k)) return java.util.Optional.of(m);
-            return java.util.Optional.empty();
+            for (Mode m : values()) if (m.name().equals(k)) return Optional.of(m);
+            return Optional.empty();
         }
 
         /** Unknown values fall back to ASK — a typo must never widen what the agent may do. */
@@ -83,7 +91,7 @@ public final class ChatConsent implements ToolRegistry.Listener {
          *                needing to go and look is the reason someone reaches for a plan mode.
          * @return the answer
          */
-        Answer ask(String what, java.util.List<String> preview);
+        Answer ask(String what, List<String> preview);
     }
 
     public enum Answer {
@@ -105,8 +113,8 @@ public final class ChatConsent implements ToolRegistry.Listener {
     private final Map<String, Boolean> standing = new ConcurrentHashMap<>();
     private final Map<String, Boolean> project = new ConcurrentHashMap<>();
     private final Map<String, Boolean> global = new ConcurrentHashMap<>();
-    private final java.nio.file.Path projectFile;
-    private final java.nio.file.Path globalFile;
+    private final Path projectFile;
+    private final Path globalFile;
     private Mode mode;
 
     public ChatConsent(Mode mode, Prompter prompter) {
@@ -123,7 +131,7 @@ public final class ChatConsent implements ToolRegistry.Listener {
      * to allow. Nothing an untrusted tree ships may widen what the agent is permitted to do.
      */
     public ChatConsent(Mode mode, Prompter prompter,
-                       java.nio.file.Path projectFile, java.nio.file.Path globalFile) {
+                       Path projectFile, Path globalFile) {
         this.mode = mode;
         this.prompter = prompter;
         this.projectFile = projectFile;
@@ -144,7 +152,7 @@ public final class ChatConsent implements ToolRegistry.Listener {
         global.forEach((k, v) -> out.add((v ? "allow  " : "deny   ") + k + "   (global)"));
         project.forEach((k, v) -> out.add((v ? "allow  " : "deny   ") + k + "   (project)"));
         standing.forEach((k, v) -> out.add((v ? "allow  " : "deny   ") + k + "   (this session)"));
-        java.util.Collections.sort(out);
+        Collections.sort(out);
         return out;
     }
 
@@ -163,28 +171,28 @@ public final class ChatConsent implements ToolRegistry.Listener {
         if (scope == Scope.SESSION || file == null) return -1;
         target.putAll(standing);
         try {
-            java.nio.file.Files.createDirectories(file.getParent());
+            Files.createDirectories(file.getParent());
             var sb = new StringBuilder("# Standing consent answers (" + scope.name().toLowerCase(Locale.ROOT)
                     + ") — written by /trust, one per line. Delete a line to be asked again.\n");
             target.forEach((k, v) -> sb.append(v ? "allow " : "deny ").append(k).append('\n'));
-            java.nio.file.Files.writeString(file, sb.toString(), java.nio.charset.StandardCharsets.UTF_8);
+            Files.writeString(file, sb.toString(), StandardCharsets.UTF_8);
             return standing.size();
-        } catch (java.io.IOException e) {
+        } catch (IOException e) {
             return -1;
         }
     }
 
-    private static void loadInto(java.nio.file.Path file, Map<String, Boolean> into) {
-        if (file == null || !java.nio.file.Files.isRegularFile(file)) return;
+    private static void loadInto(Path file, Map<String, Boolean> into) {
+        if (file == null || !Files.isRegularFile(file)) return;
         try {
-            for (String l : java.nio.file.Files.readAllLines(file, java.nio.charset.StandardCharsets.UTF_8)) {
+            for (String l : Files.readAllLines(file, StandardCharsets.UTF_8)) {
                 String t = l.strip();
                 // Anything unrecognised is IGNORED, not guessed at: a malformed line in a consent
                 // file must never become an allowance.
                 if (t.startsWith("allow ")) into.put(t.substring(6).strip(), true);
                 else if (t.startsWith("deny ")) into.put(t.substring(5).strip(), false);
             }
-        } catch (java.io.IOException ignored) {
+        } catch (IOException ignored) {
             // Unreadable consent means "ask", which is the safe direction.
         }
     }
@@ -197,7 +205,7 @@ public final class ChatConsent implements ToolRegistry.Listener {
 
     /** The plan the person approved for the current turn, lowercased; "" when there is none. */
     private volatile String approvedPlan = "";
-    public void plan(String plan) { approvedPlan = plan == null ? "" : plan.toLowerCase(java.util.Locale.ROOT); }
+    public void plan(String plan) { approvedPlan = plan == null ? "" : plan.toLowerCase(Locale.ROOT); }
 
     /**
      * Yolo means "stop asking about edits and ordinary commands", not "do anything". Three kinds of command reach
@@ -205,16 +213,16 @@ public final class ChatConsent implements ToolRegistry.Listener {
      * still ask when the approved plan did not name them. One "always" covers that kind for the session. Decided
      * with the person on 2026-09-18 after a build ask quietly installed FastAPI and set out to write a server.
      */
-    static final java.util.regex.Pattern INSTALL = java.util.regex.Pattern.compile(
+    static final Pattern INSTALL = Pattern.compile(
             "\\b(pip3?|pipx|npm|pnpm|yarn|apt(-get)?|dnf|yum|brew|cargo|gem|conda|poetry|uv)\\s+(install|add|get|-S)\\b|\\bgo\\s+(install|get)\\b");
-    static final java.util.regex.Pattern SERVER = java.util.regex.Pattern.compile(
+    static final Pattern SERVER = Pattern.compile(
             "\\b(uvicorn|gunicorn|flask\\s+run|python3?\\s+-m\\s+http\\.server|npm\\s+(start|run\\s+dev)|docker\\s+(run|compose\\s+up)|docker-compose\\s+up|serve\\b|nohup\\b|systemctl\\s+start)");
-    static final java.util.regex.Pattern DOWNLOAD = java.util.regex.Pattern.compile("\\b(curl|wget)\\b");
+    static final Pattern DOWNLOAD = Pattern.compile("\\b(curl|wget)\\b");
 
     /** "install", "server", "download", or null for a command the plan need not cover. */
     static String riskyKind(String cmd) {
         if (cmd == null) return null;
-        String c = cmd.toLowerCase(java.util.Locale.ROOT);
+        String c = cmd.toLowerCase(Locale.ROOT);
         if (INSTALL.matcher(c).find()) return "install";
         if (SERVER.matcher(c).find()) return "server";
         if (DOWNLOAD.matcher(c).find()) return "download";
@@ -224,9 +232,9 @@ public final class ChatConsent implements ToolRegistry.Listener {
     /** Whether the approved plan names what the command does: any word of the command (3+ letters, not a flag) that the plan mentions. */
     static boolean inPlan(String plan, String cmd) {
         if (plan == null || plan.isBlank() || cmd == null) return false;
-        for (String w : cmd.toLowerCase(java.util.Locale.ROOT).split("[^a-z0-9._-]+")) {
+        for (String w : cmd.toLowerCase(Locale.ROOT).split("[^a-z0-9._-]+")) {
             if (w.length() < 2 || w.startsWith("-")) continue;      // 2, not 3: "d3" and "uv" are package names
-            if (java.util.Set.of("pip", "pip3", "npm", "apt", "apt-get", "brew", "install", "run", "python3", "python", "sudo", "curl", "wget", "http", "https",
+            if (Set.of("pip", "pip3", "npm", "apt", "apt-get", "brew", "install", "run", "python3", "python", "sudo", "curl", "wget", "http", "https",
                     "the", "and", "for", "cd", "ls", "sh", "rm", "mv", "cp", "in", "to", "of", "on", "up", "it", "is", "as", "at", "an", "or", "if").contains(w)) continue;
             if (plan.contains(w)) return true;
         }
@@ -322,7 +330,7 @@ public final class ChatConsent implements ToolRegistry.Listener {
             // first two words would let one "always" silently cover `mvn -q test && rm -rf /` —
             // the exact hole the per-command keying exists to close, reintroduced by forgetting
             // that a command can be more than one command. Found by reading a rendered prompt.
-            var heads = new java.util.ArrayList<String>();
+            var heads = new ArrayList<String>();
             for (String part : cmd.split(CHAIN)) {
                 String[] w = part.strip().split("\\s+");
                 if (w.length == 0 || w[0].isBlank()) continue;
@@ -377,8 +385,8 @@ public final class ChatConsent implements ToolRegistry.Listener {
     private static final String CHAIN = "&&|\\|\\||;|\\|";
 
     /** A real redirect, not an fd-dup like {@code 2>&1}. */
-    private static final java.util.regex.Pattern REDIRECT =
-            java.util.regex.Pattern.compile("(^|[^0-9<>&])>");
+    private static final Pattern REDIRECT =
+            Pattern.compile("(^|[^0-9<>&])>");
 
     /** The journal shares consent's judgement of what mutates — one classifier, two callers. */
     static boolean inspectsForJournal(JsonNode args) { return inspects(args); }

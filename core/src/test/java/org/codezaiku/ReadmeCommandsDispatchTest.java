@@ -13,6 +13,7 @@ import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.codezaiku.testsupport.PublicDocs;
 /**
  * Every `codezaiku ...` line in the README must be a command the dispatch actually accepts —
  * verb AND arity. `codezaiku code ...` was the README's first coding example for a long time
@@ -27,7 +28,7 @@ class ReadmeCommandsDispatchTest {
     private static final Path SRC = Path.of("src/main/java/org/codezaiku/FamiliarMain.java");
     /** Resolved rather than hardcoded: the export promotes README to the repository root. */
     private static Path readme() {
-        return org.codezaiku.testsupport.PublicDocs.page("README.md")
+        return PublicDocs.page("README.md")
                 .orElseThrow(() -> new IllegalStateException("README.md not found in either layout"));
     }
 

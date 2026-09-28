@@ -12,11 +12,21 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+import java.io.File;
+import java.io.UncheckedIOException;
+import java.security.NoSuchAlgorithmException;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
+import java.util.regex.Pattern;
+import org.codezaiku.research.LibraryBridge;
+import org.codezaiku.research.ResearchMemory;
 /**
  * {@code codezaiku install researchzosho}: the door from CodeZaiku to its sibling. Downloads the
  * ResearchZosho release for this platform, checks it against the release's own SHA256SUMS, puts the
  * command on the path, and hands over to {@code researchzosho setup}, which asks the few questions
- * that make a working library. If researchzosho is already installed, it goes straight to setup.
+ * that make a working library. If researchzosho is already installed, its own updater brings it up to
+ * date ({@link ResearchZoshoUpdate}) and then it goes to setup: CodeZaiku downloads ResearchZosho only
+ * where there is none yet.
  *
  * <p>The same rules as ResearchZosho's own one-line installers: the artifact and the checksums come
  * from the same release, a mismatch is refused, and only the version named or the latest is fetched.
@@ -33,7 +43,7 @@ public final class ResearchZoshoInstall {
     public static Path installed() {
         String path = System.getenv("PATH");
         if (path == null) return null;
-        for (String dir : path.split(java.io.File.pathSeparator)) {
+        for (String dir : path.split(File.pathSeparator)) {
             for (String name : windows() ? new String[]{"researchzosho.bat", "researchzosho.cmd"} : new String[]{"researchzosho"}) {
                 Path p = Path.of(dir, name);
                 if (Files.isRegularFile(p)) return p;
@@ -64,17 +74,21 @@ public final class ResearchZoshoInstall {
     /** The installed command's version ("0.1.2"), or null when none is installed or it does not say. */
     public static String installedVersion() {
         Path launcher = installed();
-        if (launcher == null) return null;
+        return launcher == null ? null : installedVersion(launcher);
+    }
+
+    /** The version {@code launcher --version} names, or null when it does not say. */
+    static String installedVersion(Path launcher) {
         try {
             Process p = new ProcessBuilder(launcher.toString(), "--version").redirectErrorStream(true).start();
             String o = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             p.waitFor();
-            var m = java.util.regex.Pattern.compile("researchzosho\\s+(\\d+\\.\\d+\\.\\d+)").matcher(o);
+            var m = Pattern.compile("researchzosho\\s+(\\d+\\.\\d+\\.\\d+)").matcher(o);
             return m.find() ? m.group(1) : null;
         } catch (Exception e) { return null; }
     }
 
-    static Path latestCache() { return org.codezaiku.Config.home().resolve("research").resolve("researchzosho-latest.txt"); }
+    static Path latestCache() { return Config.home().resolve("research").resolve("researchzosho-latest.txt"); }
     private static volatile boolean refreshing;
 
     /** The latest release's version, from a cache refreshed in the background at most once a day; null until known. Never blocks. */
@@ -106,28 +120,33 @@ public final class ResearchZoshoInstall {
     public static String updateNotice() {
         String have = installedVersion(), latest = latestCached();
         if (have == null || latest == null || compareVersions(latest, have) <= 0) return "";
-        return "ResearchZosho " + latest + " is available (installed: " + have + "). `codezaiku install researchzosho` updates it; the library and settings stay.";
+        return "ResearchZosho " + latest + " is available (installed: " + have + "). `codezaiku update now` has ResearchZosho's own updater install it; the library and settings stay.";
     }
 
     /** The latest release's version from GitHub, or null. */
     static String latestVersion() {
         try (InputStream in = new URL("https://api.github.com/repos/" + REPO + "/releases/latest").openStream()) {
             String body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-            var m = java.util.regex.Pattern.compile("\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"").matcher(body);
+            var m = Pattern.compile("\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"").matcher(body);
             return m.find() ? m.group(1) : null;
         } catch (IOException e) { return null; }
     }
 
-    /** Download, verify, unpack and put on the path. Returns the launcher. Throws with a plain reason. */
-    public static Path install(String version, Path prefix, String base, PrintStream out) throws IOException, InterruptedException {
+    /**
+     * Download, verify, unpack and put on the path, where no ResearchZosho is installed yet. Returns the launcher. Throws
+     * with a plain reason. {@code runtime}: take the build for this platform that carries its own Java, as ResearchZosho's
+     * own installer does on a machine without Java 21.
+     */
+    public static Path install(String version, Path prefix, String base, boolean runtime, PrintStream out) throws IOException, InterruptedException {
         if (version == null || version.isBlank()) {
             version = latestVersion();
             if (version == null) throw new IOException("could not find the latest ResearchZosho release; pass --version");
         }
         if (base == null || base.isBlank()) base = "https://github.com/" + REPO + "/releases/download/v" + version;
-        String tar = "researchzosho-" + version + ".tar.gz";
+        String tar = "researchzosho-" + version + (runtime ? "-" + SelfUpdate.platformTag() : "") + ".tar.gz";
         Path tmp = Files.createTempDirectory("researchzosho-install");
         try {
+            if (runtime) out.println("codezaiku: this CodeZaiku runs on the Java it carries, so ResearchZosho comes as the " + SelfUpdate.platformTag() + " build, which carries its own Java too");
             out.println("codezaiku: downloading " + tar);
             Path tarPath = tmp.resolve(tar);
             fetch(base + "/" + tar, tarPath);
@@ -151,6 +170,7 @@ public final class ResearchZoshoInstall {
             if (p.waitFor() != 0) throw new IOException("could not unpack " + tar + ": " + o.strip());
             Path unpacked = unpack.resolve("researchzosho");
             if (!Files.isDirectory(unpacked)) throw new IOException(tar + " did not contain a researchzosho folder");
+            if (runtime && !Files.isDirectory(unpacked.resolve("jre"))) throw new IOException(tar + " carries no Java runtime; install Java 21 or newer and run this again");
 
             Path launcher;
             if (windows()) {
@@ -195,7 +215,7 @@ public final class ResearchZoshoInstall {
             StringBuilder sb = new StringBuilder();
             for (byte b : d.digest()) sb.append(String.format("%02x", b));
             return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) { throw new IOException(e); }
+        } catch (NoSuchAlgorithmException e) { throw new IOException(e); }
     }
 
     static void move(Path from, Path to) throws IOException {
@@ -203,14 +223,14 @@ public final class ResearchZoshoInstall {
         catch (IOException e) {   // across file systems: copy
             Files.walk(from).forEach(src -> {
                 try { Path dst = to.resolve(from.relativize(src).toString()); if (Files.isDirectory(src)) Files.createDirectories(dst); else Files.copy(src, dst); }
-                catch (IOException ex) { throw new java.io.UncheckedIOException(ex); }
+                catch (IOException ex) { throw new UncheckedIOException(ex); }
             });
         }
     }
 
     static void deleteTree(Path p) throws IOException {
         if (!Files.exists(p)) return;
-        try (var s = Files.walk(p)) { s.sorted(java.util.Comparator.reverseOrder()).forEach(q -> { try { Files.deleteIfExists(q); } catch (IOException ignored) { } }); }
+        try (var s = Files.walk(p)) { s.sorted(Comparator.reverseOrder()).forEach(q -> { try { Files.deleteIfExists(q); } catch (IOException ignored) { } }); }
     }
 
     static void addToUserPath(Path bin, PrintStream out) {
@@ -227,36 +247,36 @@ public final class ResearchZoshoInstall {
     }
 
     /** The verb: install if needed, then hand over to setup with the terminal. Returns the exit code. */
-    public static int door(String[] args, PrintStream out) {
+    public static int door(String[] args, PrintStream out) { return door(args, out, installed()); }
+
+    /** {@code launcher}: the installed ResearchZosho, or null when there is none. */
+    static int door(String[] args, PrintStream out, Path launcher) {
         String version = null; boolean setup = true;
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--version") && i + 1 < args.length) version = args[++i];
             else if (args[i].equals("--no-setup")) setup = false;
         }
-        Path launcher = installed();
+        boolean failed = false;
         if (launcher != null) {
-            // installed already: update it when a newer release exists (the same download, checked and swapped in place)
-            String have = installedVersion(), latest = version != null ? version : latestVersion();
-            if (have != null && latest != null && compareVersions(latest, have) > 0) {
-                out.println("codezaiku: researchzosho " + have + " is installed; " + latest + " is available. Updating; the library and settings stay.");
-                try {
-                    launcher = install(latest, defaultPrefix(), System.getenv("CODEZAIKU_RESEARCHZOSHO_DOWNLOAD_BASE"), out);
-                    out.println("codezaiku: if the researchzosho service is running, restart it: researchzosho service uninstall, then researchzosho service install");
-                } catch (Exception e) {
-                    out.println("codezaiku: could not update (" + e.getMessage() + "); the installed " + have + " stays");
-                }
-            } else {
-                out.println("codezaiku: researchzosho " + (have == null ? "" : have + " ") + "is already installed at " + launcher + (latest == null ? "" : " (the latest release is " + latest + ")"));
+            // installed already: its own updater brings it up to date. It holds its own lock, keeps its kind of build and restarts its own service.
+            out.println("codezaiku: ResearchZosho is installed at " + launcher + ". Asking its own updater for " + (version == null ? "the latest release" : version) + "; the library and settings stay.");
+            ResearchZoshoUpdate.Answer a = ResearchZoshoUpdate.now(launcher, version, out);
+            out.println("codezaiku: " + ResearchZoshoUpdate.words(a));
+            failed = a.result() == SelfUpdate.Result.FAILED;
+            if (setup && a.finishesAfterExit()) {
+                // Windows: its helper swaps the files now that the updater has ended, and a setup started now would hold the old ones
+                out.println("codezaiku: when the update has finished, in a minute or so, open a new terminal and run researchzosho setup to go on.");
+                return 0;
             }
         } else {
             try {
-                launcher = install(version, defaultPrefix(), System.getenv("CODEZAIKU_RESEARCHZOSHO_DOWNLOAD_BASE"), out);
+                launcher = install(version, defaultPrefix(), System.getenv("CODEZAIKU_RESEARCHZOSHO_DOWNLOAD_BASE"), SelfUpdate.runsOnOwnRuntime(), out);
             } catch (Exception e) {
                 out.println("codezaiku: " + e.getMessage());
                 return 1;
             }
         }
-        if (!setup) return 0;
+        if (!setup) return failed ? 1 : 0;
         out.println("codezaiku: handing over to researchzosho setup");
         int rc;
         try {
@@ -281,16 +301,16 @@ public final class ResearchZoshoInstall {
      * the person has been asking and its housekeeping can pick them up.
      */
     static void connect(Path launcher, PrintStream out) {
-        if (org.codezaiku.research.LibraryBridge.token() == null) {
+        if (LibraryBridge.token() == null) {
             String token = mintToken(launcher);
             if (token != null) {
-                try { org.codezaiku.Config.set("CODEZAIKU_LIBRARIAN_TOKEN", token); out.println("codezaiku: the chat can file research runs (token stored as CODEZAIKU_LIBRARIAN_TOKEN)"); }
+                try { Config.set("CODEZAIKU_LIBRARIAN_TOKEN", token); out.println("codezaiku: the chat can file research runs (token stored as CODEZAIKU_LIBRARIAN_TOKEN)"); }
                 catch (Exception e) { out.println("codezaiku: could not store the token: " + e.getMessage()); }
             } else {
                 out.println("codezaiku: no write token made — filing runs from the chat needs one: researchzosho reader token " + DID);
             }
         }
-        org.codezaiku.research.LibraryBridge.reprobe();
+        LibraryBridge.reprobe();
         handOver(out);
     }
 
@@ -309,13 +329,13 @@ public final class ResearchZoshoInstall {
 
     /** The research memory's topics become the library's open questions; the answers stay readable here. */
     static void handOver(PrintStream out) {
-        if (!org.codezaiku.research.LibraryBridge.answers()) return;
-        java.util.LinkedHashSet<String> topics = new java.util.LinkedHashSet<>();
-        for (var f : org.codezaiku.research.ResearchMemory.all()) if (f.topic() != null && !f.topic().isBlank()) topics.add(f.topic().strip());
+        if (!LibraryBridge.answers()) return;
+        LinkedHashSet<String> topics = new LinkedHashSet<>();
+        for (var f : ResearchMemory.all()) if (f.topic() != null && !f.topic().isBlank()) topics.add(f.topic().strip());
         if (topics.isEmpty()) return;
         int n = 0;
         try {
-            var client = org.codezaiku.research.LibraryBridge.client();
+            var client = LibraryBridge.client();
             for (String t : topics) { client.frontierAdd(t); n++; }
             out.println("codezaiku: " + n + " question(s) from the research memory are now on the library's open-questions list");
         } catch (Exception e) {

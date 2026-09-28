@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import java.nio.file.attribute.PosixFilePermissions;
 /**
  * Settings, from a config file or the environment.
  *
@@ -150,12 +151,12 @@ public final class Config {
     static void keepPrivate(Path cfg) {
         try {
             if (cfg == null || !Files.exists(cfg) || !Files.getFileStore(cfg).supportsFileAttributeView("posix")) return;
-            var owner = java.nio.file.attribute.PosixFilePermissions.fromString("rw-------");
+            var owner = PosixFilePermissions.fromString("rw-------");
             if (!Files.getPosixFilePermissions(cfg).equals(owner)) Files.setPosixFilePermissions(cfg, owner);
             Path dir = cfg.toAbsolutePath().getParent();
             String name = dir == null || dir.getFileName() == null ? "" : dir.getFileName().toString();
             if (dir != null && (name.equals(".codezaiku") || name.equals(".codeplane"))) {
-                var mine = java.nio.file.attribute.PosixFilePermissions.fromString("rwx------");
+                var mine = PosixFilePermissions.fromString("rwx------");
                 if (!Files.getPosixFilePermissions(dir).equals(mine)) Files.setPosixFilePermissions(dir, mine);
             }
         } catch (Exception ignored) {

@@ -16,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.codezaiku.FamiliarMain;
 /**
  * SARIF is only worth emitting if consumers accept it, and they reject a run for structural reasons
  * that are invisible when eyeballing the JSON — an undeclared ruleId being the usual one. So these
@@ -47,8 +48,8 @@ class SarifTest {
     /** The version went out as a hardcoded "0.1.0" until 0.1.1 — valid SARIF, wrong tool version. */
     @Test void reportsTheToolVersionItWasGiven() {
         JsonNode d = parse(Sarif.toJson(Sarif.fromReview(List.of(review("high", "a.py", 1, 1))),
-                "CodeZaiku", org.codezaiku.FamiliarMain.VERSION));
-        assertEquals(org.codezaiku.FamiliarMain.VERSION, d.at("/runs/0/tool/driver/version").asText());
+                "CodeZaiku", FamiliarMain.VERSION));
+        assertEquals(FamiliarMain.VERSION, d.at("/runs/0/tool/driver/version").asText());
     }
 
     /** Consumers REJECT a run whose result references a ruleId not declared in driver.rules. */

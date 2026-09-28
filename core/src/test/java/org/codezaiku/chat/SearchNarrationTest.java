@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import org.codezaiku.tools.WebFetchTool;
 /**
  * The web-narration digest (the operator, 2026-09-01: "right now we only know searches and pages are
  * being done") — parsed from the REAL result formats both search backends emit, so a format
@@ -42,10 +43,10 @@ class SearchNarrationTest {
 
     @Test
     void fetchTitleExtractionSurvivesRealHtml() {
-        assertEquals("Tokyo Vice — Wikipedia", org.codezaiku.tools.WebFetchTool.pageTitle(
+        assertEquals("Tokyo Vice — Wikipedia", WebFetchTool.pageTitle(
                 "<html><head>\n<title>\n  Tokyo Vice &amp;#8212; Wikipedia\n</title></head>"
                         .replace("&amp;#8212;", "—")));
-        assertEquals("", org.codezaiku.tools.WebFetchTool.pageTitle("<html><body>no title</body>"));
-        assertEquals("", org.codezaiku.tools.WebFetchTool.pageTitle(null));
+        assertEquals("", WebFetchTool.pageTitle("<html><body>no title</body>"));
+        assertEquals("", WebFetchTool.pageTitle(null));
     }
 }

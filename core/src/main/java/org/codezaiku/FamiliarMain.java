@@ -89,6 +89,21 @@ import org.codezaiku.tools.ReplaceSymbolTool;
 import org.codezaiku.tools.WebSearchTool;
 import org.codezaiku.exec.Shell;
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import org.codezaiku.chat.ChatConsent;
+import org.codezaiku.chat.ChatRepl;
+import org.codezaiku.chat.ChatSession;
+import org.codezaiku.chat.SessionArchive;
+import org.codezaiku.chat.V1Server;
+import org.codezaiku.research.LibraryBridge;
+import org.codezaiku.tools.Tool;
 /**
  * Entry point.
  * <pre>
@@ -110,7 +125,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.10";
+    public static final String VERSION = "0.3.11";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -122,8 +137,8 @@ public final class FamiliarMain {
      */
     private static void quietenThirdPartyStartupNoise() {
         try {
-            java.util.logging.Logger.getLogger("org.apache.lucene")
-                    .setLevel(java.util.logging.Level.SEVERE);
+            Logger.getLogger("org.apache.lucene")
+                    .setLevel(Level.SEVERE);
         } catch (Exception ignored) {
             // a logging tweak must never be the reason a run does not start
         }
@@ -152,7 +167,7 @@ public final class FamiliarMain {
                 }
             }
             try {
-                System.exit(new Setup(new java.io.BufferedReader(new java.io.InputStreamReader(System.in, java.nio.charset.StandardCharsets.UTF_8)), System.out,
+                System.exit(new Setup(new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)), System.out,
                         Setup.liveProbe(), Setup.liveActs(), yes).run(programs, library));
             } catch (Exception e) { System.err.println("setup: " + e.getMessage()); System.exit(1); }
         }
@@ -168,18 +183,12 @@ public final class FamiliarMain {
             System.exit(writeStarterConfig(args.length >= 2 && args[1].equals("--force")));
         }
         if (args.length >= 1 && args[0].equals("update")) {
-            String op = args.length >= 2 ? args[1] : "status";
-            switch (op) {
-                case "status" -> { System.out.print(SelfUpdate.status()); System.exit(0); }
-                case "now" -> { var o = SelfUpdate.now(args.length >= 3 ? args[2] : null, System.out); System.out.println(o.note()); System.exit(o.updated() ? 0 : 1); }
-                case "auto" -> {
-                    if (args.length < 3 || !(args[2].equals("on") || args[2].equals("off"))) { System.err.println("usage: codezaiku update auto on|off"); System.exit(2); }
-                    try { Config.set("CODEZAIKU_UPDATE", args[2].equals("on") ? "auto" : "check"); } catch (Exception e) { System.err.println("could not save: " + e.getMessage()); System.exit(1); }
-                    System.out.println(args[2].equals("on") ? "auto-update is on: a chat swaps a newer release in at its start, for the next start" : "auto-update is off: doctor and the chat say when a newer release exists; codezaiku update now installs it");
-                    System.exit(0);
-                }
-                default -> { System.err.println("usage: codezaiku update [status | now [version] | auto on|off]"); System.exit(2); }
-            }
+            // CodeZaiku's own update, then ResearchZosho's asked of its own updater; --json is for a program that updates CodeZaiku
+            System.exit(UpdateCommand.run(args, System.out, System.err, UpdateCommand.live()));
+        }
+        if (args.length >= 1 && args[0].equals("bedrock")) {
+            // the models of one's own AWS account (Amazon Bedrock) as the drive: see them, try one, use it
+            System.exit(BedrockCli.run(args));
         }
         if (args.length >= 1 && args[0].equals("doctor")) {
             // "why doesn't this work yet" — checks the model server and every optional component,
@@ -328,7 +337,7 @@ public final class FamiliarMain {
         if (args.length >= 1 && args[0].equals("chat")) {
           try {
             Path root = args.length >= 2 && !args[1].startsWith("--") ? Path.of(args[1]) : Path.of(".");
-            var mode = org.codezaiku.chat.ChatConsent.Mode.fromConfig(
+            var mode = ChatConsent.Mode.fromConfig(
                     flag(args, "--mode", Config.get("CODEZAIKU_CHAT_MODE")));
             // UNLIMITED by default. The old cap of 8 was defending against a problem that no
             // longer exists: it dated from before ctrl-C could stop a turn and before anything
@@ -342,7 +351,7 @@ public final class FamiliarMain {
             if (turns <= 0) turns = 1_000_000;   // "unlimited": far past any real conversation,
                                                  // small enough that + epilogue cannot overflow
             try {
-                System.exit(new org.codezaiku.chat.ChatRepl(
+                System.exit(new ChatRepl(
                         root, flag(args, "--drive", DEFAULT_DRIVE), MODEL, mode, turns,
                         flag(args, "--from", null)).run());
             } catch (IOException e) {
@@ -366,17 +375,17 @@ public final class FamiliarMain {
                     // import's positional arg is the ARCHIVE; an optional project follows it.
                     root = args.length >= 4 && !args[3].startsWith("--") ? Path.of(args[3]) : Path.of(".");
                 }
-                Path store = org.codezaiku.chat.ChatSession.storeDir(root.toAbsolutePath().normalize());
+                Path store = ChatSession.storeDir(root.toAbsolutePath().normalize());
                 switch (sub) {
                     case "list" -> {
-                        var rows = org.codezaiku.chat.ChatSession.list(root);
+                        var rows = ChatSession.list(root);
                         if (rows.isEmpty()) { System.out.println("no sessions for " + root.toAbsolutePath().normalize()); return; }
                         for (String[] r : rows) System.out.println(r[0] + "  " + r[1]);
                     }
                     case "export" -> {
                         Path out = Path.of(flag(args, "--out",
-                                org.codezaiku.chat.SessionArchive.defaultOut(root).toString()));
-                        var names = org.codezaiku.chat.SessionArchive.export(store, out,
+                                SessionArchive.defaultOut(root).toString()));
+                        var names = SessionArchive.export(store, out,
                                 root.toAbsolutePath().normalize().toString());
                         System.out.println("exported " + names.size() + " file(s) -> " + out);
                     }
@@ -385,8 +394,8 @@ public final class FamiliarMain {
                             System.err.println("usage: codezaiku sessions import <archive.zip> [project] [--force]");
                             System.exit(2);
                         }
-                        boolean force = java.util.Arrays.asList(args).contains("--force");
-                        var r = org.codezaiku.chat.SessionArchive.importInto(Path.of(args[2]), store, force);
+                        boolean force = Arrays.asList(args).contains("--force");
+                        var r = SessionArchive.importInto(Path.of(args[2]), store, force);
                         System.out.println("restored " + r.restored().size() + " file(s) into " + store);
                         if (!r.skipped().isEmpty()) {
                             System.out.println("skipped " + r.skipped().size()
@@ -415,7 +424,7 @@ public final class FamiliarMain {
                 int port = Integer.parseInt(flag(args, "--port", Config.get("CODEZAIKU_V1_PORT", "7071")));
                 String host = flag(args, "--host", "127.0.0.1");   // loopback: no auth exists here
                 int turns = Integer.parseInt(flag(args, "--max-turns", "25"));
-                new org.codezaiku.chat.V1Server(root, flag(args, "--drive", DEFAULT_DRIVE), MODEL, turns)
+                new V1Server(root, flag(args, "--drive", DEFAULT_DRIVE), MODEL, turns)
                         .start(host, port);
                 System.out.println("v1: OpenAI-compatible chat on http://" + host + ":" + port
                         + "/v1  —  project " + root.toAbsolutePath().normalize()
@@ -530,12 +539,12 @@ public final class FamiliarMain {
         }
         if (args.length >= 2 && args[0].equals("install") && args[1].equalsIgnoreCase("researchzosho")) {
             // The door to the sibling: fetch the release, check it, put it on the path, hand over to its setup.
-            System.exit(ResearchZoshoInstall.door(java.util.Arrays.copyOfRange(args, 2, args.length), System.out));
+            System.exit(ResearchZoshoInstall.door(Arrays.copyOfRange(args, 2, args.length), System.out));
         }
         if (args.length >= 1 && args[0].equals("librarian")) {
             // `codezaiku librarian …` runs the installed researchzosho command (ResearchZosho is its own
             // program since 0.3.0); the verb stays so nothing anyone typed stops working.
-            System.exit(ResearchZoshoInstall.alias(java.util.Arrays.copyOfRange(args, 1, args.length), System.out));
+            System.exit(ResearchZoshoInstall.alias(Arrays.copyOfRange(args, 1, args.length), System.out));
         }
         if (args.length >= 2 && args[0].equals("research")) {
             // research <question|@file> [broad|depth] [drive] [maxTurns]
@@ -772,7 +781,7 @@ public final class FamiliarMain {
             return 2;
         }
         StringBuilder ctx = new StringBuilder();
-        ctx.append("language: ").append(org.codezaiku.shape.ProjectFacts.language(root)).append('\n');
+        ctx.append("language: ").append(ProjectFacts.language(root)).append('\n');
         ctx.append("top-level entries:\n");
         try (var st = Files.list(root)) {
             st.map(x -> x.getFileName().toString())
@@ -921,8 +930,11 @@ public final class FamiliarMain {
               model serve install|status|stop|uninstall|check
                                                 a model server on this machine, on demand (the row for your card)
               smoke [drive]                     check the model server answers
+              bedrock models|test <model>|use <model> [--region r] [--profile p]
+                                                the models of your own AWS account (Amazon Bedrock) as CodeZaiku's model. Sign in to AWS first
               doctor                            what is missing or wrong, and how to fix it
-              update now|status                 take the latest release (settings kept); or say what you have
+              update now|status [--json]        take the latest release (settings kept), and have ResearchZosho's
+                                                own updater do the same; or say what you have
               shape <project>                   what the harness sees: language, tests, layout
               lsp-check <project>               language-server availability
               library-search <query> | kp-index | crate-index | error-query | dep-source
@@ -1828,7 +1840,7 @@ public final class FamiliarMain {
      *  {scope, ceiling, incident} runs the pipeline and returns the OpsOutcome as JSON; GET /health is a
      *  liveness probe. Requests are SERIALIZED (one stack mutation at a time). */
     private static void serve(int port, String baseUrl) throws IOException {
-        var server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress(port), 0);
+        var server = HttpServer.create(new InetSocketAddress(port), 0);
         var mapper = new ObjectMapper();
         server.createContext("/health", ex -> respond(ex, 200, "{\"status\":\"ok\"}"));
         // Minimal dashboard: the audit trail (JSON lines) as a JSON array — recent actions/alerts for a UI.
@@ -1875,7 +1887,7 @@ public final class FamiliarMain {
                 + "  —  POST /fix {\"scope\":\"compose:<p>\",\"ceiling\":\"guarded\",\"incident\":\"...\"}  |  GET /health");
     }
 
-    private static void respond(com.sun.net.httpserver.HttpExchange ex, int code, String json) {
+    private static void respond(HttpExchange ex, int code, String json) {
         try {
             byte[] b = json.getBytes(StandardCharsets.UTF_8);
             ex.getResponseHeaders().set("Content-Type", "application/json");
@@ -2284,8 +2296,8 @@ public final class FamiliarMain {
      */
     public record Hooks(ToolRegistry.Listener listener,
                         BooleanSupplier cancelled,
-                        java.util.List<org.codezaiku.tools.Tool> extraTools) {
-        public Hooks(ToolRegistry.Listener listener, BooleanSupplier cancelled) { this(listener, cancelled, java.util.List.of()); }
+                        List<Tool> extraTools) {
+        public Hooks(ToolRegistry.Listener listener, BooleanSupplier cancelled) { this(listener, cancelled, List.of()); }
     }
 
     /** As above, with host hooks for streaming and cancellation. */
@@ -2626,8 +2638,8 @@ public final class FamiliarMain {
         //    itself is the single sub-question and this degrades to depth-research + synthesis.
         // The library consults FIRST (the compounding loop): what ResearchZosho holds is pushed into
         // decompose so the fan runs only on the GAPS. "" when no daemon answers or it holds nothing.
-        String libKnown = org.codezaiku.research.LibraryBridge.push(question, 6);
-        java.util.List<String> open = new java.util.ArrayList<>();
+        String libKnown = LibraryBridge.push(question, 6);
+        List<String> open = new ArrayList<>();
         try {
             var msgs = json.createArrayNode();
             msgs.addObject().put("role", "user").put("content",
@@ -2648,12 +2660,12 @@ public final class FamiliarMain {
         if (open.isEmpty()) open.add(question);
         System.err.println("fan: " + open.size() + " sub-questions, " + workers + " workers");
 
-        var findings = new java.util.ArrayList<String>();
+        var findings = new ArrayList<String>();
         for (int round = 1; round <= maxRounds && !open.isEmpty(); round++) {
             // 2. Parallel workers — fresh depth-loop per sub-question. The pool caps concurrency;
             //    a worker that dies contributes an honest "unavailable" line, not silence.
-            var pool = java.util.concurrent.Executors.newFixedThreadPool(Math.min(workers, open.size()));
-            var futures = new java.util.ArrayList<java.util.concurrent.Future<String>>();
+            var pool = Executors.newFixedThreadPool(Math.min(workers, open.size()));
+            var futures = new ArrayList<Future<String>>();
             for (String sub : open) {
                 futures.add(pool.submit(() -> {
                     try {
@@ -2670,7 +2682,7 @@ public final class FamiliarMain {
             }
             pool.shutdown();
             for (var f : futures) {
-                try { findings.add(f.get(30, java.util.concurrent.TimeUnit.MINUTES)); }
+                try { findings.add(f.get(30, TimeUnit.MINUTES)); }
                 catch (Exception e) { findings.add("SUB-QUESTION: (timed out)\nFINDINGS: unavailable"); }
             }
             open.clear();
@@ -2741,7 +2753,7 @@ public final class FamiliarMain {
     }
 
     /** Fit worker findings into ~35% of the context window, each capped, the total capped. */
-    static String fitNotes(java.util.List<String> findings, int ctxTokens) {
+    static String fitNotes(List<String> findings, int ctxTokens) {
         int total = Math.max(2000, (int) (ctxTokens * 0.28));   // 0.35 hit 93% of the window live
         int each = Math.max(400, total / Math.max(1, findings.size()));
         var sb = new StringBuilder();
@@ -2816,7 +2828,7 @@ public final class FamiliarMain {
         var tools = ToolRegistry.research(cwd, question, draft);
         // The search controller: the steerer rides on web_search; its exhausted() is the loop's
         // early-finish signal. Stats are printed per run so over-search is a number, not a feeling.
-        var ws = (org.codezaiku.tools.WebSearchTool) tools.find("web_search");
+        var ws = (WebSearchTool) tools.find("web_search");
         FamiliarLoop.Result res = new FamiliarLoop(drive, tools, cwd, goal, maxTurns, null, null)
                 .research().answerDraft(draft::draft)
                 .finishEarlyIf(() -> ws != null && ws.steer().exhausted())

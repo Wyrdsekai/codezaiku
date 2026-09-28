@@ -15,6 +15,16 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+import java.nio.file.Path;
+import java.util.ArrayDeque;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
+import org.codezaiku.Config;
+import org.codezaiku.FamiliarMain;
 /**
  * MCP from the OTHER side: {@code McpServer} makes CodeZaiku drivable by hosts; this makes
  * CodeZaiku a host — the chat can call tools that live in someone else's process (wyrdsekai's,
@@ -37,7 +47,7 @@ public final class McpClient implements AutoCloseable {
     public record RemoteTool(String name, String description, ObjectNode schema) { }
 
     /** How long a request waits with no response and no progress notification. */
-    static final int TIMEOUT_SECONDS = org.codezaiku.Config.getInt("CODEZAIKU_MCP_TIMEOUT_SECONDS", 60);
+    static final int TIMEOUT_SECONDS = Config.getInt("CODEZAIKU_MCP_TIMEOUT_SECONDS", 60);
     /** A server that keeps returning a cursor is cut off here. */
     static final int MAX_PAGES = 50;
 
@@ -46,19 +56,19 @@ public final class McpClient implements AutoCloseable {
     private final OutputStream out;
     private final ObjectMapper json = new ObjectMapper();
     private final AtomicLong nextId = new AtomicLong(1);
-    private final java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.CompletableFuture<JsonNode>> waiting = new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.ArrayDeque<String> stderrTail = new java.util.ArrayDeque<>();
+    private final ConcurrentHashMap<Long, CompletableFuture<JsonNode>> waiting = new ConcurrentHashMap<>();
+    private final ArrayDeque<String> stderrTail = new ArrayDeque<>();
     private volatile long lastProgressNanos = System.nanoTime();
     private final int timeoutSeconds;
 
     public McpClient(String serverName, List<String> command) throws IOException { this(serverName, command, TIMEOUT_SECONDS); }
 
-    McpClient(String serverName, List<String> command, int timeoutSeconds) throws IOException { this(serverName, command, java.util.Map.of(), null, timeoutSeconds); }
+    McpClient(String serverName, List<String> command, int timeoutSeconds) throws IOException { this(serverName, command, Map.of(), null, timeoutSeconds); }
 
     /** A server a host described: its own environment variables on top of ours, started in {@code cwd} when one is given. */
-    public McpClient(String serverName, List<String> command, java.util.Map<String, String> env, java.nio.file.Path cwd) throws IOException { this(serverName, command, env, cwd, TIMEOUT_SECONDS); }
+    public McpClient(String serverName, List<String> command, Map<String, String> env, Path cwd) throws IOException { this(serverName, command, env, cwd, TIMEOUT_SECONDS); }
 
-    McpClient(String serverName, List<String> command, java.util.Map<String, String> env, java.nio.file.Path cwd, int timeoutSeconds) throws IOException {
+    McpClient(String serverName, List<String> command, Map<String, String> env, Path cwd, int timeoutSeconds) throws IOException {
         this.serverName = serverName;
         this.timeoutSeconds = Math.max(1, timeoutSeconds);
         ProcessBuilder pb = new ProcessBuilder(command).redirectErrorStream(false);
@@ -74,7 +84,7 @@ public final class McpClient implements AutoCloseable {
                     .put("protocolVersion", "2024-11-05")
                     .<ObjectNode>set("capabilities", json.createObjectNode())
                     .set("clientInfo", json.createObjectNode()
-                            .put("name", "codezaiku").put("version", org.codezaiku.FamiliarMain.VERSION)));
+                            .put("name", "codezaiku").put("version", FamiliarMain.VERSION)));
         } catch (IOException e) { close(); throw e; }
         if (init == null) { String why = stderrTail(); close(); throw new IOException("mcp server '" + serverName + "' did not answer initialize" + (why.isEmpty() ? "" : " — it said: " + why)); }
         notify("notifications/initialized");
@@ -158,7 +168,7 @@ public final class McpClient implements AutoCloseable {
         req.put("id", id);
         req.put("method", method);
         req.set("params", params);
-        var future = new java.util.concurrent.CompletableFuture<JsonNode>();
+        var future = new CompletableFuture<JsonNode>();
         waiting.put(id, future);
         try {
             send(req);
@@ -168,10 +178,10 @@ public final class McpClient implements AutoCloseable {
                 try {
                     msg = future.get(1, TimeUnit.SECONDS);
                     break;
-                } catch (java.util.concurrent.TimeoutException notYet) {
+                } catch (TimeoutException notYet) {
                     if (!proc.isAlive() && !future.isDone()) return null;
                     if (System.nanoTime() - lastProgressNanos > TimeUnit.SECONDS.toNanos(timeoutSeconds)) return null;
-                } catch (java.util.concurrent.ExecutionException e) {
+                } catch (ExecutionException e) {
                     return null;
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -270,7 +280,7 @@ public final class McpClient implements AutoCloseable {
      * {@code ;}. Returns started clients; a server that fails to start is reported and skipped —
      * one broken config entry must not take the chat down.
      */
-    public static List<McpClient> fromConfig(String spec, java.util.function.Consumer<String> report) {
+    public static List<McpClient> fromConfig(String spec, Consumer<String> report) {
         List<McpClient> clients = new ArrayList<>();
         if (spec == null || spec.isBlank()) return clients;
         for (String entry : spec.split(";")) {

@@ -12,6 +12,8 @@ import java.util.regex.Pattern;
 import org.codezaiku.Config;
 import org.codezaiku.exec.Shell;
 
+import java.util.List;
+import java.util.Map;
 /**
  * Run a shell command in the project root. Network is ON (RESET §3.4 — let build tools resolve
  * deps live; no offline mode). stderr is merged into stdout; the whole output is returned if it
@@ -19,13 +21,13 @@ import org.codezaiku.exec.Shell;
  */
 public final class ShellTool implements Tool {
     private static final int CAP = 20_000;
-    private static final long TIMEOUT_SEC = org.codezaiku.Config.getInt("CODEZAIKU_SHELL_TIMEOUT_SEC", 300);
+    private static final long TIMEOUT_SEC = Config.getInt("CODEZAIKU_SHELL_TIMEOUT_SEC", 300);
     // A genuinely-long ML step (training / full-dataset generation) legitimately needs minutes, not 300s
     // (CodeML/MLE-bench: 20min–hours). A 300s cap on a ~8min train+generate caused a retrain-every-edit death
     // spiral (fine-tune sv9: 29 timeouts/rewrites, never completed). Heavy commands get a generous cap so a real
     // run completes in one go; quick `python -c` checks keep the short default.
     private static final long HEAVY_TIMEOUT_SEC =
-            org.codezaiku.Config.getInt("CODEZAIKU_SHELL_HEAVY_TIMEOUT_SEC", 1200);
+            Config.getInt("CODEZAIKU_SHELL_HEAVY_TIMEOUT_SEC", 1200);
     private final PathScope scope;
 
     // The model's FIXTURE builds need JDK21; the box default `java` is JDK25 (the CodeZaiku core harness is
@@ -409,7 +411,7 @@ public final class ShellTool implements Tool {
      * they are set for THAT repository, and every git command the model ran would have acted on it, not on the
      * workspace.
      */
-    static void nonInteractive(java.util.Map<String, String> env) {
+    static void nonInteractive(Map<String, String> env) {
         env.put("CI", "true");
         env.put("DEBIAN_FRONTEND", "noninteractive");
         env.put("GIT_TERMINAL_PROMPT", "0");
@@ -423,6 +425,6 @@ public final class ShellTool implements Tool {
         env.put("GIT_ASKPASS", "true");
         env.put("SSH_ASKPASS", "true");
         env.put("SSH_ASKPASS_REQUIRE", "never");
-        for (String k : java.util.List.of("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX")) env.remove(k);
+        for (String k : List.of("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX")) env.remove(k);
     }
 }

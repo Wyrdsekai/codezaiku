@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import org.codezaiku.drive.DriveClient;
 /**
  * Model endpoints: find them, name them, switch between them.
  *
@@ -128,7 +129,7 @@ public final class Models {
     private static List<String> fetchModels(String url, String arrayField, String nameField, int limit) {
         try {
             HttpResponse<String> r = HTTP.send(
-                    org.codezaiku.drive.DriveClient.auth(
+                    DriveClient.auth(
                             HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(3))).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
             if (r.statusCode() != 200) return null;

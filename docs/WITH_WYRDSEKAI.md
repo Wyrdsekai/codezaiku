@@ -64,6 +64,16 @@ codezaiku doctor      # names anything missing, and the command that fixes it
 own shell. It reports the model server, the shell commands will run through, and whether a
 vulnerability scanner is available.
 
+## Keeping CodeZaiku up to date
+
+`codezaiku update now --json` updates CodeZaiku and answers with one JSON document and an exit code
+(0 updated or already current, 75 another update is running, 3 this install cannot update itself,
+1 failed). ResearchZosho's `researchzosho update now --json` answers the same way. Each program's own
+updater replaces its files and holds its own lock while it does, so Wyrdsekai, a person running
+`codezaiku update now`, and ResearchZosho's own service can all keep the two up to date without
+getting in each other's way. The fields are in
+[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md#updating-codezaiku-from-your-program).
+
 ## Which model CodeZaiku uses
 
 **Not the companion's.** The coding backend carries its own endpoint and model, configured in

@@ -7,6 +7,8 @@ import java.lang.reflect.Method;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.Locale;
+import org.codezaiku.Config;
 /**
  * What the harness says on a timeout is what the model does next.
  *
@@ -20,7 +22,7 @@ class ShellTimeoutAdviceTest {
     private static boolean heavy(String cmd) throws Exception {
         Method m = ShellTool.class.getDeclaredMethod("isHeavyStep", String.class);
         m.setAccessible(true);
-        return (boolean) m.invoke(null, cmd.toLowerCase(java.util.Locale.ROOT));
+        return (boolean) m.invoke(null, cmd.toLowerCase(Locale.ROOT));
     }
 
     /**
@@ -37,7 +39,7 @@ class ShellTimeoutAdviceTest {
     @Test
     void theCapIsDeclarable() {
         // A host that knows its step takes twenty minutes can say so rather than lose the run.
-        assertTrue(org.codezaiku.Config.getInt("CODEZAIKU_SHELL_TIMEOUT_SEC", 300) > 0);
-        assertTrue(org.codezaiku.Config.getInt("CODEZAIKU_SHELL_HEAVY_TIMEOUT_SEC", 1200) > 0);
+        assertTrue(Config.getInt("CODEZAIKU_SHELL_TIMEOUT_SEC", 300) > 0);
+        assertTrue(Config.getInt("CODEZAIKU_SHELL_HEAVY_TIMEOUT_SEC", 1200) > 0);
     }
 }

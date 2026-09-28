@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
+import org.codezaiku.research.LibraryBridge;
 /**
  * The Research Requirements Document — the brief a refine conversation produces and the deep run
  * consumes. It dictates the boundaries of the research and any specific asks (the operator,
@@ -128,7 +129,7 @@ public final class ResearchBrief {
     }
 
     /** A short title for the investigation. */
-    public String title() { return org.codezaiku.research.LibraryBridge.compress(question, 120); }
+    public String title() { return LibraryBridge.compress(question, 120); }
 
     public List<String> subQuestions() { return new ArrayList<>(subQuestions); }
 }

@@ -13,6 +13,8 @@ import org.codezaiku.drive.DriveClient;
 import org.codezaiku.library.Library;
 import org.codezaiku.loop.FamiliarLoop;
 
+import org.codezaiku.Config;
+import org.codezaiku.FamiliarMain;
 /**
  * Agent orchestration, first rung: hand a well-scoped task to a SUB-LOOP and keep talking.
  *
@@ -86,8 +88,8 @@ public final class DelegateTool implements Tool {
         int maxTurns = args.path("max_turns").asInt(25);
 
         String kind = args.path("kind").asText("code");
-        String driveUrl = org.codezaiku.Config.get("CODEZAIKU_DELEGATE_DRIVE", chatDriveUrl);
-        String model = org.codezaiku.Config.get("CODEZAIKU_DELEGATE_MODEL", chatModel);
+        String driveUrl = Config.get("CODEZAIKU_DELEGATE_DRIVE", chatDriveUrl);
+        String model = Config.get("CODEZAIKU_DELEGATE_MODEL", chatModel);
 
         Path out = Files.createDirectories(projectRoot.resolve(".codezaiku"))
                 .resolve("delegate-" + System.currentTimeMillis() + ".log");
@@ -107,7 +109,7 @@ public final class DelegateTool implements Tool {
                         + "task's premise or clearly matters beyond it, begin your final summary "
                         + "with 'WORTH NOTING: <it>' before the result.";
                 if ("research".equalsIgnoreCase(kind)) {
-                    r = org.codezaiku.FamiliarMain.research(fullTask
+                    r = FamiliarMain.research(fullTask
                             + "\n\nEnd with the URLs of the sources you actually used.",
                             "depth", driveUrl, maxTurns);
                 } else {

@@ -15,6 +15,37 @@ import org.codezaiku.lsp.LspClient;
 import org.codezaiku.shape.ProjectFacts;
 import org.codezaiku.tools.ToolRegistry;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
+import org.codezaiku.Config;
+import org.codezaiku.FamiliarMain;
+import org.codezaiku.ResearchZoshoInstall;
+import org.codezaiku.SelfUpdate;
+import org.codezaiku.mcp.McpClient;
+import org.codezaiku.research.LibraryBridge;
+import org.codezaiku.tools.DelegateTool;
+import org.codezaiku.tools.McpBridgeTool;
+import org.codezaiku.tools.RememberTool;
+import org.codezaiku.tools.RunBackgroundTool;
+import org.codezaiku.tools.WebFetchTool;
+import org.codezaiku.tools.WebSearchTool;
+import org.codezaiku.verify.ProjectTests;
+import org.researchzosho.client.LibraryException;
+import org.slf4j.LoggerFactory;
 /**
  * Talk to CodeZaiku directly — no host, no editor, no browser.
  *
@@ -57,11 +88,11 @@ public final class ChatRepl {
     private ChatJournal journal;
     private ChatTasks tasks;
     private ChatMemory memory;
-    private java.util.List<org.codezaiku.mcp.McpClient> mcpClients = java.util.List.of();
+    private List<McpClient> mcpClients = List.of();
 
     /** /diff and /commit are git features and honestly say so; /undo no longer is. */
     private boolean gitRepo() {
-        return java.nio.file.Files.isDirectory(root.resolve(".git"));
+        return Files.isDirectory(root.resolve(".git"));
     }
     /**
      * Show the model's reasoning as it streams. OFF by default — the operator's words on seeing it: "why
@@ -70,8 +101,8 @@ public final class ChatRepl {
      * {@code CODEZAIKU_STREAM=all} starts it on; {@code /thinking on|off} changes it mid-session.
      */
     private volatile boolean showThinking =
-            java.util.List.of("all", "think", "thinking")
-                    .contains(org.codezaiku.Config.get("CODEZAIKU_STREAM", "").toLowerCase(java.util.Locale.ROOT));
+            List.of("all", "think", "thinking")
+                    .contains(Config.get("CODEZAIKU_STREAM", "").toLowerCase(Locale.ROOT));
     /** The plan step: auto = for build-sized asks (the default), on = every turn, off = never. */
     enum PlanMode { auto, on, off }
     private volatile PlanMode planMode = PlanMode.auto;
@@ -82,8 +113,8 @@ public final class ChatRepl {
     // Non-null = active. `/research go` hands the brief to the daemon; the deep run happens there.
     private ResearchBrief brief;
     // jobs this chat launched, so the prompt can say when one lands
-    private final java.util.List<String> launched = new java.util.ArrayList<>();
-    private final java.util.Set<String> reported = new java.util.HashSet<>();
+    private final List<String> launched = new ArrayList<>();
+    private final Set<String> reported = new HashSet<>();
     // the run() locals a command needs to start a turn itself (orientation on /research <topic>)
     private LspClient lspRef; private Library libraryRef; private LibraryIndex indexRef; private ChatIo ioRef;
 
@@ -94,7 +125,7 @@ public final class ChatRepl {
      * and an uncapped research-mode turn was a full research run per message with no visible
      * end (the operator, 2026-09-03: "I never get out of this").
      */
-    static final int RESEARCH_TURN_STEPS = Integer.parseInt(org.codezaiku.Config.get("CODEZAIKU_RESEARCH_TURN_STEPS", "5"));
+    static final int RESEARCH_TURN_STEPS = Integer.parseInt(Config.get("CODEZAIKU_RESEARCH_TURN_STEPS", "5"));
     private ChatIo io;
     /** Set when the person abandons a turn at an approval prompt; read by the loop's cancel hook. */
     private final AtomicBoolean abandoned = new AtomicBoolean();
@@ -137,7 +168,7 @@ public final class ChatRepl {
         while (true) {
             String a = io.readLine("     [y]es / [a]lways / all=stop asking / [n]o / n[e]ver / [s]top > ");
             if (a == null) { abandoned.set(true); return ChatConsent.Answer.NO; }   // input ended
-            String t = a.strip().toLowerCase(java.util.Locale.ROOT);
+            String t = a.strip().toLowerCase(Locale.ROOT);
             // A way OUT. Measured live: with no escape, every subsequent line — including the next
             // thing the person wanted to say, and `/quit` — was eaten as an invalid answer and the
             // prompt asked again forever. A gate you cannot walk away from is a trap, and typing a
@@ -172,7 +203,7 @@ public final class ChatRepl {
         // Quiet screen, complete file: the console threshold goes to WARN and everything streams to
         // a per-run file under the session store — /logging changes the screen, never the file.
         logs.init(ChatSession.storeDir(root).resolve("logs"));
-        if ("info".equalsIgnoreCase(org.codezaiku.Config.get("CODEZAIKU_CHAT_LOG", ""))) {
+        if ("info".equalsIgnoreCase(Config.get("CODEZAIKU_CHAT_LOG", ""))) {
             logs.console("info");
         }
         io = ChatIo.open();
@@ -192,11 +223,11 @@ public final class ChatRepl {
         });
         // MCP servers this chat consumes (CODEZAIKU_MCP_SERVERS: name=command;name2=command2).
         // Started once per session; a broken entry is reported, not fatal.
-        mcpClients = org.codezaiku.mcp.McpClient.fromConfig(
-                org.codezaiku.Config.get("CODEZAIKU_MCP_SERVERS"),
+        mcpClients = McpClient.fromConfig(
+                Config.get("CODEZAIKU_MCP_SERVERS"),
                 line -> { if (io != null) io.println("  ! " + line); });
         banner(io);
-        try (LibraryIndex index = new LibraryIndex(org.codezaiku.FamiliarMain.libraryIndexDir())) {
+        try (LibraryIndex index = new LibraryIndex(FamiliarMain.libraryIndexDir())) {
             drive = new DriveClient(driveUrl, model);
             var lsp = LspClient.forProject(root, ProjectFacts.language(root));
             var library = new Library();
@@ -239,8 +270,8 @@ public final class ChatRepl {
     }
 
     /** {@code @path} tokens in a message, expanded to fenced file content. */
-    private static final java.util.regex.Pattern AT_FILE =
-            java.util.regex.Pattern.compile("(?<![\\w@])@([\\w./-]+)");
+    private static final Pattern AT_FILE =
+            Pattern.compile("(?<![\\w@])@([\\w./-]+)");
     /** Enough to be useful, small enough not to blow a small drive's window. */
     private static final int AT_FILE_MAX_CHARS = 8000;
 
@@ -252,12 +283,12 @@ public final class ChatRepl {
             Path f = root.resolve(rel).normalize();
             // Confined to the project — @/etc/passwd is a request the tools would refuse, and the
             // expansion must not be a way around them.
-            if (!f.startsWith(root) || !java.nio.file.Files.isRegularFile(f)) {
+            if (!f.startsWith(root) || !Files.isRegularFile(f)) {
                 io.println("  (@" + rel + " not found — sent as plain text)");
                 continue;
             }
             try {
-                String content = java.nio.file.Files.readString(f);
+                String content = Files.readString(f);
                 boolean cut = content.length() > AT_FILE_MAX_CHARS;
                 if (cut) content = content.substring(0, AT_FILE_MAX_CHARS);
                 b.append("[attached ").append(rel).append(cut ? " — first " + AT_FILE_MAX_CHARS + " chars]" : "]")
@@ -274,14 +305,14 @@ public final class ChatRepl {
     /** What {@code /v1/models} at {@code base} serves (comma-joined, may be empty), or null if dead. */
     private static String probeModels(String base) {
         try {
-            var req = java.net.http.HttpRequest.newBuilder(java.net.URI.create(base + "/v1/models"))
-                    .timeout(java.time.Duration.ofSeconds(8)).GET().build();
-            var resp = java.net.http.HttpClient.newHttpClient()
-                    .send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+            var req = HttpRequest.newBuilder(URI.create(base + "/v1/models"))
+                    .timeout(Duration.ofSeconds(8)).GET().build();
+            var resp = HttpClient.newHttpClient()
+                    .send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() != 200) return null;
-            var data = new com.fasterxml.jackson.databind.ObjectMapper()
+            var data = new ObjectMapper()
                     .readTree(resp.body()).path("data");
-            var names = new java.util.ArrayList<String>();
+            var names = new ArrayList<String>();
             for (var n : data) names.add(n.path("id").asText(""));
             return String.join(", ", names);
         } catch (Exception e) {
@@ -293,7 +324,7 @@ public final class ChatRepl {
     private String sh(String... cmd) {
         try {
             var p = new ProcessBuilder(cmd).directory(root.toFile()).redirectErrorStream(true).start();
-            String out = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             p.waitFor();
             return out.strip();
         } catch (Exception e) {
@@ -317,9 +348,9 @@ public final class ChatRepl {
 
     /** The repo root above {@code dir}, if {@code dir} is not itself a repo root. */
     private static Path gitRootAbove(Path dir) {
-        if (java.nio.file.Files.isDirectory(dir.resolve(".git"))) return null;
+        if (Files.isDirectory(dir.resolve(".git"))) return null;
         for (Path p = dir.getParent(); p != null; p = p.getParent()) {
-            if (java.nio.file.Files.isDirectory(p.resolve(".git"))) return p;
+            if (Files.isDirectory(p.resolve(".git"))) return p;
         }
         return null;
     }
@@ -336,10 +367,10 @@ public final class ChatRepl {
             io.println("        for the whole project, run from " + above);
         }
         io.println("drive " + driveUrl + " · " + consent.mode() + " — " + consent.mode().description());
-        String self = org.codezaiku.SelfUpdate.maybeAuto();
-        if (self.isEmpty()) self = org.codezaiku.SelfUpdate.updateNotice();
+        String self = SelfUpdate.maybeAuto();
+        if (self.isEmpty()) self = SelfUpdate.updateNotice();
         if (!self.isEmpty()) io.println(self);
-        String rz = org.codezaiku.ResearchZoshoInstall.updateNotice();
+        String rz = ResearchZoshoInstall.updateNotice();
         if (!rz.isEmpty()) io.println(rz);
         io.println("/help for commands, /quit to leave.  ctrl-C stops a turn, ctrl-D leaves");
         io.println("");
@@ -354,10 +385,10 @@ public final class ChatRepl {
     /** A message that will create or change things, as opposed to a question or a small edit. Cheap, and the plan call can still say NO PLAN. */
     static boolean looksLikeBuild(String text) {
         if (text == null) return false;
-        String t = text.toLowerCase(java.util.Locale.ROOT);
+        String t = text.toLowerCase(Locale.ROOT);
         if (t.length() < 12) return false;
-        boolean verb = java.util.regex.Pattern.compile("\\b(build|create|make|write|implement|add|refactor|set ?up|generate|convert|migrate|scaffold|design|develop|port|rewrite|do (it|that|all|everything|the rest|[0-9])|let'?s do|can (u|you) do)\\b").matcher(t).find();
-        boolean small = java.util.regex.Pattern.compile("\\b(one[- ]liner|typo|rename|comment|just (tell|explain|show|answer|say))\\b").matcher(t).find();
+        boolean verb = Pattern.compile("\\b(build|create|make|write|implement|add|refactor|set ?up|generate|convert|migrate|scaffold|design|develop|port|rewrite|do (it|that|all|everything|the rest|[0-9])|let'?s do|can (u|you) do)\\b").matcher(t).find();
+        boolean small = Pattern.compile("\\b(one[- ]liner|typo|rename|comment|just (tell|explain|show|answer|say))\\b").matcher(t).find();
         return verb && !small;
     }
 
@@ -372,7 +403,7 @@ public final class ChatRepl {
             io.print("  planning… "); 
             String plan;
             try {
-                var json = new com.fasterxml.jackson.databind.ObjectMapper();
+                var json = new ObjectMapper();
                 var msgs = json.createArrayNode();
                 msgs.addObject().put("role", "system").put("content",
                         "You plan work for a coding assistant that runs in the project directory named below. Write a SHORT plan the person can approve: "
@@ -389,14 +420,14 @@ public final class ChatRepl {
                 io.println("no plan (" + firstLine(String.valueOf(e.getMessage())) + ") — going ahead");
                 return "";
             }
-            org.slf4j.LoggerFactory.getLogger(ChatRepl.class).info("plan step (round {}): {}", round, plan.replace("\n", " / "));
-            if (plan.isEmpty() || (mayDecline && plan.toUpperCase(java.util.Locale.ROOT).startsWith("NO PLAN"))) { io.println("no plan needed"); return ""; }
+            LoggerFactory.getLogger(ChatRepl.class).info("plan step (round {}): {}", round, plan.replace("\n", " / "));
+            if (plan.isEmpty() || (mayDecline && plan.toUpperCase(Locale.ROOT).startsWith("NO PLAN"))) { io.println("no plan needed"); return ""; }
             io.println("");
             io.println("");
             io.println("  " + plan.replace("\n", "\n  "));
             io.println("");
             String a = io.readLine("  go / type what to change / skip (no plan) / stop > ");
-            org.slf4j.LoggerFactory.getLogger(ChatRepl.class).info("plan step: the person answered [{}]", a);
+            LoggerFactory.getLogger(ChatRepl.class).info("plan step: the person answered [{}]", a);
             if (session != null) session.log("plan", plan + "\n-- answer: " + a);
             if (a == null || a.strip().equalsIgnoreCase("stop") || a.strip().equalsIgnoreCase("/quit")) return null;
             String ans = a.strip();
@@ -409,14 +440,14 @@ public final class ChatRepl {
 
     private String workingAgreements() {
         for (String name : new String[]{"FAMILIAR.md", "CLAUDE.md", "AGENTS.md"}) {
-            java.nio.file.Path f = root.resolve(name);
-            if (java.nio.file.Files.isRegularFile(f)) {
+            Path f = root.resolve(name);
+            if (Files.isRegularFile(f)) {
                 try {
-                    String t = java.nio.file.Files.readString(f);
+                    String t = Files.readString(f);
                     if (t.length() > 3_000) t = t.substring(0, 3_000) + "\n…(truncated — read "
                             + name + " for the rest)";
                     return "[working agreements — this project's " + name + "]\n" + t + "\n\n";
-                } catch (java.io.IOException e) {
+                } catch (IOException e) {
                     return "";
                 }
             }
@@ -476,7 +507,7 @@ public final class ChatRepl {
                 try {
                     memory.remember(arg, "person");
                     io.println("    remembered → " + memory.file());
-                } catch (java.io.IOException e) { io.println("    ! could not write memory: " + e.getMessage()); }
+                } catch (IOException e) { io.println("    ! could not write memory: " + e.getMessage()); }
             }
             case "/forget-memory" -> {
                 if (arg.isEmpty()) { io.println("    usage: /forget-memory <fragment of the entry>"); break; }
@@ -484,7 +515,7 @@ public final class ChatRepl {
                     int n = memory.forget(arg);
                     io.println(n > 0 ? "    removed " + n + " entr" + (n == 1 ? "y" : "ies")
                             : "    nothing matched — /memory shows what is remembered");
-                } catch (java.io.IOException e) { io.println("    ! " + e.getMessage()); }
+                } catch (IOException e) { io.println("    ! " + e.getMessage()); }
             }
             case "/memory" -> {
                 String m = memory.recall();
@@ -512,21 +543,21 @@ public final class ChatRepl {
                     researchRead(io, arg.substring(5).strip());
                 } else if (arg.startsWith("go")) {
                     if (brief == null) { io.println("    research mode is not on — /research <topic> first"); break; }
-                    if (!org.codezaiku.research.LibraryBridge.answers()) {
-                        io.println("    no library answers on " + org.codezaiku.research.LibraryBridge.url() + " — /setup librarian installs ResearchZosho, or start its service (the brief is kept)");
+                    if (!LibraryBridge.answers()) {
+                        io.println("    no library answers on " + LibraryBridge.url() + " — /setup librarian installs ResearchZosho, or start its service (the brief is kept)");
                         break;
                     }
-                    if (org.codezaiku.research.LibraryBridge.token() == null) {
+                    if (LibraryBridge.token() == null) {
                         io.println("    filing a run needs a write token: /setup librarian makes one, or set CODEZAIKU_LIBRARIAN_TOKEN (the brief is kept)");
                         break;
                     }
                     String mode = arg.contains("depth") ? "depth" : arg.contains("broad") ? "broad" : brief.depth();
                     try {
                         // no ceiling unless the person set one: the run goes until the work is done (2026-09-07)
-                        String goTurns = org.codezaiku.Config.get("CODEZAIKU_RESEARCH_GO_TURNS", "");
+                        String goTurns = Config.get("CODEZAIKU_RESEARCH_GO_TURNS", "");
                         int turns = goTurns != null && goTurns.matches("\\d+") ? Integer.parseInt(goTurns) : 0;
                         // The brief's sub-questions ARE the runner's plan — the refine phase's work, not redone.
-                        var r = org.codezaiku.research.LibraryBridge.client().research(brief.toQuestion(), mode, turns, brief.subQuestions());
+                        var r = LibraryBridge.client().research(brief.toQuestion(), mode, turns, brief.subQuestions());
                         String id = r.get("job_id").asText();
                         launched.add(id);
                         io.println("    filed " + id + " (" + mode + ") — the library's worker runs it; you can keep talking or leave");
@@ -534,7 +565,7 @@ public final class ChatRepl {
                         io.println("    /research status shows it; the chat says when it lands — in this session or the next — and /research read " + id + " prints it.");
                     io.println("    Research mode is off.");
                         brief = null;
-                    } catch (org.researchzosho.client.LibraryException e) {
+                    } catch (LibraryException e) {
                         io.println("    ! " + e.getMessage() + " [" + e.code + "]");
                     } catch (Exception e) {
                         io.println("    ! could not file: " + e.getMessage() + " (brief kept)");
@@ -554,7 +585,7 @@ public final class ChatRepl {
             case "/setup" -> {
                 // `/setup librarian`: install ResearchZosho if it is not here yet, then its setup conversation, in this terminal.
                 if (!arg.equals("librarian") && !arg.equals("researchzosho")) { io.println("    usage: /setup librarian   (install ResearchZosho and set it up)"); break; }
-                int rc = org.codezaiku.ResearchZoshoInstall.door(new String[0], System.out);
+                int rc = ResearchZoshoInstall.door(new String[0], System.out);
                 io.println(rc == 0 ? "    done — /librarian <question> asks the library" : "    setup did not finish (exit " + rc + ")");
             }
             case "/librarian" -> {
@@ -565,11 +596,11 @@ public final class ChatRepl {
                     io.println("    usage: /librarian <question>   (asks the library, not the web)");
                     break;
                 }
-                io.println(org.codezaiku.research.LibraryBridge.answer(arg, 5).stripTrailing());
+                io.println(LibraryBridge.answer(arg, 5).stripTrailing());
             }
             case "/cost" -> {
-                long pt = org.codezaiku.drive.DriveClient.SESSION_PROMPT_TOKENS.get();
-                long ct = org.codezaiku.drive.DriveClient.SESSION_COMPLETION_TOKENS.get();
+                long pt = DriveClient.SESSION_PROMPT_TOKENS.get();
+                long ct = DriveClient.SESSION_COMPLETION_TOKENS.get();
                 if (pt + ct == 0) {
                     io.println("    no token usage reported yet (local drives report it too — after the first turn)");
                 } else {
@@ -604,7 +635,7 @@ public final class ChatRepl {
                 }
             }
             case "/trust" -> {
-                var scope = switch (arg.toLowerCase(java.util.Locale.ROOT)) {
+                var scope = switch (arg.toLowerCase(Locale.ROOT)) {
                     case "project" -> ChatConsent.Scope.PROJECT;
                     case "global" -> ChatConsent.Scope.GLOBAL;
                     default -> null;
@@ -726,12 +757,12 @@ public final class ChatRepl {
             case "/model" -> {
                 if (arg.isEmpty()) {
                     io.println("  drive " + driveUrl + "  model " + model);
-                    var names = org.codezaiku.Config.keysWithPrefix("CODEZAIKU_MODEL_");
+                    var names = Config.keysWithPrefix("CODEZAIKU_MODEL_");
                     for (String k : names) {
                         if (!k.endsWith("_URL")) continue;
                         String nm = k.substring("CODEZAIKU_MODEL_".length(), k.length() - 4)
-                                .toLowerCase(java.util.Locale.ROOT);
-                        io.println("    " + nm + "  ->  " + org.codezaiku.Config.get(k, ""));
+                                .toLowerCase(Locale.ROOT);
+                        io.println("    " + nm + "  ->  " + Config.get(k, ""));
                     }
                     io.println("  /model <url|saved-name> [modelId]   — switches after a live probe");
                     break;
@@ -739,8 +770,8 @@ public final class ChatRepl {
                 String[] parts = arg.split("\\s+");
                 String target = parts[0];
                 // A saved name (codezaiku model add <name> <url>) resolves to its URL.
-                String savedUrl = org.codezaiku.Config.get(
-                        "CODEZAIKU_MODEL_" + target.toUpperCase(java.util.Locale.ROOT) + "_URL");
+                String savedUrl = Config.get(
+                        "CODEZAIKU_MODEL_" + target.toUpperCase(Locale.ROOT) + "_URL");
                 if (savedUrl != null && !savedUrl.isBlank()) target = savedUrl;
                 // Probe BEFORE switching — the same rule as `model use`: a dead endpoint is reported
                 // now, not discovered as a confusing failure in the next turn. And it must answer
@@ -779,7 +810,7 @@ public final class ChatRepl {
                 for (String l : (st + d).split("\n")) if (!l.isBlank()) io.println("  " + l);
             }
             case "/test" -> {
-                var v = org.codezaiku.verify.ProjectTests.verdict(root);
+                var v = ProjectTests.verdict(root);
                 String verdictLine = !v.ran() ? "no test suite ran"
                         : (v.passed() ? "PASS" : "FAIL")
                           + (v.passedCount() != null ? " — " + v.passedCount() + " passed" : "")
@@ -839,7 +870,7 @@ public final class ChatRepl {
         if (session == null) {
             session = ChatSession.start(root, text);
             // Into the RUN LOG, so a log file can always be joined back to its session files.
-            org.slf4j.LoggerFactory.getLogger(ChatRepl.class)
+            LoggerFactory.getLogger(ChatRepl.class)
                     .info("chat session {} in {}", session.id(), root);
         }
         session.log("user", text);
@@ -855,7 +886,7 @@ public final class ChatRepl {
         // Full tool set, always. What the agent may DO is decided in the moment by the person,
         // not up front by a mode — except PLAN, which removes the write path entirely so the
         // question never arises and the guarantee is structural rather than a promise to ask.
-        var seen = new java.util.LinkedHashSet<String>();
+        var seen = new LinkedHashSet<String>();
         ToolRegistry tools = consent.mode() == ChatConsent.Mode.PLAN
                 ? ToolRegistry.readOnly(root, lsp)
                 : ToolRegistry.standard(root, lsp);
@@ -865,17 +896,17 @@ public final class ChatRepl {
         // page RETURNS is untrusted text, which the loop already fences. Off unless the operator
         // set a search endpoint: an advertised tool that always fails teaches the model to stop
         // calling tools (the FindSymbolTool rule).
-        if (org.codezaiku.Config.get("CODEZAIKU_SEARXNG") != null
-                || org.codezaiku.Config.get("CODEZAIKU_CHAT_WEB") != null) {
-            tools.add(new org.codezaiku.tools.WebSearchTool().focus(text))
-                 .add(new org.codezaiku.tools.WebFetchTool());
+        if (Config.get("CODEZAIKU_SEARXNG") != null
+                || Config.get("CODEZAIKU_CHAT_WEB") != null) {
+            tools.add(new WebSearchTool().focus(text))
+                 .add(new WebFetchTool());
         }
         if (consent.mode() != ChatConsent.Mode.PLAN) {
-            tools.add(new org.codezaiku.tools.RememberTool(memory));
+            tools.add(new RememberTool(memory));
             // Long work without holding the conversation. Consent-wise this IS shell (canonical
             // in ChatConsent); journal-wise the step is declared not-coverable (see Narrator).
-            tools.add(new org.codezaiku.tools.RunBackgroundTool(tasks));
-            tools.add(new org.codezaiku.tools.DelegateTool(tasks, root, driveUrl, model));
+            tools.add(new RunBackgroundTool(tasks));
+            tools.add(new DelegateTool(tasks, root, driveUrl, model));
         }
         for (var mc : mcpClients) {
             // Remote tools ride at every rung ABOVE plan: their consent is per-call (fail closed
@@ -883,7 +914,7 @@ public final class ChatRepl {
             if (consent.mode() == ChatConsent.Mode.PLAN) break;
             try {
                 for (var rt : mc.listTools()) {
-                    tools.add(new org.codezaiku.tools.McpBridgeTool(mc, rt));
+                    tools.add(new McpBridgeTool(mc, rt));
                 }
             } catch (Exception e) {
                 io.println("  ! mcp: " + mc.serverName() + " tools/list failed: " + e.getMessage());
@@ -896,7 +927,7 @@ public final class ChatRepl {
         String digest = tasks == null ? "" : tasks.digestInto();
         // The library's push: relevant holdings ride into the turn's context (push before pull —
         // the model never has to call a recall tool to benefit). "" when absent or irrelevant.
-        String stacks = org.codezaiku.research.LibraryBridge.push(text, 4);
+        String stacks = LibraryBridge.push(text, 4);
         // Research mode rides as context, not as a different loop: the map shows what is already
         // organized so the model extends it instead of re-gathering (same push-not-pull logic).
         String mapBlock = brief == null ? ""
@@ -931,7 +962,7 @@ public final class ChatRepl {
         // again at turn end, or every answer appears twice.
         var streamed = new StringBuilder();
         var thinking = new AtomicBoolean();
-        org.codezaiku.drive.DriveClient.streamTo(
+        DriveClient.streamTo(
                 piece -> {
                     // A line break when the voice changes: thinking runs straight into the reply
                     // otherwise, and the seam between them is exactly what a reader needs to see.
@@ -987,7 +1018,7 @@ public final class ChatRepl {
             return;
         }
 
-        org.codezaiku.drive.DriveClient.streamTo(null);
+        DriveClient.streamTo(null);
         io.println("");
         String continueWith = null;
         if (abandoned.get()) {
@@ -1048,13 +1079,13 @@ public final class ChatRepl {
         // A failed or unparseable proposal means the brief does not move this turn — never an error.
         if (brief != null && result.summary() != null && !abandoned.get()) {
             try {
-                var json = new com.fasterxml.jackson.databind.ObjectMapper();
+                var json = new ObjectMapper();
                 var msgs = json.createArrayNode();
                 msgs.addObject().put("role", "user").put("content",
                         "You maintain a RESEARCH BRIEF (requirements document) from a conversation.\n\nBRIEF SO FAR:\n"
                         + brief.render()
-                        + "\nTHE TURN — the person said:\n" + org.codezaiku.research.LibraryBridge.compress(text, 600)
-                        + "\nThe librarian answered:\n" + org.codezaiku.research.LibraryBridge.compress(result.summary(), 1800)
+                        + "\nTHE TURN — the person said:\n" + LibraryBridge.compress(text, 600)
+                        + "\nThe librarian answered:\n" + LibraryBridge.compress(result.summary(), 1800)
                         + "\n\nAnswer with a JSON object ONLY describing what the turn CHANGES (omit what it does not): "
                         + "{\"question\": \"the refined research question, one sentence\", \"depth\": \"broad|depth\", "
                         + "\"scope_in\": [..], \"scope_out\": [..], \"sub_questions\": [..], \"sources\": [\"languages or kinds of source wanted\"], "
@@ -1075,9 +1106,9 @@ public final class ChatRepl {
     /** `/research status`: the active jobs, the last ten finished, and how many more there are. */
     /** `/research status`: this patron's jobs on the daemon — the active ones, the last ten finished, unread marked. */
     private void researchStatus(ChatIo io) {
-        if (!org.codezaiku.research.LibraryBridge.answers()) { io.println("    no library answers on " + org.codezaiku.research.LibraryBridge.url() + " — /setup librarian installs ResearchZosho, or start its service"); return; }
+        if (!LibraryBridge.answers()) { io.println("    no library answers on " + LibraryBridge.url() + " — /setup librarian installs ResearchZosho, or start its service"); return; }
         try {
-            var page = org.codezaiku.research.LibraryBridge.client().jobs(10, null);
+            var page = LibraryBridge.client().jobs(10, null);
             var read = readJobs();
             int shown = 0;
             for (var j : page.path("active")) { if (statusLine(io, j, read)) shown++; }
@@ -1091,7 +1122,7 @@ public final class ChatRepl {
         }
     }
 
-    private boolean statusLine(ChatIo io, JsonNode j, java.util.Set<String> read) {
+    private boolean statusLine(ChatIo io, JsonNode j, Set<String> read) {
         if (!"research".equals(j.path("kind").asText("research"))) return false;
         String id = j.path("job_id").asText("");
         String st = j.path("state").asText("");
@@ -1099,7 +1130,7 @@ public final class ChatRepl {
         String q = j.path("question").asText("");
         int cut = q.indexOf('\n');
         io.println("    " + (unread ? "◆ " : "  ") + id + "  " + st + "  " + j.path("elapsed_s").asLong(0) + "s  "
-                + org.codezaiku.research.LibraryBridge.compress(cut > 0 ? q.substring(0, cut) : q, 90)
+                + LibraryBridge.compress(cut > 0 ? q.substring(0, cut) : q, 90)
                 + (j.hasNonNull("investigation") ? "  → " + j.get("investigation").asText() : ""));
         return true;
     }
@@ -1112,9 +1143,9 @@ public final class ChatRepl {
      */
     private void reportLanded(ChatIo io) {
         try {
-            if (!org.codezaiku.research.LibraryBridge.answers()) return;
+            if (!LibraryBridge.answers()) return;
             var read = readJobs();
-            var page = org.codezaiku.research.LibraryBridge.client().jobs(20, null);
+            var page = LibraryBridge.client().jobs(20, null);
             for (var j : page.path("finished")) {
                 String id = j.path("job_id").asText("");
                 if (id.isEmpty() || read.contains(id) || reported.contains(id)) continue;
@@ -1123,7 +1154,7 @@ public final class ChatRepl {
                 String q = j.path("question").asText("");
                 int cut = q.indexOf('\n');
                 io.println("  ◆ research " + id + ("done".equals(st) ? " landed" : " FAILED") + " — "
-                        + org.codezaiku.research.LibraryBridge.compress(cut > 0 ? q.substring(0, cut) : q, 100));
+                        + LibraryBridge.compress(cut > 0 ? q.substring(0, cut) : q, 100));
                 if ("done".equals(st) && !j.hasNonNull("investigation")) {
                     // nothing came of it and there is nothing to read, so this is said once; before, it was said at
                     // every start until the person ran /research read on each one (eight of them, 2026-09-18)
@@ -1142,9 +1173,9 @@ public final class ChatRepl {
 
     /** `/research read <J-id | I-id>`: the whole result, here, from the daemon. */
     private void researchRead(ChatIo io, String ref) {
-        if (!org.codezaiku.research.LibraryBridge.answers()) { io.println("    no library answers on " + org.codezaiku.research.LibraryBridge.url()); return; }
+        if (!LibraryBridge.answers()) { io.println("    no library answers on " + LibraryBridge.url()); return; }
         try {
-            var client = org.codezaiku.research.LibraryBridge.client();
+            var client = LibraryBridge.client();
             if (ref.equals("all")) {
                 // clear the backlog of notices without printing eight reports
                 int n = 0;
@@ -1167,9 +1198,9 @@ public final class ChatRepl {
             io.println("");
             io.println(inv.path("body").asText("").strip());
             var fs = inv.path("findings");
-            if (fs.isArray() && fs.size() > 0) { var ids = new java.util.ArrayList<String>(); for (var f : fs) ids.add(f.asText()); io.println("\n  findings extracted: " + String.join(", ", ids)); }
+            if (fs.isArray() && fs.size() > 0) { var ids = new ArrayList<String>(); for (var f : fs) ids.add(f.asText()); io.println("\n  findings extracted: " + String.join(", ", ids)); }
             else io.println("\n  (no findings extracted yet — the library's housekeeping does that, or `researchzosho settle`)");
-        } catch (org.researchzosho.client.LibraryException e) {
+        } catch (LibraryException e) {
             io.println("    ! " + e.getMessage() + " [" + e.code + "]");
         } catch (Exception e) {
             io.println("    ! " + e.getMessage());
@@ -1177,14 +1208,14 @@ public final class ChatRepl {
     }
 
     // the read marks: one id per line, in CodeZaiku's own home
-    private static Path readJobsFile() { return org.codezaiku.Config.home().resolve("research").resolve("read-jobs.txt"); }
-    private static java.util.Set<String> readJobs() {
-        try { return new java.util.HashSet<>(java.nio.file.Files.readAllLines(readJobsFile())); } catch (Exception e) { return new java.util.HashSet<>(); }
+    private static Path readJobsFile() { return Config.home().resolve("research").resolve("read-jobs.txt"); }
+    private static Set<String> readJobs() {
+        try { return new HashSet<>(Files.readAllLines(readJobsFile())); } catch (Exception e) { return new HashSet<>(); }
     }
     private static void markRead(String id) {
         try {
-            java.nio.file.Files.createDirectories(readJobsFile().getParent());
-            if (!readJobs().contains(id)) java.nio.file.Files.writeString(readJobsFile(), id + "\n", java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            Files.createDirectories(readJobsFile().getParent());
+            if (!readJobs().contains(id)) Files.writeString(readJobsFile(), id + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception ignored) { }
     }
 
@@ -1243,21 +1274,21 @@ public final class ChatRepl {
 
     static final class Narrator implements ToolRegistry.Listener {
         private final ChatIo io;
-        private final java.util.Set<String> files;
+        private final Set<String> files;
         private final ChatConsent consent;
         private final ChatJournal journal;
 
         /** What is running now, for the status line: null between tool calls (the model is thinking). */
         private volatile String running = null;
         private volatile long runningSince = 0;
-        private final java.util.concurrent.atomic.AtomicInteger steps = new java.util.concurrent.atomic.AtomicInteger();
-        private final java.util.Set<String> changed = new java.util.LinkedHashSet<>();
+        private final AtomicInteger steps = new AtomicInteger();
+        private final Set<String> changed = new LinkedHashSet<>();
         private final long turnStart = System.nanoTime();
         String running() { return running; }
         long runningSince() { return runningSince; }
         int steps() { return steps.get(); }
 
-        Narrator(ChatIo io, java.util.Set<String> files, ChatConsent consent, ChatJournal journal) {
+        Narrator(ChatIo io, Set<String> files, ChatConsent consent, ChatJournal journal) {
             this.io = io;
             this.files = files;
             this.consent = consent;
@@ -1348,8 +1379,8 @@ public final class ChatRepl {
             if (result.startsWith("no results")) return "0 results";
             if (result.startsWith("ALREADY SEARCHED")) return "already searched — needs a different query";
             // both backends emit: "N. Title" then an indented "   url" line per result
-            int shown = org.codezaiku.Config.getInt("CODEZAIKU_CHAT_SEARCH_URLS", 3);
-            var urls = new java.util.ArrayList<String>();
+            int shown = Config.getInt("CODEZAIKU_CHAT_SEARCH_URLS", 3);
+            var urls = new ArrayList<String>();
             int count = 0;
             for (String line : result.split("\n")) {
                 if (line.matches("\\d+\\. .*")) count++;

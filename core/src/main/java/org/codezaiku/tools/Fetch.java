@@ -16,6 +16,8 @@ import java.util.Locale;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.InflaterInputStream;
 
+import java.io.IOException;
+import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * One HTTP GET for research: the address check, the redirect walk, the size cap, the decompression.
  * Every fetch of a URL a MODEL or a PAGE named goes through here — the web tool, {@code researchzosho add},
@@ -113,7 +115,7 @@ public final class Fetch {
             int status = resp.statusCode();
             if (status >= 300 && status < 400) {
                 String loc = resp.headers().firstValue("Location").orElse(null);
-                try (InputStream in = resp.body()) { readUntil(in, 64 * 1024, deadline); } catch (java.io.IOException ignored) { }
+                try (InputStream in = resp.body()) { readUntil(in, 64 * 1024, deadline); } catch (IOException ignored) { }
                 if (loc == null) return new Result(current, status, new byte[0], "");
                 current = uri.resolve(loc).toString();
                 if (hop == MAX_HOPS) throw new IllegalStateException("too many redirects from " + url);
@@ -137,13 +139,13 @@ public final class Fetch {
     }
 
     /** Up to {@code max} bytes, or an exception when the deadline passes first. The watchdog closes the stream, which is what ends a blocked read. */
-    static byte[] readUntil(InputStream in, int max, long deadlineNanos) throws java.io.IOException {
-        var done = new java.util.concurrent.atomic.AtomicBoolean(false);
-        var timedOut = new java.util.concurrent.atomic.AtomicBoolean(false);
+    static byte[] readUntil(InputStream in, int max, long deadlineNanos) throws IOException {
+        var done = new AtomicBoolean(false);
+        var timedOut = new AtomicBoolean(false);
         Thread watchdog = new Thread(() -> {
             while (!done.get()) {
                 long left = deadlineNanos - System.nanoTime();
-                if (left <= 0) { timedOut.set(true); try { in.close(); } catch (java.io.IOException ignored) { } return; }
+                if (left <= 0) { timedOut.set(true); try { in.close(); } catch (IOException ignored) { } return; }
                 try { Thread.sleep(Math.min(500L, Math.max(10L, left / 1_000_000L))); } catch (InterruptedException e) { return; }
             }
         }, "fetch-deadline");
@@ -153,10 +155,10 @@ public final class Fetch {
             byte[] got = in.readNBytes(max);
             // the HTTP client's body stream answers a close with end-of-stream, not an exception: what was read so far
             // would come back looking like the whole page
-            if (timedOut.get()) throw new java.io.IOException("the page did not finish arriving within the time allowed; not read");
+            if (timedOut.get()) throw new IOException("the page did not finish arriving within the time allowed; not read");
             return got;
-        } catch (java.io.IOException e) {
-            if (timedOut.get()) throw new java.io.IOException("the page did not finish arriving within the time allowed; not read");
+        } catch (IOException e) {
+            if (timedOut.get()) throw new IOException("the page did not finish arriving within the time allowed; not read");
             throw e;
         } finally {
             done.set(true);

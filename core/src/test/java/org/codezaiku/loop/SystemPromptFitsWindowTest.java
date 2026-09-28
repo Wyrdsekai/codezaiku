@@ -10,6 +10,11 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.codezaiku.Config;
+import org.codezaiku.drive.DriveClient;
+import org.codezaiku.library.Library;
+import org.codezaiku.library.LibraryIndex;
+import org.codezaiku.tools.ToolRegistry;
 /**
  * The end of the chain, on the thing that actually failed: the assembled system prompt.
  *
@@ -28,11 +33,11 @@ class SystemPromptFitsWindowTest {
     @TempDir Path repo;
 
     private static FamiliarLoop loopOver(Path root) throws Exception {
-        var drive = new org.codezaiku.drive.DriveClient("http://127.0.0.1:1", "test-model");
+        var drive = new DriveClient("http://127.0.0.1:1", "test-model");
         Constructor<?> c = FamiliarLoop.class.getConstructor(
-                org.codezaiku.drive.DriveClient.class, org.codezaiku.tools.ToolRegistry.class,
-                Path.class, String.class, int.class, org.codezaiku.library.Library.class,
-                org.codezaiku.library.LibraryIndex.class);
+                DriveClient.class, ToolRegistry.class,
+                Path.class, String.class, int.class, Library.class,
+                LibraryIndex.class);
         return (FamiliarLoop) c.newInstance(drive, null, root, "add a function", 10, null, null);
     }
 
@@ -53,7 +58,7 @@ class SystemPromptFitsWindowTest {
                             + "  public String describe() { return \"x\"; }\n}\n");
         }
 
-        int nctx = Integer.parseInt(org.codezaiku.Config.get("CODEZAIKU_CTX", "8192"));
+        int nctx = Integer.parseInt(Config.get("CODEZAIKU_CTX", "8192"));
         String prompt = systemPrompt(loopOver(repo));
         int tokens = prompt.length() / FamiliarLoop.CHARS_PER_TOKEN;
 

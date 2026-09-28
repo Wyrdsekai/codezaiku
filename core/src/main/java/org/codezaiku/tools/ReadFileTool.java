@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 
+import org.codezaiku.Config;
 /**
  * Read a file, with a read-guard for the small window (little-coder / smallcode pattern): a too-large
  * file is NOT dumped — it returns its head plus a directive to grep then read a specific range via
@@ -26,7 +27,7 @@ public final class ReadFileTool implements Tool {
     // few extra round trips of a smaller history. Re-transmission dominates, not window pressure —
     // measured context high-water on these runs never exceeded ~26% of the window.
     // Still env-settable so the experiment is repeatable; the default is the measured choice.
-    private static final int CAP = org.codezaiku.Config.getInt("CODEZAIKU_READ_CAP", 12_000);
+    private static final int CAP = Config.getInt("CODEZAIKU_READ_CAP", 12_000);
     private static final int HEAD_LINES = 60;  // lines of a too-large file shown for structure
     private final PathScope scope;
 

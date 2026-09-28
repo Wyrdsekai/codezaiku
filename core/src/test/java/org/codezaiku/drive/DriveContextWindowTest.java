@@ -9,6 +9,8 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 /** Behind llama-swap, /props names no model; the upstream server's /props does, and carries the real window. */
 class DriveContextWindowTest {
     @Test
@@ -31,7 +33,7 @@ class DriveContextWindowTest {
             // and with no model name there is nothing to ask the proxy for: this is why doctor must pass the configured
             // model, which it did not (it reported 8192 behind llama-swap while every run read 32768)
             assertNull(new DriveClient(base, "").fromLlamaCppProps());
-            assertFalse(java.nio.file.Files.readString(java.nio.file.Path.of("src/main/java/org/codezaiku/Doctor.java")).contains("new DriveClient(driveUrl, \"\")"), "doctor asks with the configured model");
+            assertFalse(Files.readString(Path.of("src/main/java/org/codezaiku/Doctor.java")).contains("new DriveClient(driveUrl, \"\")"), "doctor asks with the configured model");
         } finally { s.stop(0); }
     }
 }

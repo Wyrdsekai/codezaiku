@@ -16,6 +16,7 @@ import org.codezaiku.library.ProjectConventions;
 import org.codezaiku.ops.OpsDiscovery;
 import org.codezaiku.research.ResearchMemory;
 
+import java.util.function.Predicate;
 /**
  * CodeZaiku MCP server (stdio, JSON-RPC 2.0). Exposes CodeZaiku's capabilities as MCP tools so any MCP
  * client — Claude Desktop, another agent, or a larger agent fabric — can invoke them. MCP is the whole
@@ -40,13 +41,13 @@ public final class McpServer {
     private McpServer() { }
 
     /** Only tools whose name passes this are listed or callable; null = all. Set by `librarian mcp`. */
-    private static volatile java.util.function.Predicate<String> toolFilter = null;
+    private static volatile Predicate<String> toolFilter = null;
 
     /** Restrict every entry point (stdio and the daemon's /rpc) to the tools {@code filter} admits. */
-    public static void setToolFilter(java.util.function.Predicate<String> filter) { toolFilter = filter; }
+    public static void setToolFilter(Predicate<String> filter) { toolFilter = filter; }
 
     /** Serve MCP over stdio with only the tools {@code filter} admits — `codezaiku librarian mcp`. */
-    public static void serveStdio(java.util.function.Predicate<String> filter) throws Exception {
+    public static void serveStdio(Predicate<String> filter) throws Exception {
         toolFilter = filter;
         serveStdio();
     }
@@ -97,7 +98,7 @@ public final class McpServer {
                 r.set("capabilities", caps);
                 ObjectNode info = M.createObjectNode();
                 info.put("name", "codezaiku");
-                info.put("version", org.codezaiku.FamiliarMain.VERSION);   // it said "0.1" whatever the release, through 0.3.3
+                info.put("version", FamiliarMain.VERSION);   // it said "0.1" whatever the release, through 0.3.3
                 r.set("serverInfo", info);
                 return r;
             }

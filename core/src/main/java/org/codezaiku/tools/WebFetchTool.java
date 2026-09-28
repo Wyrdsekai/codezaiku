@@ -23,6 +23,7 @@ import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.InflaterInputStream;
 
+import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Fetch a URL and return its readable text — the "read the source" half of research (web_search finds,
  * web_fetch reads). HTML is reduced to text (script/style stripped, tags removed, entities decoded) and
@@ -33,8 +34,8 @@ public final class WebFetchTool implements Tool {
     /** Session-wide count of successful source fetches — the acquisitions gate's "did this run
      *  actually READ anything" evidence (a finding needs ≥1 fetched source; a claim without one
      *  is answered-from-memory, which the librarian refuses at intake). */
-    public static final java.util.concurrent.atomic.AtomicInteger FETCHES_OK =
-            new java.util.concurrent.atomic.AtomicInteger();
+    public static final AtomicInteger FETCHES_OK =
+            new AtomicInteger();
 
     // Page excerpts must stay SMALL: a 9B has a ~16K-token window shared with history. 12K-char pages filled
     // the context after a few fetches (out_budget collapsed 16384 -> 1909) leaving no room to WRITE the answer —
@@ -133,7 +134,7 @@ public final class WebFetchTool implements Tool {
      *  strips the head, so this must run before it. */
     public static String pageTitle(String html) {
         if (html == null) return "";
-        var m = java.util.regex.Pattern.compile("(?is)<title[^>]*>(.*?)</title>").matcher(html);
+        var m = Pattern.compile("(?is)<title[^>]*>(.*?)</title>").matcher(html);
         if (!m.find()) return "";
         String t = m.group(1).replaceAll("\\s+", " ").strip()
                 .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")

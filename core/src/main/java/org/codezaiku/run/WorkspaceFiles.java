@@ -11,6 +11,11 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.nio.file.Files;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 /**
  * Works out which files a run changed, for hosts that drive CodeZaiku as a subprocess and sync on
  * the answer.
@@ -81,11 +86,11 @@ public final class WorkspaceFiles {
     /** Content hash of a file up to 16 MB, size and mtime beyond that, "-" for a path that is not a readable file. */
     static String fingerprint(Path file) {
         try {
-            if (!java.nio.file.Files.isRegularFile(file)) return "-";
-            long size = java.nio.file.Files.size(file);
-            if (size > 16L * 1024 * 1024) return size + "@" + java.nio.file.Files.getLastModifiedTime(file).toMillis();
-            var md = java.security.MessageDigest.getInstance("SHA-1");
-            return java.util.HexFormat.of().formatHex(md.digest(java.nio.file.Files.readAllBytes(file)));
+            if (!Files.isRegularFile(file)) return "-";
+            long size = Files.size(file);
+            if (size > 16L * 1024 * 1024) return size + "@" + Files.getLastModifiedTime(file).toMillis();
+            var md = MessageDigest.getInstance("SHA-1");
+            return HexFormat.of().formatHex(md.digest(Files.readAllBytes(file)));
         } catch (Exception e) {
             return "-";
         }
@@ -240,7 +245,7 @@ public final class WorkspaceFiles {
             ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.directory(dir.toFile());
             pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-            pb.redirectInput(ProcessBuilder.Redirect.from(new java.io.File(System.getProperty("os.name", "").toLowerCase().contains("win") ? "NUL" : "/dev/null")));
+            pb.redirectInput(ProcessBuilder.Redirect.from(new File(System.getProperty("os.name", "").toLowerCase().contains("win") ? "NUL" : "/dev/null")));
             var env = pb.environment();
             for (String k : List.of("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX")) env.remove(k);
             env.put("GIT_OPTIONAL_LOCKS", "0");
@@ -248,7 +253,7 @@ public final class WorkspaceFiles {
             env.put("LC_ALL", "C");
             p = pb.start();
             Process proc = p;
-            var buf = new java.io.ByteArrayOutputStream();
+            var buf = new ByteArrayOutputStream();
             Thread drain = new Thread(() -> { try { proc.getInputStream().transferTo(buf); } catch (Exception ignored) { } });
             drain.setDaemon(true);
             drain.start();

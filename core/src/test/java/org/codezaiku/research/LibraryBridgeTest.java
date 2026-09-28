@@ -11,6 +11,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.sun.net.httpserver.HttpExchange;
+import java.io.IOException;
 /** The door to ResearchZosho: everything degrades to "nothing" without a daemon, and rides the client with one. */
 class LibraryBridgeTest {
 
@@ -36,7 +38,7 @@ class LibraryBridgeTest {
         LibraryBridge.reprobe();
     }
 
-    private static void reply(com.sun.net.httpserver.HttpExchange x, String body) throws java.io.IOException {
+    private static void reply(HttpExchange x, String body) throws IOException {
         byte[] b = body.getBytes(StandardCharsets.UTF_8);
         x.getResponseHeaders().add("Content-Type", "application/json");
         x.sendResponseHeaders(200, b.length);

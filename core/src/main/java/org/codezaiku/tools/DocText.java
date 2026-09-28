@@ -15,6 +15,7 @@ import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
+import java.util.HashMap;
 /**
  * Document → text, for everything the research path and the library shelve: a fetched page, a
  * downloaded paper, a colleague's DOCX, an EPUB edition.
@@ -186,7 +187,7 @@ public final class DocText {
 
         List<String> order = new ArrayList<>();
         if (!opf.isEmpty()) {
-            var hrefById = new java.util.HashMap<String, String>();
+            var hrefById = new HashMap<String, String>();
             Matcher im = Pattern.compile("<item\\b[^>]*>").matcher(opf);
             while (im.find()) {
                 String tag = im.group();

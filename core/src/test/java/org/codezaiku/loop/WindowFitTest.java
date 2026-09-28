@@ -10,6 +10,12 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import org.codezaiku.Config;
+import org.codezaiku.drive.DriveClient;
+import org.codezaiku.library.Library;
+import org.codezaiku.library.LibraryIndex;
+import org.codezaiku.tools.ToolRegistry;
+import org.junit.jupiter.api.io.TempDir;
 /**
  * A request that cannot fit must never be SENT.
  *
@@ -24,11 +30,11 @@ class WindowFitTest {
     private static final ObjectMapper J = new ObjectMapper();
 
     private static FamiliarLoop loop(Path root) throws Exception {
-        var drive = new org.codezaiku.drive.DriveClient("http://127.0.0.1:1", "test-model");
+        var drive = new DriveClient("http://127.0.0.1:1", "test-model");
         Constructor<?> c = FamiliarLoop.class.getConstructor(
-                org.codezaiku.drive.DriveClient.class, org.codezaiku.tools.ToolRegistry.class,
-                Path.class, String.class, int.class, org.codezaiku.library.Library.class,
-                org.codezaiku.library.LibraryIndex.class);
+                DriveClient.class, ToolRegistry.class,
+                Path.class, String.class, int.class, Library.class,
+                LibraryIndex.class);
         return (FamiliarLoop) c.newInstance(drive, null, root, "goal", 10, null, null);
     }
 
@@ -56,10 +62,10 @@ class WindowFitTest {
     }
 
     @Test
-    void anOversizedConversationIsBroughtInsideTheWindow(@org.junit.jupiter.api.io.TempDir Path tmp)
+    void anOversizedConversationIsBroughtInsideTheWindow(@TempDir Path tmp)
             throws Exception {
         FamiliarLoop l = loop(tmp);
-        int nctx = Integer.parseInt(org.codezaiku.Config.get("CODEZAIKU_CTX", "8192"));
+        int nctx = Integer.parseInt(Config.get("CODEZAIKU_CTX", "8192"));
 
         ArrayNode messages = conversation(nctx * FamiliarLoop.CHARS_PER_TOKEN);   // ~4x the window
         assertTrue(tokens(l, messages) > nctx, "the fixture must start over the window");
@@ -73,9 +79,9 @@ class WindowFitTest {
     }
 
     @Test
-    void aTrimmedObservationSaysSo(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+    void aTrimmedObservationSaysSo(@TempDir Path tmp) throws Exception {
         FamiliarLoop l = loop(tmp);
-        int nctx = Integer.parseInt(org.codezaiku.Config.get("CODEZAIKU_CTX", "8192"));
+        int nctx = Integer.parseInt(Config.get("CODEZAIKU_CTX", "8192"));
         ArrayNode messages = conversation(nctx * FamiliarLoop.CHARS_PER_TOKEN);
 
         fit(l, messages);
@@ -89,7 +95,7 @@ class WindowFitTest {
     }
 
     @Test
-    void aConversationThatAlreadyFitsIsUntouched(@org.junit.jupiter.api.io.TempDir Path tmp)
+    void aConversationThatAlreadyFitsIsUntouched(@TempDir Path tmp)
             throws Exception {
         FamiliarLoop l = loop(tmp);
         ArrayNode messages = conversation(200);
@@ -105,7 +111,7 @@ class WindowFitTest {
      * schemas were not counted at all.
      */
     @Test
-    void theEstimateLearnsFromTheServersCountAndCountsTheSchemas(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+    void theEstimateLearnsFromTheServersCountAndCountsTheSchemas(@TempDir Path tmp) throws Exception {
         FamiliarLoop l = loop(tmp);
         ArrayNode c = conversation(3000);
         int before = tokens(l, c);
@@ -128,7 +134,7 @@ class WindowFitTest {
      * trimmed too, once the older ones are exhausted.
      */
     @Test
-    void anOverflowInTheNewestMessagesIsTrimmedToo(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+    void anOverflowInTheNewestMessagesIsTrimmedToo(@TempDir Path tmp) throws Exception {
         FamiliarLoop l = loop(tmp);
         ArrayNode a = J.createArrayNode();
         a.addObject().put("role", "system").put("content", "you are a coding agent");
@@ -147,7 +153,7 @@ class WindowFitTest {
 
     /** No single tool result may take more than an eighth of the window; head and tail are kept. */
     @Test
-    void aToolResultIsBoundedToAnEighthOfTheWindow(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+    void aToolResultIsBoundedToAnEighthOfTheWindow(@TempDir Path tmp) throws Exception {
         FamiliarLoop l = loop(tmp);
         var nctx = FamiliarLoop.class.getDeclaredField("nctx"); nctx.setAccessible(true); nctx.setInt(l, 32768);
         Method b = FamiliarLoop.class.getDeclaredMethod("boundToWindow", String.class, String.class); b.setAccessible(true);
@@ -160,7 +166,7 @@ class WindowFitTest {
 
     /** The task message is never trimmed, whatever else is: a checkpoint once read "exact deliverable was in the trimmed text". */
     @Test
-    void theTaskMessageIsNeverTrimmed(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+    void theTaskMessageIsNeverTrimmed(@TempDir Path tmp) throws Exception {
         FamiliarLoop l = loop(tmp);
         ArrayNode a = J.createArrayNode();
         a.addObject().put("role", "system").put("content", "you are a coding agent");
@@ -178,7 +184,7 @@ class WindowFitTest {
 
     /** Two parallel calls share the step's eighth. */
     @Test
-    void aBatchSharesTheStepsBound(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+    void aBatchSharesTheStepsBound(@TempDir Path tmp) throws Exception {
         FamiliarLoop l = loop(tmp);
         var nctx = FamiliarLoop.class.getDeclaredField("nctx"); nctx.setAccessible(true); nctx.setInt(l, 32768);
         Method b = FamiliarLoop.class.getDeclaredMethod("boundToWindow", String.class, String.class, int.class); b.setAccessible(true);

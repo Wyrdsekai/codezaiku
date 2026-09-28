@@ -14,6 +14,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+import java.io.File;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.util.Comparator;
+import java.util.HexFormat;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 /**
  * The model server on this machine, on demand: a proxy (llama-swap) that starts llama.cpp on the first request and
  * stops it after a quiet spell, so the card is free in between and nothing has to be up all the time. Every program
@@ -70,21 +81,21 @@ public final class ModelServer {
      * llama.cpp's pinned build, which publishes none, hashed when the build was pinned. A download that does not match
      * is not installed — the same rule as the one-line installer and the npm launcher. A test may put its own entries here.
      */
-    public static final java.util.Map<String, String> sums = new java.util.concurrent.ConcurrentHashMap<>(java.util.Map.ofEntries(
-        java.util.Map.entry("llama-swap_255_linux_amd64.tar.gz",   "84aa0df0cf3e302a8591e39de347f64c0c7dce1c3a948df68723a82e1fb4f1d4"),
-        java.util.Map.entry("llama-swap_255_linux_arm64.tar.gz",   "98686bc626e2d3df3b340b963fd4e4f4d3dd02dcd1bf31f0c777fb09e3053288"),
-        java.util.Map.entry("llama-swap_255_darwin_arm64.tar.gz",  "d11b4c733da1c64ffd1b955f64b6af92a8c66a443aeeafeef2e84d3bf1fbf531"),
-        java.util.Map.entry("llama-swap_255_darwin_amd64.tar.gz",  "98383f95298919cd6a73fcb11dadc78d53754bfe5d3de519fdead112f336f707"),
-        java.util.Map.entry("llama-swap_255_windows_amd64.zip",    "14b40b2e11479af9a83dec3ac2bf7f82864e62099f012b171591b871b9f88aae"),
-        java.util.Map.entry("llama-b10929-bin-macos-arm64.tar.gz", "d2367a6381911313944cf6e52da44b1d62a5c239f7a79fd4ddeb4001c301544b"),
-        java.util.Map.entry("llama-b10929-bin-macos-x64.tar.gz",   "09621ac7f7636a6577075aba3bf40db4e22203aa2cac87c2dff7532982f89313"),
-        java.util.Map.entry("llama-b10929-bin-win-vulkan-x64.zip", "0527be2bcb79797337c4c500e6c25a62e0cdb572b14ef2db1066c94706208936")));
+    public static final Map<String, String> sums = new ConcurrentHashMap<>(Map.ofEntries(
+        Map.entry("llama-swap_255_linux_amd64.tar.gz",   "84aa0df0cf3e302a8591e39de347f64c0c7dce1c3a948df68723a82e1fb4f1d4"),
+        Map.entry("llama-swap_255_linux_arm64.tar.gz",   "98686bc626e2d3df3b340b963fd4e4f4d3dd02dcd1bf31f0c777fb09e3053288"),
+        Map.entry("llama-swap_255_darwin_arm64.tar.gz",  "d11b4c733da1c64ffd1b955f64b6af92a8c66a443aeeafeef2e84d3bf1fbf531"),
+        Map.entry("llama-swap_255_darwin_amd64.tar.gz",  "98383f95298919cd6a73fcb11dadc78d53754bfe5d3de519fdead112f336f707"),
+        Map.entry("llama-swap_255_windows_amd64.zip",    "14b40b2e11479af9a83dec3ac2bf7f82864e62099f012b171591b871b9f88aae"),
+        Map.entry("llama-b10929-bin-macos-arm64.tar.gz", "d2367a6381911313944cf6e52da44b1d62a5c239f7a79fd4ddeb4001c301544b"),
+        Map.entry("llama-b10929-bin-macos-x64.tar.gz",   "09621ac7f7636a6577075aba3bf40db4e22203aa2cac87c2dff7532982f89313"),
+        Map.entry("llama-b10929-bin-win-vulkan-x64.zip", "0527be2bcb79797337c4c500e6c25a62e0cdb572b14ef2db1066c94706208936")));
     static { for (Row r : ROWS) sums.put(r.file(), r.sha256()); }
 
     static String sha256(Path p) throws Exception {
-        var md = java.security.MessageDigest.getInstance("SHA-256");
+        var md = MessageDigest.getInstance("SHA-256");
         try (var in = Files.newInputStream(p)) { byte[] b = new byte[1 << 16]; int n; while ((n = in.read(b)) > 0) md.update(b, 0, n); }
-        return java.util.HexFormat.of().formatHex(md.digest());
+        return HexFormat.of().formatHex(md.digest());
     }
 
     /** Fetch {@code url} to {@code dest} and check it against the recorded hash; a mismatch is deleted and refused. */
@@ -118,8 +129,8 @@ public final class ModelServer {
     public interface Detacher { void start(List<String> cmd) throws Exception; }
     public static Detacher detach = cmd -> {
         Process p = new ProcessBuilder(cmd).redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD)
-                .redirectInput(ProcessBuilder.Redirect.from(new java.io.File(os == Os.windows ? "NUL" : "/dev/null"))).start();
-        p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);   // the starter itself returns at once; the proxy it launched lives on
+                .redirectInput(ProcessBuilder.Redirect.from(new File(os == Os.windows ? "NUL" : "/dev/null"))).start();
+        p.waitFor(10, TimeUnit.SECONDS);   // the starter itself returns at once; the proxy it launched lives on
     };
     public static Runner runner = cmd -> {
         Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
@@ -130,10 +141,10 @@ public final class ModelServer {
         Path part = dest.resolveSibling(dest.getFileName() + ".part");
         Process p = new ProcessBuilder(os == Os.windows ? "curl.exe" : "curl", "-fL", "--progress-bar", "-o", part.toString(), url).inheritIO().start();
         if (p.waitFor() != 0) throw new IOException("download failed: " + url);
-        Files.move(part, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        Files.move(part, dest, StandardCopyOption.REPLACE_EXISTING);
     };
     /** Whether a proxy answers at {@code base}: llama-swap's /health says OK; any other server's model list will do. */
-    public static java.util.function.Predicate<String> health = base -> {
+    public static Predicate<String> health = base -> {
         try {
             HttpClient c = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
             HttpResponse<String> r = c.send(HttpRequest.newBuilder(URI.create(base + "/health")).timeout(Duration.ofSeconds(3)).GET().build(), HttpResponse.BodyHandlers.ofString());
@@ -145,7 +156,7 @@ public final class ModelServer {
 
     // ---- what this machine is ----
 
-    public static Path dir() { return org.codezaiku.Config.home().resolve("model"); }
+    public static Path dir() { return Config.home().resolve("model"); }
     public static Path modelsDir() { return Path.of(System.getProperty("user.home")).resolve("models"); }
     static String home() { return System.getProperty("user.home"); }
 
@@ -221,7 +232,7 @@ public final class ModelServer {
     static String sizeNote(Row r) {
         try {
             Result h = runner.run(List.of(os == Os.windows ? "curl.exe" : "curl", "-sIL", r.url()));
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?i)content-length:\\s*(\\d+)").matcher(h.out());
+            Matcher m = Pattern.compile("(?i)content-length:\\s*(\\d+)").matcher(h.out());
             long n = 0; while (m.find()) n = Long.parseLong(m.group(1));
             return n > 0 ? " (about " + Math.round(n / 1e9) + " GB)" : "";
         } catch (Exception e) { return ""; }
@@ -253,7 +264,7 @@ public final class ModelServer {
 
     /** {@code --chat-template-kwargs '{"k":"v"}'} in the form a Windows command line reads: double quotes, the inner ones escaped. */
     static String windowsQuoted(String extra) {
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^--chat-template-kwargs '(.*)'$").matcher(extra);
+        Matcher m = Pattern.compile("^--chat-template-kwargs '(.*)'$").matcher(extra);
         if (!m.matches()) return extra;
         return "--chat-template-kwargs \"" + m.group(1).replace("\"", "\\\"") + "\"";
     }
@@ -350,7 +361,7 @@ public final class ModelServer {
         try {
             if (health.test(URL)) {
                 out.println("  a model proxy already answers at " + URL + "; using it");
-                org.codezaiku.Config.set("CODEZAIKU_DRIVE", URL);
+                Config.set("CODEZAIKU_DRIVE", URL);
                 return "local-model";
             }
             String why = unsupported();
@@ -399,7 +410,7 @@ public final class ModelServer {
                 }
             }
             // what the drive was, so uninstall can put it back (a working address on another machine, say)
-            String before = org.codezaiku.Config.get("CODEZAIKU_DRIVE"), beforeModel = org.codezaiku.Config.get("CODEZAIKU_MODEL");
+            String before = Config.get("CODEZAIKU_DRIVE"), beforeModel = Config.get("CODEZAIKU_MODEL");
             if (!Files.exists(dir.resolve("previous")))
                 Files.writeString(dir.resolve("previous"), (before == null ? "" : before) + "\n" + (beforeModel == null ? "" : beforeModel) + "\n", StandardCharsets.UTF_8);
             Plan p = plan(os, row, modelFile, dir, unitPath(os), gpus, idleMinutes, share);
@@ -411,8 +422,8 @@ public final class ModelServer {
             if (!s.isEmpty()) return s;
             for (int i = 0; i < 30 && !health.test(URL); i++) Thread.sleep(1000);
             if (!health.test(URL)) return "!the proxy did not answer at " + URL + " within 30 s: " + logHint();
-            org.codezaiku.Config.set("CODEZAIKU_DRIVE", URL);
-            org.codezaiku.Config.set("CODEZAIKU_MODEL", row.name());
+            Config.set("CODEZAIKU_DRIVE", URL);
+            Config.set("CODEZAIKU_MODEL", row.name());
             out.println("  the model comes up at " + URL + " when something asks (" + backend() + "), and goes away after " + idleMinutes + " idle minutes; the drive is set to it");
             return row.name();
         } catch (Exception e) {
@@ -458,7 +469,7 @@ public final class ModelServer {
 
     /** The other product's settings file, when it is not this product's own; its drive line, or null. */
     static String siblingDrive() {
-        Path own = org.codezaiku.Config.userConfigPath().toAbsolutePath();
+        Path own = Config.userConfigPath().toAbsolutePath();
         Path sib = Path.of(home(), ".researchzosho", "config").toAbsolutePath();
         if (sib.equals(own) || !Files.isRegularFile(sib)) return null;
         try {
@@ -486,15 +497,15 @@ public final class ModelServer {
     /** A few lines for `model serve status`. */
     public static String status() {
         StringBuilder b = new StringBuilder();
-        String drive = org.codezaiku.Config.get("CODEZAIKU_DRIVE");
+        String drive = Config.get("CODEZAIKU_DRIVE");
         b.append("  drive: ").append(drive == null || drive.isBlank() ? "(unset)" : drive).append('\n');
         Path cfg = dir().resolve("config.yaml");
         if (!Files.exists(cfg)) { b.append("  no model server of this machine's own (`codezaiku model serve install` sets one up)\n"); return b.toString(); }
         try {
             String y = Files.readString(cfg, StandardCharsets.UTF_8);
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"([^\"]+)\":\\s*\\n\\s*cmd:").matcher(y);
+            Matcher m = Pattern.compile("\"([^\"]+)\":\\s*\\n\\s*cmd:").matcher(y);
             String name = m.find() ? m.group(1) : "?";
-            java.util.regex.Matcher t = java.util.regex.Pattern.compile("ttl:\\s*(\\d+)").matcher(y);
+            Matcher t = Pattern.compile("ttl:\\s*(\\d+)").matcher(y);
             b.append("  model: ").append(name).append(" on ").append(backend()).append(t.find() ? ", stops after " + (Integer.parseInt(t.group(1)) / 60) + " idle minutes" : "").append('\n');
         } catch (IOException e) { b.append("  config unreadable: ").append(e.getMessage()).append('\n'); }
         boolean up = health.test(URL);
@@ -536,13 +547,13 @@ public final class ModelServer {
             if (Files.exists(prev)) {
                 String[] lines = Files.readString(prev, StandardCharsets.UTF_8).split("\n", -1);
                 String drive = lines.length > 0 ? lines[0].strip() : "", model = lines.length > 1 ? lines[1].strip() : "";
-                if (URL.equals(org.codezaiku.Config.get("CODEZAIKU_DRIVE"))) {   // still pointing at the proxy being removed: put the old address back
-                    org.codezaiku.Config.set("CODEZAIKU_DRIVE", drive.isEmpty() ? "http://localhost:8200" : drive);
-                    org.codezaiku.Config.set("CODEZAIKU_MODEL", model.isEmpty() ? "local-model" : model);
+                if (URL.equals(Config.get("CODEZAIKU_DRIVE"))) {   // still pointing at the proxy being removed: put the old address back
+                    Config.set("CODEZAIKU_DRIVE", drive.isEmpty() ? "http://localhost:8200" : drive);
+                    Config.set("CODEZAIKU_MODEL", model.isEmpty() ? "local-model" : model);
                     restored = "; the drive is back to " + (drive.isEmpty() ? "its default" : drive);
                 }
             }
-            if (Files.isDirectory(d)) { try (var s = Files.walk(d)) { s.sorted(java.util.Comparator.reverseOrder()).forEach(p -> { try { Files.deleteIfExists(p); } catch (IOException ignored) { } }); } }
+            if (Files.isDirectory(d)) { try (var s = Files.walk(d)) { s.sorted(Comparator.reverseOrder()).forEach(p -> { try { Files.deleteIfExists(p); } catch (IOException ignored) { } }); } }
             return "removed the service and the proxy; the model files in " + modelsDir() + " stay" + restored;
         } catch (Exception e) { return "!" + e.getMessage(); }
     }
