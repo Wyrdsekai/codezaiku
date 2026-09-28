@@ -17,6 +17,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.net.http.HttpTimeoutException;
+import java.net.http.HttpConnectTimeoutException;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -299,6 +302,55 @@ public final class FamiliarLoop {
      *  misconfigured HOSTED drive 404'd and the loop spun 2,600+ turns in seconds. Against a
      *  paid API that pattern is a money pump; against any drive it is noise. */
     static final int MAX_CONSECUTIVE_DRIVE_FAILURES = 8;
+
+    /**
+     * How long a turn waits for a model server that went away — refused, cut off, restarting or loading its model — before it counts as
+     * a failed call. A server another program owns goes away for a minute or two when that program restarts it (Wyrdsekai moves its
+     * brain between the card and RAM that way). Every refused request used to count as a failed call and be answered with a nudge
+     * about malformed JSON, so eight of them ended the run within seconds.
+     */
+    static final int AWAY_MINUTES = 10;
+    /** The waits between asking an absent model server again: 5 seconds, 10, then every 15. */
+    static volatile long[] awayWaitsMs = {5_000, 10_000, 15_000};
+
+    /** Whether a failed call is the model server being away, rather than an answer about the request or a request held until its limit. */
+    static boolean serverAway(Throwable e) {
+        String m = String.valueOf(e.getMessage());
+        if (m.startsWith("drive HTTP 502") || m.startsWith("drive HTTP 503") || m.startsWith("drive HTTP 504")) return true;
+        for (Throwable c = e instanceof IOException ? e : e.getCause(); c != null; c = c.getCause()) {
+            if (c instanceof HttpConnectTimeoutException) return true;
+            if (c instanceof HttpTimeoutException || c instanceof JsonProcessingException) return false;
+            if (c instanceof IOException) return true;
+        }
+        return false;
+    }
+
+    /** One model call; when the server is away, the same request again once it answers, for up to {@link #AWAY_MINUTES}, or until the host cancels. */
+    private ObjectNode chatThroughRestarts(ArrayNode messages, ArrayNode tools, int maxTokens, String toolChoice) {
+        try {
+            return drive.chat(messages, tools, maxTokens, toolChoice);
+        } catch (RuntimeException e) {
+            if (!serverAway(e)) throw e;
+            long start = System.currentTimeMillis(), until = start + AWAY_MINUTES * 60_000L;
+            log.warn("the model server is not answering ({}); waiting for it, up to {} minutes",
+                    e.getCause() == null ? e.getMessage() : e.getCause().getMessage(), AWAY_MINUTES);
+            RuntimeException last = e;
+            for (int i = 0; System.currentTimeMillis() < until && !cancelled.getAsBoolean(); i++) {
+                try { Thread.sleep(awayWaitsMs[Math.min(i, awayWaitsMs.length - 1)]); }
+                catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw last; }
+                try {
+                    ObjectNode back = drive.chat(messages, tools, maxTokens, toolChoice);
+                    log.info("the model server answers again after {} s; the run goes on", (System.currentTimeMillis() - start) / 1000);
+                    return back;
+                } catch (RuntimeException again) {
+                    if (!serverAway(again)) throw again;
+                    last = again;
+                }
+            }
+            log.error("the model server did not answer again within {} minutes", AWAY_MINUTES);
+            throw last;
+        }
+    }
     private boolean mutatingCallRan = false;   // any write_file/edit_file/shell this run
     private boolean falseWriteBounced = false; // the chat false-write bounce fires once
     private boolean webToolRan = false;        // any web_search/web_fetch this run
@@ -2051,7 +2103,7 @@ public final class FamiliarLoop {
             }
             try {
                 try {
-                    assistant = drive.chat(messages, turnTools, outBudget,
+                    assistant = chatThroughRestarts(messages, turnTools, outBudget,
                             (planTurn || proseAnswerTurn) ? "none" : "required");
                 } catch (RuntimeException first) {
                     // The server counted more tokens than we did. It said how many: learn the real ratio from that,
@@ -2064,7 +2116,7 @@ public final class FamiliarLoop {
                     log.warn("turn {}: the server counted {} tokens where the estimate said less; ratio now {} chars/token, trimmed {} more chars, sending again",
                             turn, counted, String.format("%.2f", charsPerToken), again);
                     outBudget = outputBudget(messages);
-                    assistant = drive.chat(messages, turnTools, outBudget,
+                    assistant = chatThroughRestarts(messages, turnTools, outBudget,
                             (planTurn || proseAnswerTurn) ? "none" : "required");
                 }
                 calibrate(requestChars(messages) + turnTools.toString().length(), drive.lastPromptTokens());

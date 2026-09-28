@@ -199,9 +199,9 @@ final class Doctor {
             System.out.print("\n" + offer + " Set it up now? [Y/n] ");
             String answer = System.console().readLine();
             if (answer == null || answer.isBlank() || answer.strip().regionMatches(true, 0, "y", 0, 1)) {   // (a local named `java` shadows the package here)
-                String r = ModelServer.install(null, "all", ModelServer.DEFAULT_IDLE_MINUTES, false, System.out);
+                String r = ModelServer.install(null, "all", ModelServer.DEFAULT_IDLE_MINUTES, false, false, System.out);   // a server another program runs first
                 if (r.startsWith("!")) System.out.println("  not set up: " + r.substring(1));
-                else { System.out.println("  serving " + r + " at " + ModelServer.URL + "; run codezaiku doctor again to see it"); return failedRequired == 1 ? 0 : 1; }
+                else { System.out.println("  serving " + r + " at " + Config.get("CODEZAIKU_DRIVE") + "; run codezaiku doctor again to see it"); return failedRequired == 1 ? 0 : 1; }
             }
         }
         return failedRequired == 0 ? 0 : 1;

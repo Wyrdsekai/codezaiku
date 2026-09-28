@@ -402,6 +402,11 @@ CodeZaiku's.
 CodeZaiku bounds a run by turns (`--max-turns`, default 40), not by wallclock. If your host enforces a
 wallclock limit, hard-kill with SIGTERM — that path is handled and still reports.
 
+When the model server goes away during a run (connections refused or cut, or 502, 503 or 504 while it
+restarts or loads its model), the run waits for it, up to 10 minutes, and goes on with the same turn.
+A host that restarts its own model server, as Wyrdsekai does when it moves its brain between the card
+and RAM, does not end a run by doing so. Your wallclock limit, if any, still applies during the wait.
+
 ### Updating CodeZaiku from your program
 
 A host that keeps CodeZaiku up to date runs its updater and reads a JSON answer instead of the words:

@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.Assumptions;
 /**
@@ -30,7 +31,42 @@ class ModelServerTest {
     final Predicate<String> realHealth = ModelServer.health;
     final ModelServer.Detacher realDetach = ModelServer.detach;
     final Map<String, String> realSums = new HashMap<>(ModelServer.sums);
-    @AfterEach void restore() { ModelServer.sums.clear(); ModelServer.sums.putAll(realSums); ModelServer.os = realOs; ModelServer.runner = realRunner; ModelServer.downloader = realDownloader; ModelServer.health = realHealth; ModelServer.detach = realDetach; }
+    final Function<String, ModelServer.Served> realServedAt = ModelServer.servedAt;
+    @AfterEach void restore() { ModelServer.sums.clear(); ModelServer.sums.putAll(realSums); ModelServer.os = realOs; ModelServer.runner = realRunner; ModelServer.downloader = realDownloader; ModelServer.health = realHealth; ModelServer.detach = realDetach; ModelServer.servedAt = realServedAt; }
+
+    @Test
+    void anInstallUsesAServerAnotherProgramAlreadyRunsWithAKnownModelAndDownloadsNothing(@TempDir Path home) throws Exception {
+        String realHome = System.getProperty("user.home");
+        System.setProperty("user.home", home.toString());
+        Config.invalidate();
+        boolean[] started = {false}; List<String> fetched = new ArrayList<>();
+        try {
+            fakeMachine(ModelServer.Os.linux, started, fetched);
+            ModelServer.health = base -> started[0];   // nothing of ours on 8211 until an install starts it
+            Map<String, ModelServer.Served> ports = new HashMap<>();
+            // Wyrdsekai's brain: llama-server without --alias lists the file it loaded
+            ports.put("http://127.0.0.1:8200", new ModelServer.Served(List.of("/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"), "/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"));
+            ports.put("http://127.0.0.1:11434", new ModelServer.Served(List.of("llama3:8b"), null));   // a model CodeZaiku does not know
+            ModelServer.servedAt = ports::get;
+            var out = new ByteArrayOutputStream();
+            String r = ModelServer.install(null, "all", 20, false, false, new PrintStream(out, true));
+            assertEquals("/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", r, out.toString());
+            assertEquals("http://127.0.0.1:8200", Config.get("CODEZAIKU_DRIVE"));
+            assertEquals("/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", Config.get("CODEZAIKU_MODEL"));
+            assertTrue(fetched.isEmpty() && !started[0] && !Files.exists(ModelServer.dir()), "nothing downloaded, nothing started: " + fetched);
+            assertTrue(out.toString().contains("(qwen3.6-35b-a3b)") && out.toString().contains("codezaiku model serve install --own"), out.toString());
+            // a Wyrdsekai drive fine-tune is not one of the known models
+            assertNull(ModelServer.knownModel("wyrdsekai-3.5-9b-drive-v6-q4km.gguf"));
+            assertEquals("qwen3.6-35b-a3b", ModelServer.knownModel("qwen3.6:35b-a3b-q4_K_M"));
+            // --own: CodeZaiku's own install, as before
+            ModelServer.install(null, "all", 20, false, true, new PrintStream(new ByteArrayOutputStream()));
+            assertFalse(fetched.isEmpty(), "its own model downloaded");
+            assertEquals("http://127.0.0.1:8211", Config.get("CODEZAIKU_DRIVE"));
+        } finally {
+            System.setProperty("user.home", realHome);
+            Config.invalidate();
+        }
+    }
 
     @Test
     void theRowFollowsTheMemory() {

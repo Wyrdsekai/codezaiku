@@ -2,7 +2,7 @@
 
 ## 0.3.11
 
-This release adds Amazon Bedrock as a model, with your own AWS account. `codezaiku update now` updates ResearchZosho too, through ResearchZosho's own updater, and programs that keep CodeZaiku up to date get a JSON answer and exit codes to act on.
+This release adds Amazon Bedrock as a model, with your own AWS account. `codezaiku update now` updates ResearchZosho too, through ResearchZosho's own updater, and programs that keep CodeZaiku up to date get a JSON answer and exit codes to act on. `model serve install` uses a model server that another program already runs, such as Wyrdsekai's.
 
 ### Added
 
@@ -11,6 +11,7 @@ This release adds Amazon Bedrock as a model, with your own AWS account. `codezai
 - `codezaiku doctor` checks a Bedrock drive by asking the chosen model for one token.
 - `codezaiku update --json` and `codezaiku update now --json`, for a program that keeps CodeZaiku up to date, such as Wyrdsekai. Each prints one JSON document on stdout, with the same fields as ResearchZosho's updater, and progress goes to stderr. The exit code says what happened: 0 updated or already current, 75 another update is running (ask again later), 3 this install cannot update itself, 1 failed. With `--json`, only CodeZaiku is updated. `docs/DEPLOYING_AS_A_BACKEND.md` has the fields.
 - One update at a time. An update holds a lock file in `~/.codezaiku` from start to end, and checks the version again against the installed files once it has the lock, because another program may have updated them in the meantime. A second update started meanwhile answers "busy" and changes nothing.
+- `codezaiku model serve install`, and `doctor` when it offers to set up a model, first look for a model server that another program already runs on this machine: Wyrdsekai's on port 8200, llama.cpp, vLLM, Ollama or LM Studio. When it serves one of the models CodeZaiku knows, Qwen3.6-35B-A3B among them, which Wyrdsekai runs as its brain, CodeZaiku uses that server and downloads nothing. `model serve install --own` installs CodeZaiku's own model instead.
 
 ### Changed
 
@@ -25,6 +26,7 @@ This release adds Amazon Bedrock as a model, with your own AWS account. `codezai
 
 - `codezaiku install researchzosho` updated an installed ResearchZosho by unpacking the plain tarball over it. On a machine without Java 21, a ResearchZosho that carried its own Java then no longer started. Its own updater now does the update and keeps that kind of build. A first install beside a CodeZaiku that runs on its own Java now takes ResearchZosho's build with its own Java too.
 - On Windows, `codezaiku update now` downloaded the release and then failed, because the running program holds its own files, and its advice to try again from a new terminal could not work. It now says at once to close CodeZaiku and run the installer again, and exits with 3.
+- A coding run whose model server went away for a moment, while it restarted or loaded its model, counted each refused request as a failed call, answered it with a note about malformed JSON, and ended after eight of them, within seconds. It now waits for the server, up to 10 minutes, and goes on with the same turn.
 
 ## 0.3.10
 

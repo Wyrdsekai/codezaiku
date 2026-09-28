@@ -1,5 +1,7 @@
 package org.codezaiku;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.URI;
@@ -22,6 +24,7 @@ import java.util.HexFormat;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -153,6 +156,76 @@ public final class ModelServer {
             return r.statusCode() == 200;
         } catch (Exception e) { return false; }
     };
+
+    /** The ports another program's model server usually listens on: Wyrdsekai's drive, llama.cpp, vLLM, Ollama, LM Studio. */
+    static final List<Integer> SHARED_PORTS = List.of(8200, 8080, 8000, 11434, 1234);
+
+    /**
+     * The models CodeZaiku uses when another program's server already serves one, best first: the rows it installs, and Qwen3.6-35B-A3B,
+     * which Wyrdsekai serves as its brain and ResearchZosho installs, but which CodeZaiku does not install itself.
+     */
+    static final List<String> SHARED_MODELS = List.of("qwen3.8-27b", "qwen3.6-35b-a3b", "gpt-oss-20b", "qwen3.5-9b", "gemma-4-e4b", "gemma-4-e2b");
+
+    /** What a server serves: the names its /v1/models lists, and the file llama.cpp's /props says it loaded (a server started with --alias lists only the alias). */
+    public record Served(List<String> ids, String file) { }
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /** What the server at {@code base} serves; null when nothing answers there. */
+    public static Function<String, Served> servedAt = base -> {
+        try {
+            HttpClient c = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
+            HttpResponse<String> r = c.send(HttpRequest.newBuilder(URI.create(base + "/v1/models")).timeout(Duration.ofSeconds(3)).GET().build(), HttpResponse.BodyHandlers.ofString());
+            if (r.statusCode() != 200) return null;
+            List<String> ids = new ArrayList<>();
+            for (JsonNode m : JSON.readTree(r.body()).path("data")) if (m.hasNonNull("id")) ids.add(m.get("id").asText());
+            String file = null;
+            try {
+                HttpResponse<String> p = c.send(HttpRequest.newBuilder(URI.create(base + "/props")).timeout(Duration.ofSeconds(3)).GET().build(), HttpResponse.BodyHandlers.ofString());
+                if (p.statusCode() == 200) file = JSON.readTree(p.body()).path("model_path").asText(null);
+            } catch (Exception ignored) { }
+            return new Served(ids, file);
+        } catch (Exception e) { return null; }
+    };
+
+    /** A server another program runs on this machine that serves one of {@link #SHARED_MODELS}: its address, the name to ask it for, which model it is. */
+    record Shared(String base, String model, String known) { }
+
+    /** The shared server with the best known model on the usual ports, or null. */
+    static Shared shared() {
+        Shared best = null;
+        for (int port : SHARED_PORTS) {
+            String base = "http://127.0.0.1:" + port;
+            Served s = servedAt.apply(base);
+            if (s == null) continue;
+            List<Shared> here = new ArrayList<>();
+            for (String id : s.ids()) { String k = knownModel(id); if (k != null) here.add(new Shared(base, id, k)); }
+            if (here.isEmpty() && s.file() != null && s.ids().size() == 1) {
+                String k = knownModel(s.file().substring(Math.max(s.file().lastIndexOf('/'), s.file().lastIndexOf('\\')) + 1));
+                if (k != null) here.add(new Shared(base, s.ids().get(0), k));
+            }
+            for (Shared h : here) if (best == null || SHARED_MODELS.indexOf(h.known()) < SHARED_MODELS.indexOf(best.known())) best = h;
+        }
+        return best;
+    }
+
+    /** Which known model a served one is, by the letters and digits of its name or file ("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", "qwen3.6:35b-a3b"); null for any other. */
+    static String knownModel(String name) {
+        String s = name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+        for (String k : SHARED_MODELS) if (s.contains(k.replaceAll("[^a-z0-9]", ""))) return k;
+        return null;
+    }
+
+    /** Point CodeZaiku at another program's server that serves a known model, and say what that means. */
+    static String useShared(Shared s, PrintStream out) throws IOException {
+        out.println("  Another program already runs a model server on this machine, at " + s.base() + ", with the model " + s.model()
+                + (s.model().equals(s.known()) ? "" : " (" + s.known() + ")") + ". CodeZaiku uses that server, so nothing is downloaded"
+                + " and the model is in memory once for every program that uses it.");
+        out.println("  To install a model of CodeZaiku's own instead: codezaiku model serve install --own");
+        Config.set("CODEZAIKU_DRIVE", s.base());
+        Config.set("CODEZAIKU_MODEL", s.model());
+        return s.model();
+    }
 
     // ---- what this machine is ----
 
@@ -357,13 +430,21 @@ public final class ModelServer {
      * the measured row's; {@code gpus} is "all" or a device index (Linux); {@code share} listens on every interface so other
      * machines can use this card.
      */
-    public static String install(Path file, String gpus, int idleMinutes, boolean share, PrintStream out) {
+    public static String install(Path file, String gpus, int idleMinutes, boolean share, PrintStream out) { return install(file, gpus, idleMinutes, share, true, out); }
+
+    /**
+     * {@code own}: install a model of CodeZaiku's own even when another program's server on this machine already serves a known one;
+     * without it, and with no file named, CodeZaiku uses that server and downloads nothing.
+     */
+    public static String install(Path file, String gpus, int idleMinutes, boolean share, boolean own, PrintStream out) {
         try {
             if (health.test(URL)) {
                 out.println("  a model proxy already answers at " + URL + "; using it");
                 Config.set("CODEZAIKU_DRIVE", URL);
                 return "local-model";
             }
+            Shared there = own || file != null ? null : shared();
+            if (there != null) return useShared(there, out);
             String why = unsupported();
             if (why != null) return "!" + why;
             Row row = rowFor(budgetGb());
@@ -563,19 +644,20 @@ public final class ModelServer {
         String op = a.length > from ? a[from] : "status";
         switch (op) {
             case "install" -> {
-                Path file = null; String gpus = "all"; int idle = DEFAULT_IDLE_MINUTES; boolean share = false;
+                Path file = null; String gpus = "all"; int idle = DEFAULT_IDLE_MINUTES; boolean share = false, own = false;
                 for (int i = from + 1; i < a.length; i++) {
                     switch (a[i]) {
                         case "--file" -> file = Path.of(a[++i]);
                         case "--gpu" -> gpus = a[++i];
                         case "--idle-minutes" -> idle = Integer.parseInt(a[++i]);
                         case "--share" -> share = true;
-                        default -> { out.println("usage: codezaiku model serve install [--file <gguf>] [--gpu <index>] [--idle-minutes N] [--share]"); return 2; }
+                        case "--own" -> own = true;
+                        default -> { out.println("usage: codezaiku model serve install [--own] [--file <gguf>] [--gpu <index>] [--idle-minutes N] [--share]"); return 2; }
                     }
                 }
-                String r = install(file, gpus, idle, share, out);
+                String r = install(file, gpus, idle, share, own, out);
                 if (r.startsWith("!")) { out.println("  not set up: " + r.substring(1)); return 1; }
-                out.println("  serving " + r + " at " + URL);
+                out.println("  serving " + r + " at " + Config.get("CODEZAIKU_DRIVE"));
                 return 0;
             }
             case "status" -> { out.print(status()); return 0; }
