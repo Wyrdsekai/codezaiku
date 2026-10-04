@@ -16,6 +16,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.Locale;
 
@@ -31,6 +32,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 import org.codezaiku.drive.aws.AwsCredentials;
+import org.codezaiku.drive.anthropic.Claude;
 import org.codezaiku.drive.aws.Bedrock;
 /**
  * Thin client over the llama.cpp drive at :8200 (OpenAI-compatible).
@@ -73,10 +75,14 @@ public final class DriveClient {
         // drive = bedrock: the person's own AWS account, through Converse, instead of an OpenAI-style server
         this.bedrock = Bedrock.is(this.baseUrl)
                 ? new Bedrock(Bedrock.settings(this.baseUrl, Config::get, System.getenv())) : null;
+        // drive = https://api.anthropic.com: the Claude API in its own format, which has the effort setting and prompt caching
+        this.claude = Claude.is(this.baseUrl) ? new Claude(this.baseUrl, DriveClient::apiKey) : null;
     }
 
     /** Amazon Bedrock behind this client, or null for every other drive. */
     private final Bedrock bedrock;
+    /** The Claude API behind this client, or null for every other drive. */
+    private final Claude claude;
 
     /**
      * Bearer credential for the endpoint, or null when none is configured.
@@ -100,9 +106,15 @@ public final class DriveClient {
     static HttpRequest.Builder auth(HttpRequest.Builder b, String key) {
         if (key == null || key.isBlank()) return b;          // a local server wants no header at all
         String k = key.trim();
+        if (Claude.is(address(b))) return Claude.auth(b, k);  // the Claude API takes its key in a header of its own
         // Accept a key given either bare or already prefixed, because both are in circulation and a
         // doubled "Bearer Bearer sk-..." fails in a way that looks like a bad key rather than a typo.
         return b.header("Authorization", k.regionMatches(true, 0, "Bearer ", 0, 7) ? k : "Bearer " + k);
+    }
+
+    /** Where a request is going, read off the request being built; "" when it has no address yet. */
+    private static String address(HttpRequest.Builder b) {
+        try { return b.copy().build().uri().toString(); } catch (RuntimeException e) { return ""; }
     }
 
     public ObjectMapper json() {
@@ -154,6 +166,8 @@ public final class DriveClient {
 
     public static final AtomicLong SESSION_COMPLETION_TOKENS =
             new AtomicLong();
+    /** Of the prompt tokens, those a server with a prompt cache read from it and wrote to it: they are priced differently. */
+    public static final AtomicLong SESSION_CACHE_READ_TOKENS = new AtomicLong(), SESSION_CACHE_WRITTEN_TOKENS = new AtomicLong();
 
     /** Per-request HTTP timeout. Five minutes suits every drive we had — until a 744B with
      *  CPU-resident experts needed 10-20 min per long generation and every call "failed" at
@@ -162,6 +176,56 @@ public final class DriveClient {
     private static Duration driveTimeout() {
         int s = Config.getInt("CODEZAIKU_DRIVE_TIMEOUT", 300);
         return Duration.ofSeconds(Math.max(30, s));
+    }
+
+    /** The longest one call may wait, however slow the server: CODEZAIKU_DRIVE_TIMEOUT_MAX (seconds), 30 minutes by default. */
+    private static Duration driveTimeoutMax() {
+        return Duration.ofSeconds(Math.max(driveTimeout().toSeconds(), Config.getInt("CODEZAIKU_DRIVE_TIMEOUT_MAX", 1800)));
+    }
+
+    /** Tokens a second this server generated and read prompt at, from the answers that finished (0 until one has). */
+    private volatile double generatedPerSecond = 0, promptPerSecond = 0;
+    /** Calls in a row that ran out of time; the next call waits longer. */
+    private volatile int timeoutsInARow = 0;
+    private volatile Duration lastCallLimit = null;
+
+    public double generatedPerSecond() { return generatedPerSecond; }
+    public String baseUrl() { return baseUrl; }
+    public Duration lastCallLimit() { return lastCallLimit; }
+
+    /**
+     * How long one call may wait. A server that works but slowly (a power-capped GPU, a model on the CPU) needs longer than the default
+     * for a long answer: measured 2026-09-29, a 27B on a GPU capped at 130 W made 7.8 tokens a second, every long answer ran past five
+     * minutes, and the same request was sent again with the same limit eight times until the run stopped. So the limit is the time
+     * this server needs for {@code maxTokens} at the speed it has shown, with room to spare, never less than CODEZAIKU_DRIVE_TIMEOUT;
+     * after a call that ran out of time the next one waits twice as long; and none waits longer than CODEZAIKU_DRIVE_TIMEOUT_MAX.
+     */
+    static Duration callLimit(Duration base, Duration max, double genPerSec, double promptPerSec, int maxTokens, int promptTokens,
+                              int timeoutsInARow) {
+        double s = base.toSeconds();
+        if (genPerSec > 0) {
+            double need = maxTokens / genPerSec + (promptPerSec > 0 ? promptTokens / promptPerSec : 0);
+            s = Math.max(s, need * 1.25 + 15);
+        }
+        if (timeoutsInARow > 0) s = Math.max(s, base.toSeconds() * Math.pow(2, Math.min(timeoutsInARow, 10)));
+        return Duration.ofSeconds((long) Math.min(Math.max(s, base.toSeconds()), max.toSeconds()));
+    }
+
+    private Duration callLimit(int maxTokens, int requestChars) {
+        Duration d = callLimit(driveTimeout(), driveTimeoutMax(), generatedPerSecond, promptPerSecond, maxTokens,
+                requestChars / 3, timeoutsInARow);
+        lastCallLimit = d;
+        return d;
+    }
+
+    /** One finished answer: what it shows of the server's speed. llama.cpp reports it; otherwise the answer's tokens over the wait. */
+    private void noteSpeed(JsonNode parsed, long nanos) {
+        JsonNode t = parsed.path("timings");
+        double gen = t.path("predicted_per_second").asDouble(0), prompt = t.path("prompt_per_second").asDouble(0);
+        if (gen <= 0 && nanos > 0 && lastCompletionTokens > 0) gen = lastCompletionTokens / (nanos / 1e9);
+        if (gen > 0) generatedPerSecond = generatedPerSecond <= 0 ? gen : 0.5 * generatedPerSecond + 0.5 * gen;
+        if (prompt > 0) promptPerSecond = promptPerSecond <= 0 ? prompt : 0.5 * promptPerSecond + 0.5 * prompt;
+        timeoutsInARow = 0;
     }
 
     /** Context window from the live server: /props → default_generation_settings.n_ctx. */
@@ -176,6 +240,8 @@ public final class DriveClient {
         if (forced > 0) return forced;
         // Bedrock has no way to ask a model for its window: a setting, or what is known of the model's family
         if (bedrock != null) return Bedrock.contextWindow(model, Config.getInt("CODEZAIKU_BEDROCK_CONTEXT", 0));
+        // The Claude API lists each model's window. The current models read a million tokens; without a setting 200,000 are used
+        if (claude != null) return claude.contextWindow(model, 0);
 
         Integer n = fromLlamaCppProps();
         if (n != null) return n;
@@ -235,6 +301,7 @@ public final class DriveClient {
     /** Did anything answer at all? Any HTTP status counts — a 404 is a live server with another API. */
     private boolean reachable() {
         if (bedrock != null) { try { AwsCredentials.get(bedrock.settings().profile()); return true; } catch (RuntimeException e) { return false; } }
+        if (claude != null) return claude.answers();
         for (String path : new String[]{"/v1/models", "/"}) {
             try {
                 HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + path)))
@@ -257,8 +324,15 @@ public final class DriveClient {
             // server's own properties are at /upstream/<model>/props (every `model serve install` sits behind llama-swap,
             // and the fallback of 8192 had the loop compacting at a quarter of the real window, 2026-09-14)
             if (model != null && !model.isBlank()) {
-                n = propsAt(baseUrl + "/upstream/" + URLEncoder.encode(model, StandardCharsets.UTF_8).replace("+", "%20") + "/props");
+                String upstream = baseUrl + "/upstream/" + URLEncoder.encode(model, StandardCharsets.UTF_8).replace("+", "%20") + "/props";
+                n = propsAt(upstream);
                 if (n != null) { log.info("context window {} (from llama-swap's upstream /props for {})", n, model); return n; }
+                // llama-swap loads a model on its first request: before that the upstream has no /props, and a run that asked then
+                // assumed 8192 and compacted at a twelfth of the real window (2026-10-04). One request of one token loads it.
+                if (looksLikeLlamaSwap() && warmUp()) {
+                    n = propsAt(upstream);
+                    if (n != null) { log.info("context window {} (from llama-swap's upstream /props for {}, after loading it)", n, model); return n; }
+                }
             }
             return null;
         } catch (Exception e) {
@@ -267,6 +341,32 @@ public final class DriveClient {
             String hint = localNetworkHint(e);
             if (!hint.isEmpty()) log.warn("reaching {}{}", baseUrl, hint);
             return null;
+        }
+    }
+
+    /** Whether the server is llama-swap: its /props answers with its own name, and it serves /running. */
+    private boolean looksLikeLlamaSwap() {
+        try {
+            HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/running"))).timeout(Duration.ofSeconds(10)).GET().build();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            return resp.statusCode() == 200 && resp.body().contains("\"running\"");
+        } catch (Exception e) { return false; }
+    }
+
+    /** One request of one token, so that a server which loads models on demand loads this one; true when it answered. */
+    private boolean warmUp() {
+        long t0 = System.currentTimeMillis();
+        try {
+            String body = "{\"model\":" + json.writeValueAsString(model) + ",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}";
+            HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions"))).timeout(Duration.ofMinutes(10))
+                    .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            boolean ok = resp.statusCode() == 200 && resp.body().contains("\"choices\"");
+            log.info("the model server loads {} on demand: a one-token request {} in {} s", model, ok ? "loaded it" : "did not load it (" + resp.statusCode() + ")", (System.currentTimeMillis() - t0) / 1000);
+            return ok;
+        } catch (Exception e) {
+            log.info("the model server loads {} on demand: the one-token request failed ({})", model, e.getMessage());
+            return false;
         }
     }
 
@@ -355,10 +455,9 @@ public final class DriveClient {
 
     /**
      * One chat turn with an explicit {@code wantToolChoice} so the LOOP can control prose-vs-act per turn:
-     * "none" forces prose-only (used for the smallcode planning turn — the model emits the numbered PLAN as
-     * text, which `required` would forbid), "required" forces a tool call (the work-turn default — no prose
-     * runaways, the original reason for `required`). This is the hybrid: force prose only when we want it
-     * (planning), require tools the rest of the time.
+     * "none" forces prose-only (the turn whose text is the final answer, which `required` would forbid),
+     * "required" forces a tool call (the work-turn default — no prose runaways, the original reason for
+     * `required`). This is the hybrid: force prose only when we want it, require tools the rest of the time.
      */
     public ObjectNode chat(ArrayNode messages, ArrayNode tools, int maxTokens, String wantToolChoice) {
         return chat(messages, tools, maxTokens, wantToolChoice, 0.7, false);
@@ -373,6 +472,57 @@ public final class DriveClient {
      */
     public ObjectNode chatOps(ArrayNode messages, ArrayNode tools, int maxTokens, String wantToolChoice) {
         return chat(messages, tools, maxTokens, wantToolChoice, 0.0, true);
+    }
+
+    private volatile boolean forcedToolChoiceRefused = false;
+
+    /**
+     * Whether a working turn can be sent with {@code tool_choice: required}. Some hosted models refuse a forced tool call — Claude
+     * Opus 5.5, Claude Fable 5.1 and Claude Sonnet 5.5 answer it with a 400 — and CodeZaiku asked for one on every working turn, so
+     * it could not drive them at all. The first such refusal switches this drive to {@code auto} for the rest of the process;
+     * CODEZAIKU_TOOL_CHOICE=auto says so up front and saves the refused request.
+     */
+    public boolean forcesToolCalls() {
+        // the Claude API is always asked with "auto": its current models refuse a forced call, and no model there takes one while it thinks
+        return claude == null && !forcedToolChoiceRefused && !"auto".equalsIgnoreCase(Config.get("CODEZAIKU_TOOL_CHOICE"));
+    }
+
+    /**
+     * A frontier-class model behind this drive: the Claude API, or a model whose family name says so wherever it runs, unless the
+     * settings say otherwise ({@link ModelClass}). It decides whether the harness researches before a coding task.
+     */
+    public boolean frontier() { return ModelClass.frontier(model, claude != null); }
+
+    /**
+     * Whether the server keeps what repeats from one request to the next and reads it back at a lower price (the Claude API's
+     * prompt cache). It can only do so up to the first thing that changed, so the loop puts what changes every turn last.
+     */
+    public boolean cachesPrompts() {
+        return claude != null;
+    }
+
+    /** A 400 that is about tool_choice: the server's own statement that it will not force a tool call. */
+    public static boolean refusesForcedToolChoice(String body) {
+        if (body == null) return false;
+        String b = body.toLowerCase(Locale.ROOT);
+        return b.contains("tool_choice") && (b.contains("not supported") || b.contains("unsupported") || b.contains("not allowed")
+                || b.contains("invalid") || b.contains("must be"));
+    }
+
+    /** CODEZAIKU_REASONING_EFFORT as the value to send; null when it is unset or blank. */
+    public static String reasoningEffort(String configured) {
+        if (configured == null || configured.isBlank()) return null;
+        return configured.strip().toLowerCase(Locale.ROOT);
+    }
+
+    /** CODEZAIKU_THINKING_BUDGET as a number of tokens; 0 (no limit) when it is unset, not a number, or not positive. */
+    static int thinkingBudget(String configured) {
+        if (configured == null || configured.isBlank()) return 0;
+        try {
+            return Math.max(0, Integer.parseInt(configured.strip()));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     private ObjectNode chat(ArrayNode messages, ArrayNode tools, int maxTokens, String wantToolChoice,
@@ -391,7 +541,7 @@ public final class DriveClient {
         String toolChoice = "none";
         if (tools != null && !tools.isEmpty()) {
             body.set("tools", tools);
-            toolChoice = wantToolChoice;
+            toolChoice = "required".equals(wantToolChoice) && !forcesToolCalls() ? "auto" : wantToolChoice;
             body.put("tool_choice", toolChoice);
         }
         body.put("max_tokens", maxTokens);
@@ -422,6 +572,16 @@ public final class DriveClient {
                         "CODEZAIKU_DRIVE_TEMPLATE_KWARGS is not a JSON object: " + tk);
             }
         }
+        // How hard the model thinks before a working reply, where the server has such a setting: the OpenAI-style
+        // `reasoning_effort` field. llama.cpp hands it to the model's chat template (checked: a value the template does not know
+        // comes back as the template's own error) and OpenAI-style hosted APIs read it. On the Claude API it becomes Claude's own
+        // effort setting (output_config.effort).
+        String effort = reasoningEffort(Config.get("CODEZAIKU_REASONING_EFFORT"));
+        if (effort != null && !noThink && bedrock == null) body.put("reasoning_effort", effort);
+        // A limit on the thinking of one reply, for a server that takes one (llama.cpp's thinking_budget_tokens: the thinking
+        // is ended at that many tokens and the reply goes on). Sent only when set: a hosted API may refuse a field it does not know.
+        int thinkingBudget = thinkingBudget(Config.get("CODEZAIKU_THINKING_BUDGET"));
+        if (thinkingBudget > 0 && !noThink && bedrock == null) body.put("thinking_budget_tokens", thinkingBudget);
         if (noThink) {
             ObjectNode kw = body.has("chat_template_kwargs")
                     ? (ObjectNode) body.get("chat_template_kwargs")
@@ -433,6 +593,11 @@ public final class DriveClient {
             log.info("drive → bedrock {} in {}: {} msgs, max_tokens={}, tools={}, tool_choice={}", model, bedrock.settings().region(), messages.size(), maxTokens, tools == null ? 0 : tools.size(), toolChoice);
             try { return accept(bedrock.chat(model, body, driveTimeout()), "bedrock"); }
             catch (Bedrock.Refused | AwsCredentials.Unavailable e) { throw new IllegalStateException(e.getMessage(), e); }
+        }
+        if (claude != null) {
+            log.info("drive → claude {}: {} msgs, max_tokens={}, tools={}, tool_choice={}{}", model, messages.size(), maxTokens, tools == null ? 0 : tools.size(), toolChoice, effort == null || noThink ? "" : ", effort=" + effort);
+            try { return accept(claude.chat(model, body, driveTimeout(), streamingOn() ? onDelta : null, streamingOn() ? onThink : null), "claude"); }
+            catch (Claude.Refused e) { throw new IllegalStateException(e.getMessage(), e); }
         }
         body.put("stream", streamingOn());
         try {
@@ -450,9 +615,10 @@ public final class DriveClient {
                     messages.size(), payload.length(), maxTokens,
                     tools == null ? 0 : tools.size(), toolChoice);
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
-                    .timeout(driveTimeout())
+                    .timeout(callLimit(maxTokens, payload.length()))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
+            long sentAt = System.nanoTime();
             // Retry a 5xx: llama.cpp (--jinja) returns HTTP 500 when the MODEL emits a malformed tool call
             // (bad JSON args — an unescaped quote/newline), and that's the model's sampling, not a real
             // server fault. At temp 0.7 a re-send re-samples and usually produces valid JSON. (A single bad
@@ -464,6 +630,14 @@ public final class DriveClient {
                         b.length() > 200 ? b.substring(0, 200) : b);
                 try { Thread.sleep(300L); } catch (InterruptedException ignored) { }
                 resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            }
+            if (resp.statusCode() == 400 && "required".equals(toolChoice) && refusesForcedToolChoice(resp.body())) {
+                // The server will not force a tool call for this model. It said so; from here every request asks with "auto",
+                // and the loop takes a reply without a tool call as the model ending its turn.
+                forcedToolChoiceRefused = true;
+                log.info("the model server does not force tool calls for {} ({}); asking with tool_choice=auto from here on",
+                        model, resp.body().length() > 160 ? resp.body().substring(0, 160) : resp.body());
+                return chat(messages, tools, maxTokens, wantToolChoice, temperature, noThink);
             }
             if (resp.statusCode() != 200) {
                 // RECOVERY (A): a 5xx whose body says the MODEL's tool call wouldn't parse is a known
@@ -479,9 +653,18 @@ public final class DriveClient {
                 }
                 throw new IllegalStateException("drive HTTP " + resp.statusCode() + ": " + resp.body());
             }
-            return accept(json.readTree(resp.body()), resp.body());
+            JsonNode parsedBody = json.readTree(resp.body());
+            ObjectNode answer = accept(parsedBody, resp.body());
+            noteSpeed(parsedBody, System.nanoTime() - sentAt);
+            return answer;
         } catch (RuntimeException e) {
             throw e;
+        } catch (HttpTimeoutException e) {
+            timeoutsInARow++;
+            log.warn("the model server did not finish within {} s{}; the next call waits up to {} s", lastCallLimit == null ? "?" : lastCallLimit.toSeconds(),
+                    generatedPerSecond > 0 ? String.format(" (it has been making about %.1f tokens a second)", generatedPerSecond) : "",
+                    callLimit(driveTimeout(), driveTimeoutMax(), generatedPerSecond, promptPerSecond, maxTokens, 0, timeoutsInARow).toSeconds());
+            throw new RuntimeException("chat() failed against " + baseUrl, e);
         } catch (Exception e) {
             throw new RuntimeException("chat() failed against " + baseUrl, e);
         }
@@ -499,9 +682,14 @@ public final class DriveClient {
             // grep 'usage ←' over a run log and sum. Local llama.cpp reports it too — harmless.
             JsonNode u = parsed.path("usage");
             if (u.isObject()) {
-                log.info("usage ← prompt {} completion {} total {}",
+                // a server with a prompt cache (the Claude API) says how much of the prompt it read from the cache and how much it wrote to it
+                long cacheRead = u.path("cache_read_input_tokens").asLong(0), cacheWritten = u.path("cache_creation_input_tokens").asLong(0);
+                log.info("usage ← prompt {} completion {} total {}{}",
                         u.path("prompt_tokens").asInt(), u.path("completion_tokens").asInt(),
-                        u.path("total_tokens").asInt());
+                        u.path("total_tokens").asInt(),
+                        cacheRead + cacheWritten > 0 ? " (of the prompt: " + cacheRead + " read from the cache, " + cacheWritten + " written to it)" : "");
+                SESSION_CACHE_READ_TOKENS.addAndGet(cacheRead);
+                SESSION_CACHE_WRITTEN_TOKENS.addAndGet(cacheWritten);
                 SESSION_PROMPT_TOKENS.addAndGet(u.path("prompt_tokens").asLong(0));
                 lastPromptTokens = u.path("prompt_tokens").asInt(0);
                 lastCompletionTokens = u.path("completion_tokens").asInt(0);
@@ -529,7 +717,8 @@ public final class DriveClient {
         body.put("model", model);
         body.set("messages", messages);
         body.put("max_tokens", maxTokens);
-        body.put("temperature", 0.0);
+        // CODEZAIKU_TEMP=none: the model rejects any temperature (the hosted Claude models do), here as in chat()
+        if (!"none".equalsIgnoreCase(Config.get("CODEZAIKU_TEMP"))) body.put("temperature", 0.0);
         body.putObject("chat_template_kwargs").put("enable_thinking", false);
         body.put("stream", false);
         if (bedrock != null) {
@@ -539,20 +728,38 @@ public final class DriveClient {
                 return content.isBlank() ? msg.path("reasoning_content").asText("") : content;
             } catch (RuntimeException e) { log.warn("classify() failed against bedrock: {}", e.getMessage()); return ""; }
         }
+        if (claude != null) {
+            try {
+                ObjectNode msg = accept(claude.chat(model, body, driveTimeout(), null, null), "claude");
+                return msg.path("content").asText("");
+            } catch (RuntimeException e) { log.warn("classify() failed against the Claude API: {}", e.getMessage()); return ""; }
+        }
         try {
+            String payload = json.writeValueAsString(body);
+            // the same limit as a working call: on a slow or busy server a long no-thinking answer (a plan) needs more than the
+            // fixed five minutes, and a call that ran out of time makes the next one wait twice as long
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
-                    .timeout(driveTimeout()).header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
+                    .timeout(callLimit(maxTokens, payload.length())).header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
+            long sentAt = System.nanoTime();
             HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() != 200) {
                 log.warn("classify HTTP {}: {}", resp.statusCode(),
                         resp.body().length() > 200 ? resp.body().substring(0, 200) : resp.body());
                 return "";
             }
-            JsonNode msg = json.readTree(resp.body()).path("choices").path(0).path("message");
+            JsonNode parsed = json.readTree(resp.body());
+            JsonNode msg = parsed.path("choices").path(0).path("message");
+            lastCompletionTokens = parsed.path("usage").path("completion_tokens").asInt(0);
+            noteSpeed(parsed, System.nanoTime() - sentAt);
             String content = msg.path("content").asText("");
             if (content.isBlank()) content = msg.path("reasoning_content").asText("");
             return content;
+        } catch (HttpTimeoutException e) {
+            timeoutsInARow++;
+            log.warn("the model server did not finish a no-thinking call within {} s; the next call waits up to {} s", lastCallLimit == null ? "?" : lastCallLimit.toSeconds(),
+                    callLimit(driveTimeout(), driveTimeoutMax(), generatedPerSecond, promptPerSecond, maxTokens, 0, timeoutsInARow).toSeconds());
+            return "";
         } catch (Exception e) {
             log.warn("classify() failed against {}: {}", baseUrl, e.toString());
             return "";

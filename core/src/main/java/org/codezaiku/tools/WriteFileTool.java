@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 
 public final class WriteFileTool implements Tool {
     // llama.cpp's tool-call parser CRASHES on a large/complex content arg — and the threshold is much
@@ -45,6 +46,9 @@ public final class WriteFileTool implements Tool {
     @Override
     public String execute(JsonNode args) throws Exception {
         String rel = args.path("path").asText();
+        String from = args.path("copy_from").asText("").strip();
+        if (!from.isEmpty()) return copy(rel, from);
+        if (!args.has("content")) return "ERROR: nothing to write. Give the file's text as `content`, or the path of an existing file of the project as `copy_from`.";
         String content = args.path("content").asText();
         if (content.length() > CAP) {
             return "ERROR: content too large (" + content.length() + " chars > " + CAP + ") — one big write "
@@ -65,6 +69,23 @@ public final class WriteFileTool implements Tool {
         scope.recordWrite(landed);
         String redirect = pathNote(rel, landed);
         return "wrote " + content.length() + " chars to " + landed + redirect + SyntaxCheck.check(scope, landed);
+    }
+
+    /**
+     * {@code copy_from}: the file's text is that of another file of the project. For a turn on which this is the one tool and
+     * the code already exists under another name: writing it out again costs a long reply, and the cap above refuses a long file.
+     */
+    private String copy(String rel, String from) throws Exception {
+        if (ContainerExec.active()) return "ERROR: copy_from is not available here. Give the file's text as `content`.";
+        Path source = scope.resolve(from);
+        if (!Files.isRegularFile(source)) return "ERROR: copy_from names `" + from + "`, and the project has no such file. Give the path of an existing file, or the file's text as `content`.";
+        Path f = scope.resolve(rel);
+        if (source.equals(f)) return "ERROR: copy_from and path are the same file.";
+        if (f.getParent() != null) Files.createDirectories(f.getParent());
+        Files.copy(source, f, StandardCopyOption.REPLACE_EXISTING);
+        String landed = scope.rel(f);
+        scope.recordWrite(landed);
+        return "copied " + scope.rel(source) + " to " + landed + " (" + Files.size(f) + " bytes)" + pathNote(rel, landed) + SyntaxCheck.check(scope, landed);
     }
 
     /** Tell the model when its path was redirected to the real build root (so it stops re-nesting). */

@@ -1,6 +1,6 @@
 {
   "name": "@wyrdsekai/codezaiku-mcp",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "Runs CodeZaiku, a coding and development harness on local models (Ollama, llama.cpp) or hosted APIs, as an MCP server, so Claude Code, Codex or Gemini CLI can hand it coding, review and ops tasks.",
   "mcpName": "io.github.Wyrdsekai/codezaiku",
   "bin": {

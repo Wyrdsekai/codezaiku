@@ -58,6 +58,8 @@ public final class ResultDocument {
      */
     /** Marker a loop puts at the front of its summary when the run could not proceed at all. */
     public static final String UNRECOVERABLE = "context overflow:";
+    /** The same, when the model server failed call after call: too slow, not answering, or refusing the requests. */
+    public static final String DRIVE_UNAVAILABLE = "model server unavailable:";
 
     /**
      * As {@link #statusFor(boolean, ProjectTests.Verdict)}, but a summary naming an unrecoverable
@@ -71,7 +73,7 @@ public final class ResultDocument {
      * the wrong response.
      */
     public static String statusForRun(boolean done, ProjectTests.Verdict v, String summary) {
-        if (!done && summary != null && summary.startsWith(UNRECOVERABLE)) return "failed";
+        if (!done && summary != null && (summary.startsWith(UNRECOVERABLE) || summary.startsWith(DRIVE_UNAVAILABLE))) return "failed";
         return statusFor(done, v);
     }
 

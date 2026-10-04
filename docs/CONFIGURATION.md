@@ -68,7 +68,7 @@ Two details that matter if you are wiring this up:
 | `CODEZAIKU_SHELL` | Git Bash on Windows, `bash` elsewhere | The shell every command is dispatched through. Worth knowing about on Windows, where asking for `bash` does not get you the one on your PATH: `C:\Windows\System32\bash.exe` is the **WSL launcher**, and `CreateProcess` finds `System32` before any PATH entry — so a plain `bash` runs your commands inside the Linux distribution instead. CodeZaiku resolves Git Bash by absolute path to make that a choice rather than an accident. Set this to dispatch elsewhere on purpose. `codezaiku doctor` prints the shell it resolved. |
 | `CODEZAIKU_SHELL_TIMEOUT_SEC` | `300` | Per-command wall-clock cap for the model's shell. Raise it when a task legitimately runs for minutes — a step making hundreds of model calls, a full-dataset pass. A command killed on this cap is told that the cap expired and that it may simply need longer, so it does not respond by wrapping itself in a shorter `timeout`. |
 | `CODEZAIKU_SHELL_HEAVY_TIMEOUT_SEC` | `1200` | The same cap for commands recognised as training or generation steps. Recognition is by name (`train.py`, `finetune`, `torchrun`, …), so a long-running script called something else gets the ordinary cap — set the value above rather than relying on the guess. |
-| `CODEZAIKU_API_KEY` | unset | Credential for the model endpoint, sent as `Authorization: Bearer <key>` on every request including the health probe. Needed by most hosted providers; leave unset for a local llama.cpp or Ollama, which want no header. Accepts the key bare or already prefixed with `Bearer `. `codezaiku config list` reports whether it is set, never its value. |
+| `CODEZAIKU_API_KEY` | unset | Credential for the model endpoint, sent as `Authorization: Bearer <key>` on every request including the health probe (the Claude API gets it in its own `x-api-key` header). Needed by most hosted providers; leave unset for a local llama.cpp or Ollama, which want no header. Accepts the key bare or already prefixed with `Bearer `. `codezaiku config list` reports whether it is set, never its value. |
 | `CODEZAIKU_SARIF` | unset | Path to write findings as **SARIF 2.1.0**. Off unless set. Upload it to GitHub code scanning and findings appear on the pull request; DefectDojo, the VS Code SARIF viewer and most vulnerability managers ingest the same file. Unanchored findings are written without a line region rather than at a guessed line. |
 | `CODEZAIKU_REVIEW_PASSES` | `1` | How many independent passes `review` makes before merging findings. Raising it trades time for recall by unioning repeated passes: roughly a third of PRs yield findings on some runs and not others. It also multiplies false positives and costs N× the model time — hence off by default. Capped at 5. See LIMITATIONS.md for the measured figures. |
 | `CODEZAIKU_SEARXNG` | `http://localhost:8888` | Search backend for the research surface. Needs `json` in its `search.formats` — it is off by default in SearXNG. |
@@ -192,11 +192,38 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 | `CODEZAIKU_TEMP` | Sampling temperature override; `none` omits the field (some hosted models reject any temperature). |
 | `CODEZAIKU_DRIVE_TIMEOUT` | Per-request HTTP timeout in seconds (default 300). Raise for drives with very long generations. |
 | `CODEZAIKU_DRIVE_TEMPLATE_KWARGS` | JSON object merged into every request's `chat_template_kwargs` — e.g. `{"enable_thinking":false}` for engines with no server-side reasoning control. |
-| `CODEZAIKU_CTX` | Force the context window when a server does not report one (`/v1/models` `context_length` is read automatically). |
+| `CODEZAIKU_TOOL_CHOICE` | `auto` asks the model server for tool calls without forcing one. CodeZaiku switches to it by itself the first time a server refuses a forced tool call (Claude Opus 5.5, Fable 5.1 and Sonnet 5.5 do); setting it saves that one refused request. The Claude API (`https://api.anthropic.com`) is always asked without forcing. |
+| `CODEZAIKU_RESEARCH_FIRST` | When the research pass before a coding task runs. `auto` (default): when the drive is not a frontier-class model (see `CODEZAIKU_DRIVE_CLASS`) and a search source answers — a Brave key, a SearXNG in the settings, or the ResearchZosho library. On an existing codebase the model's `QUESTIONS: none` is honoured. `always`: on every drive. `off`: never. |
+| `CODEZAIKU_DRIVE_CLASS` | `frontier` or `small`. Overrides the family-name list that otherwise decides: `claude-*`, `gpt-5*`, `gpt-4.1*`, `o3*`, `o4*`, `gemini-2.5-pro`, `gemini-3*`, `grok-4*`, `deepseek-v3*`, `deepseek-r1`, `kimi-k2*`, `qwen3-max*`, `glm-5*` are frontier; a family's `mini`, `nano`, `flash`, `lite`, `small`, `tiny`, `distill` or `haiku` variant is small. The name is read the same way from a gateway (`openai/gpt-5`) or a local server (`GLM-5.3-big-IQ2_M.gguf`). The Claude API is frontier regardless of name. |
+| `CODEZAIKU_RESEARCH_FIRST_TURNS` | Turns for the research pass before the work (default 8; half on an existing codebase). |
+| `CODEZAIKU_CHECK_TIMEOUT_SEC` | How long the harness's own run of a task's declared check may take, in seconds (default 3600). It runs in the background. |
+| `CODEZAIKU_REASONING_EFFORT` | How hard a thinking model thinks before each working reply, sent as `reasoning_effort`: the levels are the model's own (Qwen3.8: `low`, `medium`, `xhigh`; OpenAI-style APIs: `low`, `medium`, `high`). llama.cpp passes it to the model's chat template. Unset: the server's default. On the Claude API it is Claude's own effort setting: `low`, `medium`, `high`, `xhigh`, `max`. |
+| `CODEZAIKU_THINKING_BUDGET` | The most tokens a model may think before each reply, for a server that takes such a limit (llama.cpp's `thinking_budget_tokens`). The thinking ends there and the reply goes on. Unset: no limit. |
+| `CODEZAIKU_CTX` | Force the context window when a server does not report one (`/v1/models` `context_length` is read automatically). On the Claude API the default is the model's own window, and at most 200,000 tokens. |
 
 A hosted drive is just `CODEZAIKU_DRIVE=https://api.anthropic.com` (no path) plus
 `CODEZAIKU_MODEL` and `CODEZAIKU_API_KEY`. Per-response token usage is logged (`usage ←` lines;
 `/cost` in chat totals them), and a failing endpoint stops the run after 8 consecutive errors.
+
+**The Claude API.** `CODEZAIKU_DRIVE=https://api.anthropic.com` is spoken to in Claude's own format (the Messages API), with
+the key in `CODEZAIKU_API_KEY` (`codezaiku config set api.key <your key>`) and a model such as `claude-opus-5-5` in
+`CODEZAIKU_MODEL`:
+
+- `CODEZAIKU_REASONING_EFFORT` sets how hard Claude works on each reply (`low`, `medium`, `high`, `xhigh`, `max`). Unset, the
+  model's own default is used.
+- The tools, the system prompt and the conversation so far are cached at the API. A request that repeats them reads them from
+  the cache at a fraction of the price (a twentieth on Claude Opus 5.5). The `usage ←` line of each reply says how many tokens
+  of the prompt were read from the cache and how many were written to it. The API reads from its cache only up to the first
+  thing that changed, so on this drive the rules of the work are the system prompt, and what CodeZaiku rebuilds every turn (the
+  project's files, the goal, the files still owed, the check) is told after the conversation.
+- The model's window, the longest reply it writes and the effort levels it knows are read from the API's own model listing.
+  The current models read a million tokens; CodeZaiku fills at most 200,000 of them unless `CODEZAIKU_CTX` says otherwise,
+  because a very long conversation costs several dollars a turn whenever the cache misses.
+- Claude's thinking is not sent back to it on later turns. The log holds a summary of it for each reply.
+- `CODEZAIKU_CLAUDE_DUMP=<folder>` writes every request as it is sent, one file each.
+
+`codezaiku doctor` asks the model for a short reply and says in the API's own words when the key or the model's name is refused.
+A gateway in front of the Claude API is named by the address of its Messages endpoint, `https://<gateway>/v1/messages`.
 
 ---
 

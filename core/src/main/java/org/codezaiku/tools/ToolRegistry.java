@@ -196,14 +196,24 @@ public final class ToolRegistry {
      *  accumulated draft into the final answer — see AnswerDraftTool). */
     public static ToolRegistry research(Path projectRoot, String question, AnswerDraftTool draft) {
         PathScope scope = new PathScope(projectRoot);
-        return new ToolRegistry().scope(scope)
+        return researchWeb(question, draft).scope(scope)
+                .add(new ReadFileTool(scope))
+                .add(new ShellTool(scope, true));
+    }
+
+    /**
+     * The research surface without the project: the web, the literature, the pages, the draft, the library's memory. For a pass the
+     * harness runs on its own account — before a coding task, or when its check keeps failing — whose question already carries what
+     * it needs from the project. Given the project's files too, such a pass read them: one spent its six turns on read_file and
+     * `cat`, and answered with a status of itself (2026-10-03).
+     */
+    public static ToolRegistry researchWeb(String question, AnswerDraftTool draft) {
+        return new ToolRegistry()
                 .add(new WebSearchTool().focus(question))
                 .add(new ScholarSearchTool())          // the literature by DOI, in every run: a web engine ranks it low
                 .add(new WebFetchTool().focus(question))
                 .add(draft)
                 .add(new ResearchMemoryTool())   // A-RAG: recall is a TOOL in the loop, not just a prompt seed
-                .add(new ReadFileTool(scope))
-                .add(new ShellTool(scope, true))
                 .add(new TaskDoneTool())
                 .add(new TaskBlockedTool());
     }

@@ -41,6 +41,25 @@ class WriteLedgerTest {
         assertEquals(List.of("app/main.py"), scope.written());
     }
 
+    /** A file's text can be taken from a file the project already has: for a turn on which write_file is the one tool. */
+    @Test void aFileCanBeCopiedFromOneTheProjectHas(@TempDir Path root) throws Exception {
+        var scope = new PathScope(root);
+        String long_ = "x = 1\n".repeat(2000);   // longer than one write may be
+        Files.writeString(Files.createDirectories(root.resolve("scratch")).resolve("measure_v2.py"), long_);
+        String out = new WriteFileTool(scope).execute(args("path", "measure.py", "copy_from", "scratch/measure_v2.py"));
+        assertTrue(out.startsWith("copied scratch/measure_v2.py to measure.py (12000 bytes)"), out);
+        assertEquals(long_, Files.readString(root.resolve("measure.py")));
+        assertEquals(List.of("measure.py"), scope.written());
+
+        assertTrue(new WriteFileTool(scope).execute(args("path", "other.py", "copy_from", "scratch/missing.py")).startsWith("ERROR: copy_from names `scratch/missing.py`"));
+        assertFalse(Files.exists(root.resolve("other.py")));
+        assertTrue(new WriteFileTool(scope).execute(args("path", "measure.py", "copy_from", "measure.py")).startsWith("ERROR: copy_from and path are the same file"));
+        assertTrue(new WriteFileTool(scope).execute(args("path", "other.py")).startsWith("ERROR: nothing to write"), "neither text nor a file to copy");
+        assertFalse(Files.exists(root.resolve("other.py")), "and no empty file is left behind");
+        new WriteFileTool(scope).execute(args("path", "pkg/__init__.py", "content", ""));
+        assertTrue(Files.exists(root.resolve("pkg/__init__.py")), "an empty file is still written when its content is given as empty");
+    }
+
     @Test void editFileRecordsThePath(@TempDir Path root) throws Exception {
         Files.writeString(Files.createDirectories(root.resolve("app")).resolve("m.py"), "a = 1\n");
         var scope = new PathScope(root);

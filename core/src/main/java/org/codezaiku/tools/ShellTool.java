@@ -28,6 +28,10 @@ public final class ShellTool implements Tool {
     // run completes in one go; quick `python -c` checks keep the short default.
     private static final long HEAVY_TIMEOUT_SEC =
             Config.getInt("CODEZAIKU_SHELL_HEAVY_TIMEOUT_SEC", 1200);
+    /** A `timeout N` the model wrote gets this much on top, so its own timeout fires first (exit 124, output kept), not ours. */
+    private static final long GRACE_SEC = 10;
+    private static final Pattern TIMEOUT_WRAPPER = Pattern.compile(
+            "(?:^|[;&|(\\s])timeout\\s+(?:-k\\s+\\S+\\s+)?(?:-s\\s+\\S+\\s+)?(\\d+(?:\\.\\d+)?)([smhd]?)(?=\\s)");
     private final PathScope scope;
 
     // The model's FIXTURE builds need JDK21; the box default `java` is JDK25 (the CodeZaiku core harness is
@@ -143,7 +147,9 @@ public final class ShellTool implements Tool {
     @Override
     public String description() {
         return "Run a bash command in the project root and return its exit code + combined output. "
-                + "Use for builds, tests, and inspection.";
+                + "Use for builds, tests, and inspection. A command may run " + TIMEOUT_SEC + "s; one that needs longer "
+                + "(a full evaluation, a long test run) gets up to " + HEAVY_TIMEOUT_SEC + "s when you write it as "
+                + "`timeout " + HEAVY_TIMEOUT_SEC + " <command>`.";
     }
 
     @Override
@@ -242,7 +248,7 @@ public final class ShellTool implements Tool {
         ProcessBuilder pb = ContainerExec.active()
                 ? new ProcessBuilder("docker", "exec", "-w", ContainerExec.workdir(),
                         ContainerExec.cid(), "bash", "-lc", cmd).redirectErrorStream(true)
-                : Shell.pb(cmd)
+                : Shell.pb(ProjectEnv.prelude(scope.root()) + cmd)   // installs go to the project's own environment, not the user's
                         .directory(scope.root().toFile())
                         .redirectErrorStream(true);
         // NON-INTERACTIVE env (field consensus / hang-class prevention): a 9B's command must never block
@@ -298,7 +304,7 @@ public final class ShellTool implements Tool {
         drain.setDaemon(true);
         drain.start();
 
-        long timeoutSec = isHeavyStep(lc) ? HEAVY_TIMEOUT_SEC : TIMEOUT_SEC;
+        long timeoutSec = limitFor(lc);
         boolean done = proc.waitFor(timeoutSec, TimeUnit.SECONDS);
         if (!done) {
             proc.descendants().forEach(ProcessHandle::destroyForcibly); // kill children too (the godot case)
@@ -321,10 +327,9 @@ public final class ShellTool implements Tool {
                             // then it wandered for the rest of the budget. Say what happened instead.
                             : "The command was still running when the harness's per-command cap of "
                               + timeoutSec + "s expired — this is OUR limit, not a failure of your command, "
-                              + "and it may simply need longer. Do NOT re-run it wrapped in a shorter "
-                              + "`timeout`; that only fails sooner. Either run a smaller/faster slice of the "
-                              + "same work to prove it behaves, or tell the operator this step needs a longer "
-                              + "budget (CODEZAIKU_SHELL_TIMEOUT_SEC) and move on to what you can do now.")
+                              + "and it may simply need longer. A command that needs more time gets it when you say "
+                              + "so: run it as `timeout " + HEAVY_TIMEOUT_SEC + " <the same command>` and the harness waits "
+                              + "the full " + HEAVY_TIMEOUT_SEC + "s (the most it allows) instead of " + timeoutSec + "s.")
                         + "\n" + clamp(sink.toString());
             }
         }
@@ -368,6 +373,43 @@ public final class ShellTool implements Tool {
     /** Heavy ML step (training / full-dataset generation) that legitimately needs minutes → the generous timeout.
      *  Matches training commands and running a PIPELINE ENTRY script (python main/train/run/pipeline/generate.py);
      *  quick `python -c "..."` checks do NOT match, so they keep the short default. */
+    /**
+     * How long this command may run: the time the model asked for in its own `timeout N` (plus a little, so its timeout fires
+     * first), up to the heavy cap; else the heavy cap for a training or generation step; else the default.
+     *
+     * <p>The model's `timeout` used to be ignored: a run wrote `timeout 900 python3 evaluate.py` for a check over forty video clips,
+     * the harness killed it at 300 s and told it to "run a smaller slice … and move on" — and it measured one clip at a time for the
+     * remaining sixty turns, as did every run after it (2026-09-30). The number the model wrote is its statement of what the
+     * command needs.
+     *
+     * <p>A `timeout N` only ever raises the limit. It bounds the one command it stands in front of, not the line: a loop over
+     * forty files with `timeout 20` around each step was stopped at 30 seconds in all, twice in one run (2026-10-02), because the
+     * first version of this rule took the 20 as the whole command's time.
+     */
+    static long limitFor(String lc) {
+        long ordinary = isHeavyStep(lc) ? HEAVY_TIMEOUT_SEC : TIMEOUT_SEC;
+        long asked = requestedTimeoutSec(lc);
+        if (asked <= 0) return ordinary;
+        return Math.max(ordinary, Math.min(asked + GRACE_SEC, Math.max(HEAVY_TIMEOUT_SEC, TIMEOUT_SEC)));
+    }
+
+    /** The longest `timeout N` in the command, in seconds; 0 when there is none. */
+    static long requestedTimeoutSec(String cmd) {
+        long most = 0;
+        Matcher m = TIMEOUT_WRAPPER.matcher(cmd);
+        while (m.find()) {
+            double n = Double.parseDouble(m.group(1));
+            switch (m.group(2)) {
+                case "m" -> n *= 60;
+                case "h" -> n *= 3600;
+                case "d" -> n *= 86400;
+                default -> { }
+            }
+            most = Math.max(most, (long) Math.ceil(n));
+        }
+        return most;
+    }
+
     private static boolean isHeavyStep(String lc) {
         if (lc.contains("finetune") || lc.contains("fine_tune") || lc.contains("fine-tune") || lc.contains("sft")
                 || lc.contains("peft") || lc.contains("lora") || lc.contains("trainer.train") || lc.contains(".fit(")

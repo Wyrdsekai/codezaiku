@@ -36,4 +36,27 @@ class DriveContextWindowTest {
             assertFalse(Files.readString(Path.of("src/main/java/org/codezaiku/Doctor.java")).contains("new DriveClient(driveUrl, \"\")"), "doctor asks with the configured model");
         } finally { s.stop(0); }
     }
+
+    /** llama-swap before the model is loaded: no upstream /props yet; one request loads it and the window is read then. */
+    @Test
+    void theModelIsLoadedWithOneTokenWhenTheUpstreamHasNoPropsYet() throws Exception {
+        boolean[] loaded = {false}; int[] chats = {0};
+        HttpServer s = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        s.createContext("/", ex -> {
+            String path = ex.getRequestURI().getPath();
+            byte[] out; int code;
+            if (path.equals("/props")) { code = 404; out = "{\"src\":\"llama-swap\",\"error\":{\"message\":\"no model id could be identified\"}}".getBytes(StandardCharsets.UTF_8); }
+            else if (path.equals("/running")) { code = 200; out = "{\"running\":[]}".getBytes(StandardCharsets.UTF_8); }
+            else if (path.equals("/v1/chat/completions")) { chats[0]++; loaded[0] = true; code = 200; out = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}".getBytes(StandardCharsets.UTF_8); }
+            else if (path.equals("/upstream/qwen3.8-27b/props")) { if (loaded[0]) { code = 200; out = "{\"default_generation_settings\":{\"n_ctx\":98304}}".getBytes(StandardCharsets.UTF_8); } else { code = 502; out = "{\"error\":\"upstream not running\"}".getBytes(StandardCharsets.UTF_8); } }
+            else { code = 404; out = "{}".getBytes(StandardCharsets.UTF_8); }
+            ex.sendResponseHeaders(code, out.length); ex.getResponseBody().write(out); ex.close();
+        });
+        s.start();
+        try {
+            String base = "http://127.0.0.1:" + s.getAddress().getPort();
+            assertEquals(98304, new DriveClient(base, "qwen3.8-27b").fromLlamaCppProps(), "the window after loading, not the 8192 fallback");
+            assertEquals(1, chats[0], "one request of one token loaded the model");
+        } finally { s.stop(0); }
+    }
 }

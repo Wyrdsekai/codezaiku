@@ -8,6 +8,7 @@ import java.net.http.HttpRequest;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -43,6 +44,23 @@ class DriveAuthTest {
     @Test
     void surroundingWhitespaceIsTrimmed() throws Exception {
         assertEquals("Bearer sk-test-123", header(built("  sk-test-123\n")).orElse(null));
+    }
+
+    /** The Claude API takes its key in a header of its own; a Bearer header there is answered with 401. */
+    @Test
+    void theClaudeApiGetsItsOwnKeyHeader() throws Exception {
+        Method m = DriveClient.class.getDeclaredMethod("auth", HttpRequest.Builder.class, String.class);
+        m.setAccessible(true);
+        HttpRequest r = ((HttpRequest.Builder) m.invoke(null, HttpRequest.newBuilder(URI.create("https://api.anthropic.com/v1/models")), "Bearer sk-ant-test")).GET().build();
+        assertEquals("sk-ant-test", r.headers().firstValue("x-api-key").orElse(null));
+        assertEquals("2023-06-01", r.headers().firstValue("anthropic-version").orElse(null));
+        assertTrue(header(r).isEmpty(), "no Authorization header goes to the Claude API");
+    }
+
+    @Test
+    void theClaudeApiIsNeverAskedToForceAToolCall() {
+        assertFalse(new DriveClient("https://api.anthropic.com", "claude-opus-5-5").forcesToolCalls());
+        assertTrue(new DriveClient("http://example.invalid:8210", "local-model").forcesToolCalls());
     }
 
     @Test

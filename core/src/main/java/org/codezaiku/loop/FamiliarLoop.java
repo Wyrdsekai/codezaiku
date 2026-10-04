@@ -13,17 +13,22 @@ import org.codezaiku.shape.ProjectShape;
 import org.codezaiku.tools.TaskBlockedTool;
 import org.codezaiku.tools.TaskDoneTool;
 import org.codezaiku.tools.ToolRegistry;
+import org.codezaiku.verify.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.http.HttpTimeoutException;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
+import java.time.Duration;
 import java.net.http.HttpConnectTimeoutException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.zip.CRC32;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -38,6 +43,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -49,9 +55,12 @@ import org.codezaiku.lsp.LspClient;
 import org.codezaiku.shape.ProjectFacts;
 import org.codezaiku.redact.Redactor;
 import org.codezaiku.verify.BootCheck;
+import org.codezaiku.FamiliarMain;
+import org.codezaiku.research.LibraryBridge;
 import org.codezaiku.verify.ProjectTests;
 import org.codezaiku.Config;
 import org.codezaiku.exec.Shell;
+import org.codezaiku.tools.ProjectEnv;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -168,7 +177,6 @@ public final class FamiliarLoop {
     // smallcode). The model decides done; the harness measures externally.
     private List<String> planSteps = List.of();
     private final Set<Integer> completedSteps = new HashSet<>();
-    private boolean planResolved = false; // one-shot: true once the first-turn plan is parsed or given up on
     // HARNESS-DRIVEN done gate: the model is the coder, the harness is the DRIVER. It does not accept the
     // model's word that it's done — at task_done it re-runs the tests itself and refuses while they're red
     // (then the boot-gate + mutation gate run, driving the model to a verified-real done). The model's plan
@@ -194,6 +202,7 @@ public final class FamiliarLoop {
      *  bounce task_done for a project that does not exist here (observed: research never concluded), and turn
      *  ON the gap-reflection loop (the research analogue of self-verify). */
     public FamiliarLoop research() {
+        this.coding = false;
         this.selfVerifyOn = false;
         this.driveGate = false;
         this.bootGate = false;
@@ -211,6 +220,7 @@ public final class FamiliarLoop {
      *  all. Same diagnosis research() already carries; review needed it too, including the deadline turn
      *  — a review that runs out of turns silently is worth exactly as much as a research run that does. */
     public FamiliarLoop report() {
+        this.coding = false;
         this.selfVerifyOn = false;
         this.driveGate = false;
         this.bootGate = false;
@@ -236,6 +246,7 @@ public final class FamiliarLoop {
      * still the worst outcome.
      */
     public FamiliarLoop chat() {
+        this.coding = false;
         this.selfVerifyOn = false;
         this.driveGate = false;
         this.bootGate = false;
@@ -271,6 +282,7 @@ public final class FamiliarLoop {
      * away while removing the others.
      */
     public FamiliarLoop artifact() {
+        this.coding = false;
         this.selfVerifyOn = false;
         this.driveGate = false;
         this.bootGate = false;
@@ -282,9 +294,100 @@ public final class FamiliarLoop {
     /** Last turn offers only task_done. Set by research() and report() — NOT tied to researchMode, because
      *  the failure it prevents (budget spent, nothing written) is not specific to research. */
     private boolean deadlineTurn = false;
+
+    /** The coding loop proper: the run builds or changes a project. Off in research, review, chat and single-file artifact runs. */
+    private boolean coding = true;
+    /**
+     * A coding run's last turn offers only task_done, as the other modes' does: what comes back is the run's own report of where the
+     * work stands, in place of "max turns reached without task_done". Two 100-turn runs ended that way on 2026-09-30, one of them
+     * with its evaluation already run and nothing said about it. Not below this many turns: a budget that small has no turn to spare.
+     */
+    private static final int CODING_DEADLINE_MIN_TURNS = 4;
+    static final String TURN_LIMIT_REPORT = "Stopped at the turn limit";
+    private boolean deadlineNoted = false;
+    /** The files the goal names that this run has to write; looked at on disk once a turn. */
+    private Deliverables deliverables = Deliverables.none();
+    private boolean deliverablesBounced = false;
+    /**
+     * WRITE-ONLY TURNS. Twice in a run — at half-time for the programs the goal names, and at the start of the final stretch for
+     * its programs and documents — a named file that is still not written gets turns in which write_file is the one tool offered.
+     *
+     * <p>Showing the list of unwritten files every turn and naming them in the end-game note did not get them written: on
+     * 2026-09-30 two 100-turn runs read both and went on diagnosing to turn 99, one with its evaluation run and no results file,
+     * one with sixteen diagnostic scripts and not one of the four files asked for. What changed the model's behaviour in those runs
+     * was the last turn, where finishing is the only thing on offer. This is that, earlier: nothing the model does is rejected,
+     * the choice is narrowed for a few turns, and the full tools come back. Files a program produces (results.csv, verdicts.jsonl)
+     * are left out — those are made by running the program, and a turn that could only write one would be asking for invented data.
+     */
+    private static final int HAND_OVER_MIN_TURNS = 20;
+    private static final int HAND_OVER_MAX_TURNS = 3;
+    private static final String WRITE_TOOL = "write_file";
+    private int handOverTurnsLeft = 0;
+    private boolean handOverFinal = false;
+
+    // ── THE DONE CHECK ───────────────────────────────────────────────────────────────────────────
+    // The goal's own check, declared by the model from the goal's words in the planning call, run by the harness whenever a named
+    // program changes, and deciding when the work is done. The runs that completed in the past had the harness as the judge (the
+    // dev gate on a labelled slice); a task given as a brief got no judge, and its runs measured one example at a time to the turn
+    // limit — the 40-clip check ran in 2 of 15 runs, and those two were the runs that reached the bar (2026-09-30/10-01).
+    private DoneCheck doneCheck;                       // null when the goal states no check
+    private DoneCheck.Outcome lastCheck;               // the harness's latest run of it
+    private volatile DoneCheck.Outcome freshCheck;     // a background run that has finished and is not yet in the record
+    private volatile Thread checkThread;
+    private volatile Process checkProcess;
+    private String checkedStamp = "";                  // the named programs as they were when the check last started
+    private int checkStartedTurn = -100;
+    private String checkInterpreter;                   // the interpreter the model itself last ran the check's script with
+    private boolean handOverMode = false;              // the check passed: the turns left are for the files and task_done
+    private String passedSnapshot;                     // the project as it was when the check passed (keep what was measured)
+    private String passedStamp = "";
+    private boolean doneCheckBounced = false;
+    private DoneCheck.Outcome passedOutcome;           // the run of the check that passed
+    private String lastCheckStamp = "";                // the programs as they were for lastCheck
+    private boolean checkRestored = false;             // the passing version was put back at the end
+    // KEEP THE BEST (AIDE's rule): every run of the check is ranked, the best-scoring version is snapshotted when the check STARTS
+    // (what was measured, not what the files became while it ran), the model is told when a change made things worse and where
+    // the best is kept, and a run that ends on a worse version ships the best. A run went 5.0 → 31 → 5.0 → 28.9 and shipped the
+    // 28.9 (2026-10-01).
+    private DoneCheck.Outcome bestOutcome;
+    private String bestSnapshot;
+    private String pendingSnapshot;                    // the files as they were when the running check started
+    // THE PREPARE STEP: the check's slow step as a program of its own, which stores its results for the check to read (see
+    // DoneCheck). The harness runs it when it is written and again when it changes, always before the check.
+    private record Prepared(int exit, String output, long seconds, int turn) { }
+    private Prepared lastPrepare;                      // the harness's latest run of it
+    private volatile Prepared freshPrepare;            // a background run that has finished and is not yet in the record
+    private volatile Thread prepareThread;
+    private String preparedStamp = "";                 // the prepare program as it was when it last started
+    private String prepareInterpreter;                 // the interpreter the model itself last ran it with
+    private boolean prepareOffered = false;            // a slow check was answered once with the offer of a prepare program
+    private long checkSlowSec = CHECK_SLOW_SEC;        // a check that takes longer than this is slow
+
+    /** For tests: what counts as a slow check, in seconds. */
+    FamiliarLoop slowCheckAfter(long seconds) { this.checkSlowSec = seconds; return this; }
+    private boolean bestRestored = false;
+    // A PROGRAM TURN: the check fails and no named program has changed for this many turns — the model is probing in side
+    // scripts (one run left measure.py and evaluate.py untouched for its last 85 turns, 2026-10-01). The turn offers only
+    // reading and changing the named programs.
+    private static final int STALE_PROGRAM_TURNS = 10;
+    /** A check that takes longer than this is slow: the prepare step is offered. Ten minutes let a run whose checks took six to
+     *  eight go to turn 170 before the offer; it then wrote the step, its checks took seconds, and in six turns its median error
+     *  went from 11.8 to 3.7 degrees (2026-10-03). */
+    private static final long CHECK_SLOW_SEC = 300;
+    private String prevProgramStamp = "";
+    private int lastProgramChangeTurn = 0;
+    private int lastProgramTurn = -100;
+    private static final int CHECK_EVERY_TURNS = 4;
+    /**
+     * How long the harness's run of the check may take. It runs in the background, so a long limit costs nothing but the machine;
+     * a short one costs the model its number — a run whose evaluation took over twenty minutes got "exit 124" four times and
+     * never saw a result (2026-10-01). Its own setting; an hour by default.
+     */
+    private static final long CHECK_TIMEOUT_SEC = Config.getInt("CODEZAIKU_CHECK_TIMEOUT_SEC", 3600);
     private final Set<Integer> budgetWarned = new HashSet<>();
 
     private boolean artifactBounced = false;
+    private boolean thinAnswerBounced = false;
     private boolean findingsBounced = false;
     /** How many findings the review has reported so far. -1 means this run does not report findings,
      *  which disables the bounce entirely — only a review supplies a real counter. */
@@ -376,6 +479,14 @@ public final class FamiliarLoop {
         return this;
     }
 
+    /** Who wants the pages this run reads (the start of each web_fetch result): a research pass whose final answer may be thin. */
+    private Consumer<String> excerptSink;
+
+    public FamiliarLoop excerpts(Consumer<String> sink) {
+        this.excerptSink = sink;
+        return this;
+    }
+
     /** Final answer = saved draft + closing text (either part may be empty). */
     private String withDraft(String closing) {
         String d = answerDraft.get();
@@ -399,6 +510,37 @@ public final class FamiliarLoop {
                 : s.replaceAll("(?s)</?tool_call>|</?function[^>]*>|</?parameter[^>]*>", "").strip();
     }
 
+    /**
+     * An answer that points somewhere else ("see report below", "written to notes.md") instead of saying what was found; or, for a
+     * question long enough to ask several things, one too short to answer them. A short question takes a short answer.
+     */
+    static boolean thinAnswer(String answer, String question) {
+        String a = answer == null ? "" : answer.strip();
+        boolean pointsElsewhere = a.length() < 2500 && a.matches("(?is).*\\b(see|wrote|written|saved|attached)\\b[^.\\n]{0,60}\\b(below|above|report|findings|[\\w-]+\\.(md|txt|json))\\b.*");
+        if (pointsElsewhere) return true;
+        return question != null && question.length() > 600 && a.length() < 400;
+    }
+
+    /**
+     * An answer that opens as a status of work — "Built and verified the tool end-to-end", "Research + build status: the pipeline
+     * exists", "build of measure.py in progress" — from a run that has no tool to build anything with. A research pass CodeZaiku runs
+     * for itself has the web and the library only, so such an opening describes nothing that happened; two passes answered that way
+     * (2026-10-03/04) and the page excerpts were all the notes got.
+     */
+    static boolean statusAnswer(String answer) {
+        String a = answer == null ? "" : answer.strip();
+        String head = a.length() > 300 ? a.substring(0, 300) : a;
+        String h = head.toLowerCase(Locale.ROOT);
+        return h.matches("(?s)^(research \\+ )?(build|built|implemented|verified|created|wrote|completed|finished|the tool|the pipeline|pipeline|status)\\b.*")
+                || h.matches("(?s).*\\b(in progress|end-to-end|end to end|verified present|pipeline exists|build status)\\b.*");
+    }
+
+    /** Whether this run can build anything: a run with no write_file and no shell is a research pass of the harness's own. */
+    private boolean canBuild() { return tools.find("write_file") != null || tools.find("shell") != null; }
+
+    /** A thin answer, or a status of work from a run that cannot have done any. */
+    private boolean thinOrStatus(String answer) { return thinAnswer(answer, goal) || (!canBuild() && statusAnswer(answer)); }
+
     /** Does the question demand a structured artifact IN the answer (table / fenced block / CSV / JSON)? */
     private static boolean wantsStructured(String goal) {
         String g = goal.toLowerCase();
@@ -416,6 +558,501 @@ public final class FamiliarLoop {
             if (pipes >= 2) return true;
         }
         return false;
+    }
+
+    /**
+     * The named programs as they are on disk, by what is in them. A file written again with the same text, or put back by the
+     * harness, is the same program and its check stands; by size and time it looked changed, and the whole check ran again.
+     */
+    private String programStamp() {
+        StringBuilder sb = new StringBuilder();
+        Set<String> names = new LinkedHashSet<>(deliverables.names());
+        String script = checkScript();
+        if (script != null) names.add(script);
+        String prepare = prepareScript();
+        if (prepare != null) names.add(prepare);   // what it stores is part of what the check measures
+        for (String n : names) {
+            if (Deliverables.kind(n) != Deliverables.Kind.PROGRAM) continue;
+            Path p = projectRoot.resolve(n);
+            try {
+                if (Files.isRegularFile(p)) { CRC32 sum = new CRC32(); byte[] text = Files.readAllBytes(p); sum.update(text); sb.append(n).append('=').append(text.length).append('#').append(Long.toHexString(sum.getValue())).append(';'); }
+            } catch (IOException e) { sb.append(n).append("=?;"); }
+        }
+        return sb.toString();
+    }
+
+    private static final Pattern SCRIPT = Pattern.compile("([\\w./-]+\\.(?:py|sh|js|ts|rb|go|rs))\\b");
+    private static final String INTERPRETER = "(?:\\S*python[\\d.]*|\\S*node|\\S*ruby|bash|sh)";
+
+    /** The script the check runs, as named in its command; null when the command names none. */
+    private String checkScript() {
+        if (doneCheck == null) return null;
+        Matcher m = SCRIPT.matcher(doneCheck.command);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /** The program the prepare command runs; null when none is declared or the command names none. */
+    private String prepareScript() {
+        if (doneCheck == null || doneCheck.prepare == null) return null;
+        Matcher m = SCRIPT.matcher(doneCheck.prepare);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /** The prepare program as it is on disk, by what is in it; empty while it cannot be run (none declared, or not written yet). */
+    private String prepareStamp() {
+        if (doneCheck == null || doneCheck.prepare == null) return "";
+        String script = prepareScript();
+        if (script == null) return "-";   // a command that names no program of the project: run once
+        Path p = projectRoot.resolve(script);
+        try {
+            if (!Files.isRegularFile(p)) return "";
+            CRC32 sum = new CRC32();
+            byte[] text = Files.readAllBytes(p);
+            sum.update(text);
+            return script + "=" + text.length + "#" + Long.toHexString(sum.getValue());
+        } catch (IOException e) { return ""; }
+    }
+
+    /** The prepare program is written and is not the one the harness last ran. */
+    private boolean prepareDue() {
+        String stamp = prepareStamp();
+        return !stamp.isEmpty() && !stamp.equals(preparedStamp);
+    }
+
+    /** The prepare command the harness runs: the declared one, with the interpreter the model itself used for it or for the check. */
+    private String prepareCommand() {
+        String script = prepareScript();
+        String interpreter = prepareInterpreter != null ? prepareInterpreter : checkInterpreter;
+        if (interpreter == null || script == null) return doneCheck.prepare;
+        return doneCheck.prepare.replaceFirst("^(?:timeout\\s+\\S+\\s+)?" + INTERPRETER + "\\s+(?=" + Pattern.quote(script) + ")", Matcher.quoteReplacement(interpreter) + " ");
+    }
+
+    /** Where the prepare command stands, for the pinned block; null when none is declared. */
+    private String prepareLine() {
+        if (doneCheck == null || doneCheck.prepare == null) return null;
+        if (prepareThread != null) return "running now";
+        String script = prepareScript();
+        if (lastPrepare == null) return script != null && !Files.isRegularFile(projectRoot.resolve(script)) ? "`" + script + "` is not written yet" : "not run yet";
+        return "last run by the harness, turn " + lastPrepare.turn() + " (" + lastPrepare.seconds() + " s): "
+                + (lastPrepare.exit() == 0 ? "exit 0" : lastPrepare.exit() == 124 ? "TIMED OUT" : "FAILED, exit " + lastPrepare.exit());
+    }
+
+    /** The command the harness runs: the declared one, with the interpreter the model itself last used for that script. */
+    private String checkCommand() {
+        String cmd = doneCheck.command;
+        String script = checkScript();
+        if (checkInterpreter != null && script != null) {
+            cmd = cmd.replaceFirst("^(?:timeout\\s+\\S+\\s+)?" + INTERPRETER + "\\s+(?=" + Pattern.quote(script) + ")",
+                    Matcher.quoteReplacement(checkInterpreter) + " ");
+        }
+        return cmd;
+    }
+
+    /** Remember the interpreter the model ran the check's script with, so the harness's run uses the same environment. */
+    private void noteInterpreter(String shellCommand) {
+        if (shellCommand == null) return;
+        String script = checkScript(), prepare = prepareScript();
+        if (script != null) {
+            Matcher m = Pattern.compile("(\\S*python[\\d.]*)\\s+" + Pattern.quote(script) + "\\b").matcher(shellCommand);
+            if (m.find() && !m.group(1).startsWith("-")) checkInterpreter = m.group(1);
+        }
+        if (prepare != null) {
+            Matcher m = Pattern.compile("(\\S*python[\\d.]*)\\s+" + Pattern.quote(prepare) + "\\b").matcher(shellCommand);
+            if (m.find() && !m.group(1).startsWith("-")) prepareInterpreter = m.group(1);
+        }
+    }
+
+    /** Run the check now, in this thread, and judge it. */
+    private DoneCheck.Outcome runDoneCheck(int turn) {
+        Ran r = runForCheck(checkCommand());
+        String text = r.text();
+        if (r.exit() == 124) text = "TIMED OUT after " + CHECK_TIMEOUT_SEC + " seconds (the harness's limit for this check, CODEZAIKU_CHECK_TIMEOUT_SEC); "
+                + "nothing it printed counts. Make the check finish within that: cache what is expensive to compute, or use every core.\n" + text;
+        return doneCheck.judge(r.exit(), text, r.seconds(), turn);
+    }
+
+    private record Ran(int exit, String text, long seconds) { }
+
+    /** Run the check, or its prepare command, now and in this thread: in the project's environment, from the project root, within the check's time limit. */
+    private Ran runForCheck(String cmd) {
+        long start = System.currentTimeMillis();
+        StringBuilder out = new StringBuilder();
+        int exit = -1;
+        try {
+            // the time limit through Timeout: macOS has no `timeout` (a bare `timeout N` there fails with 127, and every check read as failed
+            // on the macOS run of the export suite, 2026-10-04); Timeout falls back to gtimeout, then perl's alarm
+            ProcessBuilder pb = Shell.pb(ProjectEnv.prelude(projectRoot) + "cd " + ProjectEnv.quote(projectRoot.toString())
+                    + " && " + Timeout.wrap((int) CHECK_TIMEOUT_SEC, cmd)).redirectErrorStream(true);
+            pb.directory(projectRoot.toFile());
+            Process p = pb.start();
+            checkProcess = p;
+            try (var in = p.getInputStream()) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+            }
+            exit = p.waitFor(CHECK_TIMEOUT_SEC + 30, TimeUnit.SECONDS) ? p.exitValue() : 124;
+            if (exit == 124) p.destroyForcibly();
+        } catch (IOException e) {
+            out.append("the harness could not run it: ").append(e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            checkProcess = null;
+        }
+        String text = out.toString();
+        if (text.length() > 60_000) text = text.substring(0, 20_000) + "\n…\n" + text.substring(text.length() - 40_000);
+        return new Ran(exit, text, (System.currentTimeMillis() - start) / 1000);
+    }
+
+    /** Start the prepare command in the background when its program is written, or has changed since it last ran. */
+    private void maybeStartPrepare(int turn) {
+        if (doneCheck == null || doneCheck.prepare == null || prepareThread != null || freshPrepare != null || checkThread != null || handOverMode) return;
+        if (!prepareDue()) return;
+        preparedStamp = prepareStamp();
+        String cmd = prepareCommand();
+        log.info("  ↳ prepare started in the background at turn {}: {}", turn, cmd);
+        Thread t = new Thread(() -> {
+            try {
+                Ran r = runForCheck(cmd);
+                freshPrepare = new Prepared(r.exit(), r.text(), r.seconds(), turn);
+            } finally { prepareThread = null; }
+        }, "done-check-prepare");
+        t.setDaemon(true);
+        prepareThread = t;
+        t.start();
+    }
+
+    /** Take a finished run of the prepare command into the record, and tell the model how it went. */
+    private void absorbPrepare(ArrayNode history, Prepared p) {
+        lastPrepare = p;
+        log.info("  ↳ prepare (started turn {}, {} s): exit {}", p.turn(), p.seconds(), p.exit());
+        String script = prepareScript();
+        String what = script == null ? "the command" : "`" + script + "`";
+        history.addObject().put("role", "user").put("content", "PREPARE, run by the harness (started at turn " + p.turn() + ", took " + p.seconds() + " s): `"
+                + doneCheck.prepare + "` → " + (p.exit() == 124 ? "timed out after " + CHECK_TIMEOUT_SEC + " seconds" : "exit " + p.exit())
+                + "\nOutput (end):\n" + outputTail(p.output())
+                + (p.exit() == 0
+                        ? "\n\nWhat it stored is on disk now. The check and your programs read it from there, and try a change against it in "
+                          + "seconds; the harness runs it again only when " + what + " changes."
+                        : "\n\nIt did not finish, so what it was to store cannot be relied on. Fix " + what + "; the harness runs it again when it changes."));
+    }
+
+    /** Start the check in the background when a named program changed since it last ran; the outcome lands on a later turn. */
+    private void maybeStartDoneCheck(int turn) {
+        if (doneCheck == null || checkThread != null || freshCheck != null || handOverMode) return;
+        if (prepareThread != null || freshPrepare != null || prepareDue()) return;   // the check reads what prepare stores
+        if (turn - checkStartedTurn < CHECK_EVERY_TURNS) return;
+        String script = checkScript();
+        if (script != null && !Files.isRegularFile(projectRoot.resolve(script))) return;
+        String stamp = programStamp();
+        if (stamp.isEmpty() || stamp.equals(checkedStamp)) return;
+        checkedStamp = stamp;
+        checkStartedTurn = turn;
+        pendingSnapshot = snapshotCheckpoint(8000 + turn);   // what this run of the check measures
+        log.info("  ↳ done check started in the background at turn {}: {}", turn, checkCommand());
+        Thread t = new Thread(() -> {
+            try { freshCheck = runDoneCheck(turn); }
+            finally { checkThread = null; }
+        }, "done-check");
+        t.setDaemon(true);
+        checkThread = t;
+        t.start();
+    }
+
+    /** The tail of a check's output, for the model. */
+    private static String outputTail(String output) {
+        String o = output == null ? "" : output.strip();
+        return o.length() <= DoneCheck.OUTPUT_KEEP ? o : "…" + o.substring(o.length() - DoneCheck.OUTPUT_KEEP);
+    }
+
+    /**
+     * A slow check with no prepare command: the harness offers one, named after the check's own script and run the same way
+     * ({@code python evaluate.py} → {@code python prepare.py}). Offered once, and only as a place to put the slow step: nothing
+     * runs until the model writes that program. No offer when the check names no script, or a file of that name is already there.
+     */
+    private void offerPrepare(DoneCheck.Outcome o) {
+        prepareOffered = true;
+        String script = checkScript();
+        if (script == null) return;
+        int slash = script.lastIndexOf('/'), dot = script.lastIndexOf('.');
+        String offered = script.substring(0, slash + 1) + "prepare" + script.substring(dot);
+        if (Files.exists(projectRoot.resolve(offered))) return;
+        String command = doneCheck.command.replaceFirst("^timeout\\s+\\S+\\s+", "");
+        int at = command.indexOf(script);
+        command = command.substring(0, at) + offered;   // the interpreter the check is run with, then the program; the check's own arguments are not carried over
+        doneCheck = doneCheck.withPrepare(command);
+        log.info("prepare, offered after a check of {} s: `{}`", o.seconds(), command);
+    }
+
+    /** Take a finished check into the record: the note to the model, and the hand-over when it passes. */
+    private void absorbDoneCheck(ArrayNode history, DoneCheck.Outcome o, int turn) {
+        lastCheck = o;
+        lastCheckStamp = checkedStamp;
+        log.info("  ↳ done check (started turn {}, {} s): {}", o.turn(), o.seconds(), o.report());
+        String note = "DONE CHECK, run by the harness (started at turn " + o.turn() + ", took " + o.seconds() + " s): " + o.report()
+                + "\nOutput (end):\n" + outputTail(o.output());
+        if (o.seconds() > checkSlowSec) {
+            if (!o.passes() && doneCheck.prepare == null && !prepareOffered) offerPrepare(o);
+            String script = prepareScript();
+            note += "\n\nThis check took " + (o.seconds() / 60) + " minutes. A change is only measured when it runs, so make it fast: "
+                    + (doneCheck.prepare != null && lastPrepare == null && script != null
+                            ? "put the step that takes the time and gives the same result every run (reading every input, extracting what "
+                              + "the later steps work on) into a program of its own, `" + script + "`, that does it once for every input and "
+                              + "stores the results in files; have the check and your programs read those files. The harness runs `"
+                              + doneCheck.prepare + "` when `" + script + "` is written, and again only when it changes."
+                            : "compute the expensive step once per input and store it, and let the check reuse what is stored.");
+        }
+        if (!o.passes()) {
+            if (doneCheck.better(o, bestOutcome)) {
+                bestOutcome = o;
+                bestSnapshot = pendingSnapshot;
+                note += bestOutcome == null || bestSnapshot == null ? "" : "\nThis is the best run of the check so far; that version is kept at " + bestSnapshot + ".";
+            } else if (bestOutcome != null && bestSnapshot != null) {
+                note += "\nThis is WORSE than the best run so far (started at turn " + bestOutcome.turn() + ": " + bestOutcome.report()
+                        + "). That version is kept at " + bestSnapshot + " — `diff -ru " + bestSnapshot + " .` shows what changed; a run "
+                        + "that ends on a worse version ships the best one.";
+                log.info("  ↳ the check is worse than the best so far (turn {})", bestOutcome.turn());
+            }
+        }
+        if (!o.passes()) {
+            failedChecksSinceResearch++;
+            String found = researchWhenStuck(o, turn);
+            if (!found.isEmpty()) note += found;
+        }
+        if (o.passes() && !handOverMode) {
+            enterHandOver(o, turn);
+            note += "\n\nThe goal's own check passes: the work is done. Put these numbers in the files the goal names and call task_done "
+                    + "with them in the report. From here the tools are read_file, write_file, edit_file, shell and task_done; the version that "
+                    + "passed is kept, and a change that no longer passes is put back.";
+            log.info("  ↳ the done check PASSES at turn {}: hand-over mode", turn);
+        }
+        history.addObject().put("role", "user").put("content", note);
+    }
+
+    private void enterHandOver(DoneCheck.Outcome o, int turn) {
+        handOverMode = true;
+        passedOutcome = o;
+        passedSnapshot = o.turn() == checkStartedTurn && pendingSnapshot != null ? pendingSnapshot : snapshotCheckpoint(7000 + turn);
+        passedStamp = programStamp();
+    }
+
+    /**
+     * The done check at task_done: the harness's own run of it is what the finish carries. A background run is waited for; a stale
+     * result (a named program changed since) is replaced by a run now; a first finish whose check does not pass is sent back once;
+     * a finish after the check passed, whose later changes no longer pass, ships the version that passed.
+     *
+     * @return the message to send the model back with, or null to let the finish stand
+     */
+    private String settleDoneCheck(int turn) {
+        Thread pt = prepareThread;
+        if (pt != null) {
+            log.info("  ↳ task_done while prepare runs: waiting for it");
+            try { pt.join(TimeUnit.SECONDS.toMillis(CHECK_TIMEOUT_SEC + 60)); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+        if (freshPrepare != null) {
+            lastPrepare = freshPrepare;
+            freshPrepare = null;
+            log.info("  ↳ prepare (started turn {}, {} s): exit {}", lastPrepare.turn(), lastPrepare.seconds(), lastPrepare.exit());
+        }
+        Thread t = checkThread;
+        if (t != null) {
+            log.info("  ↳ task_done while the done check runs: waiting for it");
+            try { t.join(TimeUnit.SECONDS.toMillis(CHECK_TIMEOUT_SEC + 60)); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+        if (freshCheck != null) {
+            DoneCheck.Outcome o = freshCheck;
+            freshCheck = null;
+            lastCheck = o;
+            lastCheckStamp = checkedStamp;
+            if (o.passes() && !handOverMode) enterHandOver(o, turn);
+            log.info("  ↳ done check (started turn {}, {} s): {}", o.turn(), o.seconds(), o.report());
+        }
+        String stamp = programStamp();
+        if (lastCheck == null || !stamp.equals(lastCheckStamp)) {
+            String script = checkScript();
+            if (script == null || Files.isRegularFile(projectRoot.resolve(script))) {
+                if (prepareDue()) {
+                    preparedStamp = prepareStamp();
+                    log.info("  ↳ prepare run at task_done (turn {}): {}", turn, prepareCommand());
+                    Ran r = runForCheck(prepareCommand());
+                    lastPrepare = new Prepared(r.exit(), r.text(), r.seconds(), turn);
+                    log.info("  ↳ prepare ({} s): exit {}", r.seconds(), r.exit());
+                }
+                log.info("  ↳ done check run at task_done (turn {}): {}", turn, checkCommand());
+                lastCheckStamp = stamp;
+                pendingSnapshot = snapshotCheckpoint(8000 + turn);
+                checkStartedTurn = turn;
+                lastCheck = runDoneCheck(turn);
+                log.info("  ↳ done check ({} s): {}", lastCheck.seconds(), lastCheck.report());
+                if (!lastCheck.passes() && doneCheck.better(lastCheck, bestOutcome)) { bestOutcome = lastCheck; bestSnapshot = pendingSnapshot; }
+            }
+        }
+        if (lastCheck == null) return null;
+        if (lastCheck.passes()) {
+            if (!handOverMode) enterHandOver(lastCheck, turn);
+            return null;
+        }
+        if (handOverMode && passedSnapshot != null) {
+            if (restoreCheckpoint(passedSnapshot)) {
+                checkRestored = true;
+                log.info("  ↳ the files changed after the check passed and no longer pass: the passing version is put back");
+                lastCheck = passedOutcome;
+            }
+            return null;
+        }
+        if (!doneCheckBounced && turn < maxTurns) {
+            doneCheckBounced = true;
+            log.info("  ↳ task_done, but the done check does not pass → one bounce");
+            return "Before finishing: the harness ran the done check you declared, and it does not pass: " + lastCheck.report()
+                    + "\nOutput (end):\n" + outputTail(lastCheck.output())
+                    + "\nContinue the work toward it, or call task_done again to hand over as it stands.";
+        }
+        shipTheBest();
+        return null;
+    }
+
+    /** The run ends on a version the check scored worse than an earlier one: put the best-scoring version back. */
+    private void shipTheBest() {
+        if (bestOutcome == null || bestSnapshot == null || lastCheck == null || lastCheck == bestOutcome) return;
+        if (doneCheck.better(lastCheck, bestOutcome) || !doneCheck.better(bestOutcome, lastCheck)) return;
+        if (restoreCheckpoint(bestSnapshot)) {
+            bestRestored = true;
+            log.info("  ↳ the run ends on a version worse than its best (turn {}): the best is put back", bestOutcome.turn());
+            lastCheck = bestOutcome;
+        }
+    }
+
+    /** The done check's standing, as a closing line for the summary; empty when the goal states none. */
+    private String checkLine() {
+        if (doneCheck == null || lastCheck == null) return "";
+        return "\n\nDone check, run by the harness: " + lastCheck.report()
+                + (checkRestored ? " The files changed after the check passed and no longer passed; the harness put back the version that passed." : "")
+                + (bestRestored ? " The run ended on a version that scored worse than its best; the harness put back the best-scoring version (from turn " + lastCheck.turn() + ")." : "");
+    }
+
+    /**
+     * What a run works with once its check has passed. The shell is among them: the numbers for the files the goal names come
+     * from running something, and a run without it could neither see nor repeat its own results (the control run of 2026-10-02:
+     * "I couldn't run commands, so I never saw the failure output"). The files are safe either way: the version that passed is
+     * kept, and a change that no longer passes is put back.
+     */
+    private static final Set<String> HAND_OVER_TOOLS = Set.of("read_file", WRITE_TOOL, "edit_file", "shell", TaskDoneTool.NAME);
+
+    private static ArrayNode onlyThese(ArrayNode all, Set<String> tools) {
+        ArrayNode some = all.arrayNode();
+        for (JsonNode t : all) if (tools.contains(t.path("function").path("name").asText())) some.add(t);
+        return some.isEmpty() ? all : some;
+    }
+
+    private int halfTimeTurn() { return (maxTurns + 1) / 2; }
+
+    /** Where the end of the run starts: twenty turns before it on a long budget, the last fifth (three turns at least) on a short one. */
+    private int finalStretchTurn() { return maxTurns > 60 ? maxTurns - 20 : maxTurns - Math.max(3, maxTurns / 5); }
+
+    /** The named files the current write-only turns are for: programs at half-time, programs and documents in the final stretch. */
+    private List<String> handOverDue() {
+        return handOverFinal ? deliverables.missing(Deliverables.Kind.PROGRAM, Deliverables.Kind.DOCUMENT)
+                : deliverables.missing(Deliverables.Kind.PROGRAM);
+    }
+
+    /** The tool array reduced to one tool; empty when that tool is not among them. */
+    /** The programs the goal names and the check runs, those that exist. */
+    private List<String> namedPrograms() {
+        Set<String> names = new LinkedHashSet<>(deliverables.names());
+        String script = checkScript();
+        if (script != null) names.add(script);
+        List<String> out = new ArrayList<>();
+        for (String n : names) if (Deliverables.kind(n) == Deliverables.Kind.PROGRAM && Files.isRegularFile(projectRoot.resolve(n))) out.add(n);
+        return out;
+    }
+
+    /** read_file, plus write_file and edit_file with their path fixed by the schema to the named programs. */
+    private static ArrayNode programsOnly(ArrayNode all, List<String> paths) {
+        ArrayNode some = all.arrayNode();
+        for (JsonNode t : all) {
+            String name = t.path("function").path("name").asText();
+            if (name.equals("read_file")) some.add(t);
+            if (!name.equals(WRITE_TOOL) && !name.equals("edit_file")) continue;
+            ObjectNode tool = t.deepCopy();
+            ObjectNode pathSpec = (ObjectNode) tool.path("function").path("parameters").path("properties").path("path");
+            if (pathSpec.isObject()) {
+                ArrayNode allowed = pathSpec.putArray("enum");
+                for (String p : paths) allowed.add(p);
+                pathSpec.put("description", "one of the programs the goal names: " + String.join(", ", paths));
+            }
+            some.add(tool);
+        }
+        return some.isEmpty() ? all : some;
+    }
+
+    /**
+     * The write tool alone, its path fixed to one file by the schema. The file's text is given as content, or taken from a file
+     * the project already has (copy_from): a run that had its program under another name could only write it out again, and at
+     * a high thinking effort that reply ran to the 30-minute limit twice (2026-10-02).
+     */
+    private static ArrayNode writeOnlyOf(ArrayNode all, String path) {
+        ArrayNode one = only(all, WRITE_TOOL);
+        if (one.isEmpty() || one.size() != 1) return one;
+        ObjectNode tool = one.get(0).deepCopy();
+        ObjectNode params = (ObjectNode) tool.path("function").path("parameters");
+        ObjectNode pathSpec = (ObjectNode) params.path("properties").path("path");
+        if (pathSpec.isObject()) {
+            pathSpec.putArray("enum").add(path);
+            pathSpec.put("description", "the file this turn writes: " + path);
+            ((ObjectNode) params.path("properties")).putObject("copy_from").put("type", "string")
+                    .put("description", "instead of content: the path of a file the project already has, whose text becomes " + path);
+            params.putArray("required").add("path");
+        }
+        ArrayNode narrowed = all.arrayNode();
+        narrowed.add(tool);
+        return narrowed;
+    }
+
+    private static ArrayNode only(ArrayNode all, String tool) {
+        ArrayNode one = all.arrayNode();
+        for (JsonNode t : all) if (tool.equals(t.path("function").path("name").asText())) one.add(t);
+        return one;
+    }
+
+    private boolean codingDeadline(int turn) {
+        return coding && maxTurns >= CODING_DEADLINE_MIN_TURNS && turn >= maxTurns;
+    }
+
+    /** The goal's named files that are not written, as a closing line for a summary; empty when there are none. */
+    private String unwrittenLine() {
+        deliverables.refresh();
+        List<String> unwritten = deliverables.missing();
+        return unwritten.isEmpty() ? "" : "\n\nNamed in the goal and not written: " + Deliverables.list(unwritten) + ".";
+    }
+
+    /** Above this share of the window the oldest thinking starts to go; compaction of the transcript itself is at 70%. */
+    static final double SHED_THINKING_AT = 0.50;
+
+    /**
+     * Drop the model's thinking from the oldest replies first, until enough characters are freed or only the latest reply's is
+     * left. The replies and their tool calls stay.
+     *
+     * <p>The model's makers keep every reply's thinking in the conversation and recommend it for agent work ("decision consistency
+     * and reduced redundant reasoning", Qwen3.8 card), so the thinking stays while there is room. It is also the first thing to go
+     * when there is not: the server renders it into every later request, and in a 32k window it was half of what filled it and
+     * made a run compact every few turns (2026-09-30). The harness dropped all of it but the latest for a day (5f68694c); that
+     * fitted the small window and threw away what a large one can hold.
+     *
+     * @return characters dropped
+     */
+    static int shedOldestThinking(ArrayNode history, long charsToFree) {
+        int latest = -1;
+        for (int i = history.size() - 1; i >= 0 && latest < 0; i--) {
+            if (history.get(i) instanceof ObjectNode m && "assistant".equals(m.path("role").asText())) latest = i;
+        }
+        int dropped = 0;
+        for (int i = 0; i < latest && dropped < charsToFree; i++) {
+            if (!(history.get(i) instanceof ObjectNode m) || !"assistant".equals(m.path("role").asText())) continue;
+            JsonNode was = m.remove("reasoning_content");
+            if (was != null) dropped += was.asText("").length();
+        }
+        return dropped;
     }
 
     /** The tool array reduced to task_done alone (deadline turn) — keeps tool_choice="required" valid. */
@@ -510,8 +1147,6 @@ public final class FamiliarLoop {
     private int blockedBounces = 0;
     private static final int MAX_BLOCKED_BOUNCES = 2; // challenge premature task_blocked (dev-gated), then accept
     private static final int MAX_DRIVE_BOUNCES = 4;
-    private static final int PLAN_MIN_STEPS = 2;
-    private static final int PLAN_MAX_STEPS = 8;
 
     // ── SPEC COVERAGE (smallcode-contract / SDD-checklist, minus the gate) ────────────────────────
     // The model's self-written plan UNDER-COVERS the spec (measured: the web-dashboard section quietly
@@ -520,7 +1155,7 @@ public final class FamiliarLoop {
     // every turn. Derivation ladder, each layer degrading gracefully (no format dependency, never
     // aborts): (1) mechanical structure when the goal visibly has it — markdown headers, else numbered
     // items, else bullets (structure-when-present is ground truth, zero extraction error); (2) model
-    // extraction at the forced-prose planning turn otherwise (works for ANY format — extraction is far
+    // extraction in the planning call otherwise (works for ANY format — extraction is far
     // easier than planning); (3) nothing — the run proceeds exactly as before. Pure context, no gate,
     // no tracking machinery: the model simply SEES the full list every turn instead of only its plan.
     private List<String> specReqs = List.of();
@@ -587,84 +1222,155 @@ public final class FamiliarLoop {
         return sb.append('\n').toString();
     }
 
-    /** One-time instruction asking the model to emit a numbered plan up front (multi-concern tasks only). */
-    private String planRequestInstruction() {
+    private static final int PLAN_MAX_TOKENS = 1024;
+    private static final int PLAN_SHAPE_CHARS = 2000;
+
+    /** The instruction of the planning call: the plan, and when the goal has no visible structure, its requirements first. */
+    private String planPrompt() {
         // Layer 2 of spec-coverage derivation: when the goal had no visible structure to extract
-        // mechanically, have the model ENUMERATE the requirements in the same forced-prose turn
+        // mechanically, have the model ENUMERATE the requirements in the same call
         // (extraction is far easier than planning — it just lists what the text says).
-        String reqAsk = specReqs.isEmpty()
-                ? "First emit REQUIREMENTS: a numbered list of every distinct thing the goal demands "
-                + "(features, qualities, tests, delivery artifacts — in the goal's own words). Then "
-                : "Then ";
-        return "\n\nThis is a multi-step task. In your FIRST message, " + reqAsk
-                + "emit a numbered plan of vertical slices (each a real, runnable increment), in this "
-                + "format:\n\nPLAN:\n1. <step>\n2. <step>\n3. <step>\n\nKeep it to " + PLAN_MAX_STEPS
-                + " steps or fewer. Then IMMEDIATELY start executing step 1 with a tool call — do NOT stop "
-                + "after writing the plan; the plan is just a header for your work. Do ALL the steps before "
+        boolean reqs = specReqs.isEmpty();
+        // Said without naming tools, and saying that nothing runs here: asked "a coding task with tools …, before the work starts,
+        // write the plan", a 27B answered with "I'll start by exploring the project structure" and a shell call written out as
+        // text, every time (2026-10-02); the plan then had to come from a thinking call, which at a high effort overran its budget.
+        return "You are about to carry out a coding task. This message is for the plan alone: nothing runs here, nothing can be "
+                + "read or looked at, and the plan is written from the task's text and the folder listing below. Write the plan: a "
+                + "numbered list of vertical slices, each a real, runnable increment, in the order you will do them, ending with the "
+                + "files the task asks you to hand over. " + PlanReply.MAX_STEPS + " steps or fewer, one line each."
+                + (reqs ? " Before the plan, list REQUIREMENTS: every distinct thing the task demands (features, qualities, tests, "
+                        + "delivery artifacts), in the task's own words." : "")
+                + " After the plan, write the DONE CHECK: the one command that judges the work against what the task asks, and what "
+                + "its output must show for the task to be done — one pass line for EVERY bound the task states (an error or score, "
+                + "a count or share that must be measured, a time or size limit; each as a name the command prints, then <, <=, >, >= "
+                + "or ==, then a number), or `pass: exit 0` for a task judged by its tests. The harness "
+                + "runs this command itself as the work goes on, and the work is done when it passes; write `run: none` when the "
+                + "task states no check. When the check depends on a step that is slow and gives the same result every time it runs "
+                + "(reading every video or document, extracting what the later steps work on, building an index, downloading data), "
+                + "add a prepare line: the command for a program of its own that does that step once for every input and stores the "
+                + "results in files, which the check and your programs then read. The harness runs it once, and again only when that "
+                + "program changes. Write `prepare: none` when the check has no such step."
+                + " Your whole reply is " + (reqs ? "the lists" : "the plan and the check") + ", in this format:\n\n"
+                + (reqs ? "REQUIREMENTS:\n1. <requirement>\n2. <requirement>\n\n" : "")
+                + "PLAN:\n1. <step>\n2. <step>\n3. <step>\n\nDONE CHECK:\nrun: <command>\npass: <name> <op> <number>\nprepare: <command, or none>";
+    }
+
+    /**
+     * Ask for the plan before the first turn, in a short call of its own: its own instruction, no tools, no thinking.
+     *
+     * <p>The plan used to be the loop's first turn, with the tools switched off for that one message. On a 27B that turn never
+     * produced a plan the harness could read — every run on 2026-09-30 logged "0 steps parsed". The model wrote the plan in its
+     * thinking and its first tool calls, as text nothing ran, in the reply: the instruction asked for both at once, and the system
+     * prompt around it says every message is a tool call. Asked for the plan alone it wrote one, after two to five minutes of
+     * thinking (up to 8,500 tokens, which then sat in the window), and once ran past the call's time limit. The same request outside
+     * the loop takes twelve seconds and came back as a well-formed plan three times out of three.
+     */
+    private void planAhead() {
+        ArrayNode pm = j.createArrayNode();
+        pm.addObject().put("role", "system").put("content", planPrompt());
+        pm.addObject().put("role", "user").put("content", "THE TASK:\n" + goal + "\n\nThe project folder now:\n"
+                + ProjectShape.render(projectRoot, PLAN_SHAPE_CHARS) + researchBlock()
+                + (researchNotes.isBlank() ? "" : "\n\nWhere the notes describe how a step is done — a library, a definition, a rule — the step "
+                        + "says so in the notes' own terms, so that the work follows them.")
+                + "\n\nWrite the plan.");
+        String reply = drive.classify(pm, PLAN_MAX_TOKENS);
+        log.info("planning call without thinking: {} chars back ({} tokens); it began: {}", reply.length(), drive.lastCompletionTokens(), preview(reply));
+        // Nothing came back (the server ran out of time): the same call once more, which now waits twice as long. A plan without
+        // thinking is the one that reads: of three runs started together at a high thinking effort, the one whose no-thinking call
+        // finished (224 s) had its plan and check; the two that fell through to a thinking call got 15,000 characters of thinking
+        // and no plan (2026-10-02).
+        if (reply.isBlank()) {
+            log.info("the planning call came back with nothing; asking once more");
+            reply = drive.classify(pm, PLAN_MAX_TOKENS);
+            log.info("planning call without thinking, asked once more: {} chars back ({} tokens); it began: {}", reply.length(), drive.lastCompletionTokens(), preview(reply));
+        }
+        String thinking = "";
+        if (PlanReply.inReply(reply) == null) {
+            // A server that does not take the no-thinking switch answers that call with nothing: ask the ordinary way. A call that
+            // fails is made once more: after a call that ran out of time the drive waits twice as long.
+            for (int attempt = 1; ; attempt++) {
+                try {
+                    ObjectNode m = drive.chat(pm, null, Math.min(nctx / 4, PLAN_MAX_TOKENS * 4));
+                    reply = m.path("content").asText("");
+                    thinking = m.path("reasoning_content").asText("");
+                    break;
+                } catch (RuntimeException e) {
+                    if (attempt == 1) { log.info("the planning call failed ({}); asking once more", e.getMessage()); continue; }
+                    log.info("the planning call failed again ({}); the run starts without a plan", e.getMessage());
+                    return;
+                }
+            }
+        }
+        if (specReqs.isEmpty()) {
+            List<String> r = parseReqsFromResponse(reply);
+            if (r.isEmpty()) r = parseReqsFromResponse(thinking);
+            if (!r.isEmpty()) { specReqs = r; log.info("requirements read from the planning call: {} items", r.size()); }
+        }
+        List<String> p = PlanReply.inReply(reply);
+        boolean fromThinking = p == null && (p = PlanReply.inThinking(thinking)) != null;
+        if (p == null) {
+            log.info("no plan in the planning call's reply ({} chars of reply, {} of thinking); it began: {}", reply.length(), thinking.length(), preview(reply));
+            return;
+        }
+        planSteps = p;
+        StringBuilder steps = new StringBuilder();
+        for (int i = 0; i < p.size(); i++) steps.append("\n  ").append(i + 1).append(". ").append(p.get(i));
+        log.info("plan: {} steps{}{}", p.size(), fromThinking ? " (read from the model's thinking; the reply held none)" : "", steps);
+        if (coding) {
+            doneCheck = DoneCheck.parse(reply);
+            if (doneCheck == null) doneCheck = DoneCheck.parse(thinking);
+            if (doneCheck != null) log.info("done check: `{}`, passes when {}{}", doneCheck.command,
+                    doneCheck.conditions.isEmpty() ? "it exits 0" : doneCheck.conditions, doneCheck.prepare == null ? "" : "; prepare: `" + doneCheck.prepare + "`");
+            else log.info("done check: none declared");
+            if (doneCheck != null && !doneCheck.conditions.isEmpty()) secondLookAtTheCheck();
+        }
+    }
+
+    /**
+     * A second, cheap look at the declared check against the task's words: a bound the task states and the check leaves out makes
+     * the check satisfiable by doing less — a run met "median error under 5" by measuring almost nothing (2026-10-01), the task having
+     * also said "while measuring most of them". Any bound the second look adds is kept; the command is not changed.
+     */
+    private void secondLookAtTheCheck() {
+        ArrayNode cm = j.createArrayNode();
+        cm.addObject().put("role", "system").put("content", "You compare a declared check with the task it is for. The task states what "
+                + "counts as done; the check must hold every bound the task states. Reply with the complete DONE CHECK block — the same "
+                + "run line, and one pass line per bound (the ones already there, plus any the task states that are missing: a count or "
+                + "share that must be measured, a time or size limit, a second number). The block unchanged when nothing is missing.");
+        cm.addObject().put("role", "user").put("content", "THE TASK:\n" + goal + "\n\nTHE DECLARED CHECK:\nDONE CHECK:\nrun: " + doneCheck.command
+                + "\n" + String.join("\n", doneCheck.conditions.stream().map(c -> "pass: " + c).toList()) + "\n\nThe complete block:");
+        DoneCheck again = DoneCheck.parse(drive.classify(cm, 400));
+        if (again == null) return;
+        DoneCheck merged = doneCheck.withConditionsOf(again);
+        if (merged.conditions.size() > doneCheck.conditions.size()) {
+            doneCheck = merged;
+            log.info("done check, after a second look at the task: passes when {}", doneCheck.conditions);
+        }
+    }
+
+    /** What the first message says about the plan and about the checks at the end (multi-step tasks only). */
+    private String planKickoff() {
+        return "\n\nThis is a multi-step task. "
+                + (planSteps.isEmpty()
+                        ? "Work in vertical slices, each a real, runnable increment. "
+                        : "The PLAN in the system prompt is the outline for it, in vertical slices (each a real, runnable increment): "
+                        + "follow it in order and adjust it as you learn. ")
+                + "Do ALL the steps before "
                 + "calling task_done. When you call task_done the HARNESS runs your tests itself — if any fail "
                 + "it sends you back to fix them — and it will not accept done on tests that pass on broken code, "
                 + "so make each concern genuinely real (working code + tests that would FAIL if the code were wrong).";
     }
 
-    /** Lenient extraction of a numbered/bulleted plan from the model's first response. Null if none. */
-    private static List<String> parsePlan(String text) {
-        if (text == null || text.isBlank()) return null;
-        String clean = text.replaceAll("```[\\w]*\\n?|\\n?```", "").replace("**", "");
-        String body = clean;
-        Matcher h = Pattern.compile(
-                "(?:^|\\n)(?:plan|steps?|approach):?\\s*\\n([\\s\\S]+?)(?=\\n\\n[A-Z]|$)",
-                Pattern.CASE_INSENSITIVE).matcher(clean);
-        if (h.find()) body = h.group(1);
-        List<String> lines = new ArrayList<>();
-        for (String l : body.split("\\n")) { String t = l.strip(); if (!t.isEmpty()) lines.add(t); }
-        Pattern num = Pattern.compile("^(\\d{1,2})[.\\)\\-:]\\s+(.+)$");
-        List<String> numbered = new ArrayList<>();
-        for (String line : lines) {
-            Matcher m = num.matcher(line);
-            if (m.find()) numbered.add(m.group(2).strip());
-        }
-        if (numbered.size() >= PLAN_MIN_STEPS) return trimPlan(numbered);
-        Pattern bul = Pattern.compile("^[-*•]\\s+(.+)$");
-        List<String> bullet = new ArrayList<>();
-        for (String line : lines) {
-            Matcher m = bul.matcher(line);
-            if (m.find()) bullet.add(m.group(1).strip());
-        }
-        return bullet.size() >= PLAN_MIN_STEPS ? trimPlan(bullet) : null;
-    }
-
-    private static List<String> trimPlan(List<String> steps) {
-        List<String> out = new ArrayList<>();
-        for (String s : steps) {
-            out.add(s.length() > 200 ? s.substring(0, 200) + "…" : s);
-            if (out.size() >= PLAN_MAX_STEPS) break;
-        }
-        return out;
-    }
-
     private static final Pattern STEP_DONE = Pattern.compile(
             "step\\s+(\\d{1,2})\\s+(?:is\\s+)?(?:done|complete|finished)", Pattern.CASE_INSENSITIVE);
 
-    /** Parse the plan from the first multi-concern response (once), then softly mark steps the model says it
-     *  finished. No gate, no build check — just orientation. */
-    private void observePlan(String content) {
-        if (content == null || content.isBlank()) return;
-        if (multiConcern && !planResolved) {
-            // Layer 2 spec-coverage: pick up the REQUIREMENTS list from the same first response.
-            if (specReqs.isEmpty()) {
-                List<String> r = parseReqsFromResponse(content);
-                if (!r.isEmpty()) { specReqs = r; log.info("  ↳ parsed spec requirements: {} items", r.size()); }
-            }
-            List<String> p = parsePlan(content);
-            if (p != null) { planSteps = p; log.info("  ↳ parsed plan: {} steps", p.size()); }
-            planResolved = true; // one shot — parsed or not, never abort, never retry
-        }
-        if (!planSteps.isEmpty()) {
-            Matcher m = STEP_DONE.matcher(content);
-            while (m.find()) {
-                int idx = Integer.parseInt(m.group(1)) - 1;
-                if (idx >= 0 && idx < planSteps.size()) completedSteps.add(idx); // soft display marking only
-            }
+    /** Softly mark the plan's steps the model says it finished, in its reply or its thinking. No gate, no build check — just orientation. */
+    private void observePlan(String content, String thinking) {
+        if (planSteps.isEmpty()) return;
+        Matcher m = STEP_DONE.matcher((content == null ? "" : content) + "\n" + (thinking == null ? "" : thinking));
+        while (m.find()) {
+            int idx = Integer.parseInt(m.group(1)) - 1;
+            if (idx >= 0 && idx < planSteps.size()) completedSteps.add(idx); // soft display marking only
         }
     }
 
@@ -874,9 +1580,10 @@ public final class FamiliarLoop {
                             || rel.contains("__pycache__/") || rel.contains(".git/") || rel.contains(".cp-checkpoints"))
                         return;
                     String n = p.getFileName().toString();
-                    boolean code = n.matches(".*\\.(py|java|js|ts|jsx|tsx|rs|go|gd|kt|rb|c|cpp|h)$")
+                    boolean code = n.matches(".*\\.(py|java|js|ts|jsx|tsx|rs|go|gd|kt|rb|c|cpp|h|sh|bash|ps1|pl)$")
                             || n.equals("build.gradle") || n.equals("settings.gradle") || n.endsWith(".toml")
-                            || n.equals("requirements.txt") || n.equals("package.json");
+                            || n.equals("requirements.txt") || n.equals("package.json")
+                            || deliverables.names().contains(rel);
                     if (!code) return;
                     try {
                         Path d = cp.resolve(rel);
@@ -1677,21 +2384,69 @@ public final class FamiliarLoop {
 
     private static final String SUMMARIZE_PROMPT = """
             You are compacting a coding session into a checkpoint that lets the work continue WITHOUT
-            the full transcript. Output ONLY the sections below, as terse bullets. PRESERVE EXACT file
-            paths, commands, identifiers, and error strings verbatim. If a PRIOR CHECKPOINT is given,
-            carry every fact forward and update it (move In progress → Done as warranted); never drop
-            a decision or a path.
+            the full transcript. The session is paused while you write it, and your whole reply is the
+            checkpoint text: the record you are given is material to summarise. Output ONLY the sections
+            below, in this order, as terse bullets. PRESERVE EXACT file paths, commands, identifiers,
+            numbers, and error strings verbatim. Measure progress against THE GOAL as it is given to you.
+            The goal and its rules stay in front of the worker word for word, so the checkpoint holds what
+            the work has done and found, and Constraints holds only what was learned along the way (the
+            environment, versions, limits met).
 
-            ## Goal
-            ## Constraints
+            Keep the whole checkpoint within about 600 words. If a PRIOR CHECKPOINT is given, bring it up
+            to date: move In progress → Done as warranted, merge older Done items into one line each, and
+            keep the decisions, paths, numbers and errors that the next steps depend on.
+
             ## Progress
             - Done:
             - In progress:
             - Blocked:
-            ## Key decisions
             ## Next steps
             ## Critical context (signatures, contracts, exact errors to remember)
+            ## Key decisions
+            ## Constraints
             """;
+    // The order and the size are from a run that compacted 23 times in 70 turns (2026-09-30): told to "carry every fact forward",
+    // each checkpoint was longer than the last (to 10,000 characters), the summary ran into its token limit before it reached
+    // "Next steps", which came fourth of five sections, and had to be asked for again. What a worker cannot continue without comes
+    // first now, and the checkpoint is told how long it may be.
+    /** Said after the record: a request that ends on the record's last tool result is continued, not summarised (2026-09-30). */
+    private static final String SUMMARIZE_CLOSING = "The record ends here. Write the checkpoint now, as plain text: begin with the "
+            + "line \"## Progress\" and fill in every section through \"## Constraints\", within about 600 words.";
+    /**
+     * Room for the summary itself. The first request is made without the model's thinking, which is counted against the same
+     * limit: replaying real compactions (2026-09-30), three of six summaries made with thinking came back empty or cut off before
+     * "Next steps"; of seventeen made without it none did, and none was a tool call in place of the summary.
+     */
+    private static final int SUMMARY_MAX_TOKENS = 3072;
+    private static final int SUMMARY_GOAL_CHARS = 4000;
+    private static final int SUMMARY_RECORD_CHARS = 24_000;
+
+    /**
+     * Why the model server failed call after call, in words that point at the fix. Every such stop used to say "context overflow" and
+     * to check the server address, whatever happened; on 2026-09-29 the cause was a slow server (a power-capped GPU making 7.8 tokens
+     * a second, each long answer running past the time limit), and both words pointed the wrong way.
+     */
+    static String driveFailureSummary(Throwable e, String baseUrl, int failures, double generatedPerSecond, Duration lastLimit) {
+        Throwable c = e;
+        boolean timedOut = false, refused = false;
+        for (int i = 0; c != null && i < 8; i++, c = c.getCause()) {
+            if (c instanceof HttpConnectTimeoutException || c instanceof ConnectException || c instanceof NoRouteToHostException) refused = true;
+            else if (c instanceof HttpTimeoutException) timedOut = true;
+        }
+        String detail = String.valueOf(e.getMessage()).replaceAll("\\s+", " ");
+        if (timedOut && !refused) {
+            return ResultDocument.DRIVE_UNAVAILABLE + " the model server answered too slowly: " + failures + " calls in a row ran out of time"
+                    + (lastLimit != null ? " (the last one waited " + lastLimit.toSeconds() + " seconds)" : "")
+                    + (generatedPerSecond > 0 ? String.format(", while it was making about %.1f tokens a second", generatedPerSecond) : "")
+                    + ". Use a faster model server, or let a call wait longer with CODEZAIKU_DRIVE_TIMEOUT_MAX (seconds).";
+        }
+        if (refused) {
+            return ResultDocument.DRIVE_UNAVAILABLE + " the model server at " + baseUrl + " did not answer " + failures
+                    + " times in a row (" + detail + "). Check that it is running and that CODEZAIKU_DRIVE points at it.";
+        }
+        return ResultDocument.DRIVE_UNAVAILABLE + " the model server at " + baseUrl + " failed " + failures + " times in a row ("
+                + detail + "). If it is a hosted API, its address takes no path: https://api.anthropic.com, not .../v1.";
+    }
 
     public FamiliarLoop(DriveClient drive, ToolRegistry tools, Path projectRoot, String goal,
                         int maxTurns, Library library) {
@@ -1844,6 +2599,14 @@ public final class FamiliarLoop {
 
     public Result run() {
         ArrayNode toolSchemas = tools.toolsArray(j);
+        if (coding) {
+            deliverables = Deliverables.of(goal, projectRoot);
+            if (!deliverables.isEmpty()) log.info("files the goal names, to write: {}", String.join(", ", deliverables.names()));
+        }
+        if (multiConcern) {
+            if (coding && !chatMode) researchFirst();
+            planAhead();
+        }
 
         // The growing conversation: the action/observation transcript. The pinned ground truth
         // (instructions + current shape + goal) is regenerated into a fresh system message each turn.
@@ -1866,13 +2629,30 @@ public final class FamiliarLoop {
                           + "them. When the reply is ready, call task_done with the FULL reply as "
                           + "the summary. Anything you still need from the person belongs in the "
                           + "reply as a question — asking and finishing the turn IS completing it."
-                        : "Begin. Work toward the goal using the tools. When it is met and you have "
-                          + "verified it (build + your own tests pass), call task_done."
-                          + (multiConcern ? planRequestInstruction() : ""));
+                        : "Begin. Work toward the goal using the tools. When it is met, call task_done with "
+                          + "the real results of your last run."
+                          + (multiConcern ? planKickoff() : ""));
 
         try {
         for (int turn = 1; turn <= maxTurns + epilogueTurns; turn++) {
             turnNow = turn;
+            deliverables.refresh();
+            if (freshPrepare != null) {
+                Prepared p = freshPrepare;
+                freshPrepare = null;
+                absorbPrepare(history, p);
+            }
+            if (freshCheck != null) {
+                DoneCheck.Outcome o = freshCheck;
+                freshCheck = null;
+                absorbDoneCheck(history, o, turn);
+            }
+            maybeStartPrepare(turn);
+            maybeStartDoneCheck(turn);
+            if (doneCheck != null) {
+                String st = programStamp();
+                if (!st.equals(prevProgramStamp)) { prevProgramStamp = st; lastProgramChangeTurn = turn; }
+            }
             // TURN-ECONOMY NUDGE (chat, once): a conversational turn that reaches 15 loop-turns
             // has become a build task. Measured on the first real 0.2.0 session (2026-08-31): a
             // "write a testing harness" ask ran 56 interactive turns that delegate would have
@@ -1894,12 +2674,58 @@ public final class FamiliarLoop {
             // END-GAME pressure (once, ~20 turns before the cap): agents otherwise hit the budget wall with
             // no warning — battery15 java-n1 died at turn 300 mid-edit with a broken file. One salient user
             // message redirects the model from adding scope to converging what exists.
+            // WRITE-ONLY TURNS start here when a named file of the kind due is still missing (see handOverTurnsLeft).
+            String handOverAsk = "";
+            if (coding && maxTurns >= HAND_OVER_MIN_TURNS && (turn == halfTimeTurn() || turn == finalStretchTurn())
+                    && !only(toolSchemas, WRITE_TOOL).isEmpty()) {
+                handOverFinal = turn == finalStretchTurn();
+                List<String> due = handOverDue();
+                if (!due.isEmpty()) {
+                    handOverTurnsLeft = Math.min(due.size(), HAND_OVER_MAX_TURNS);
+                    boolean one = due.size() == 1;
+                    String turns = handOverTurnsLeft == 1 ? "this turn" : "the next " + handOverTurnsLeft + " turns";
+                    handOverAsk = "For " + turns + " write_file is the one tool: write " + Deliverables.list(due) + " now"
+                            + (handOverFinal
+                                    ? ", from what you have — the real numbers from your last run, and a plain statement of anything not measured yet. "
+                                    : " as your best current version, complete from start to end, from what you have learned so far. ")
+                            + "The full tools come back after that, for running " + (one ? "it" : "them") + " and improving "
+                            + (one ? "it" : "them") + ".";
+                    log.info("  ↳ write-only turns from turn {}/{} ({}): {}", turn, maxTurns, handOverTurnsLeft, String.join(", ", due));
+                    if (!handOverFinal) {
+                        history.addObject().put("role", "user").put("content", "HALF-TIME — turn " + turn + " of " + maxTurns
+                                + ". The goal names " + Deliverables.list(due) + ", not written yet. " + handOverAsk);
+                    } else if (maxTurns <= 60) {
+                        history.addObject().put("role", "user").put("content", "FINAL STRETCH — about " + (maxTurns - turn)
+                                + " turns remain. The goal names " + Deliverables.list(due) + ", not written yet. " + handOverAsk);
+                    }
+                }
+            }
             if (turn == Math.max(1, maxTurns - 20) && maxTurns > 60) {
-                log.info("  ↳ end-game pressure note (turn {}/{})", turn, maxTurns);
+                // The note used to end "call task_done only when that final run is green". A run whose goal set a bar it could not
+                // reach (median error under 5 degrees; it had 5.4) obeyed: it went back to diagnosing for its last fifteen turns and
+                // never wrote the results file or reported at all (2026-09-30). The end of a run is for handing over what there is.
+                List<String> unwritten = deliverables.missing();
+                log.info("  ↳ end-game pressure note (turn {}/{}){}", turn, maxTurns,
+                        unwritten.isEmpty() ? "" : " — not written yet: " + String.join(", ", unwritten));
                 history.addObject().put("role", "user").put("content",
-                        "FINAL STRETCH — about 20 turns remain. Finish the change you are on, then run your "
-                        + "build and tests ONE FINAL TIME and call task_done only when that final run is "
-                        + "green. Prefer completing what exists over starting anything new.");
+                        "FINAL STRETCH — about 20 turns remain. Finish the change you are on and the files the goal asks for."
+                        + (unwritten.isEmpty() ? "" : " Still to write: " + Deliverables.list(unwritten) + ".")
+                        + (lastCheck == null ? "" : " The done check's last run: " + lastCheck.report() + ".")
+                        + (handOverAsk.isEmpty() ? "" : " " + handOverAsk)
+                        + " Then put the real results of your last run in them and call task_done with a report of where the "
+                        + "work stands: what works, the results, and what is left, whether or not every target in the goal was "
+                        + "reached. Prefer completing what exists over starting anything new.");
+            }
+            // DEADLINE TURN (coding): the last turn offers task_done alone (see turnTools below); this says what to put in it.
+            if (codingDeadline(turn) && !deadlineNoted) {
+                deadlineNoted = true;
+                List<String> unwritten = deliverables.missing();
+                log.info("  ↳ deadline turn {}/{}: only task_done is offered{}", turn, maxTurns,
+                        unwritten.isEmpty() ? "" : " — not written: " + String.join(", ", unwritten));
+                history.addObject().put("role", "user").put("content",
+                        "This is the last turn, and task_done is the one tool left. Call it now with a report of where the work "
+                        + "stands: what is built and works, the real results from your last run, and what is missing or failing."
+                        + (unwritten.isEmpty() ? "" : " The goal names " + Deliverables.list(unwritten) + ", not written: say so."));
             }
             // STALL ESCALATION (help a weak driver that's SPINNING without producing the deliverable — observed:
             // a 9B burned 226 turns on a multi-stage fine-tune pipeline without ever running training). A third of
@@ -2023,12 +2849,19 @@ public final class FamiliarLoop {
             }
             elideRedundant(history);
             compact(history);
-            ObjectNode system = j.createObjectNode();
-            system.put("role", "system").put("content", systemPrompt());
-
             ArrayNode messages = j.createArrayNode();
-            messages.add(system);
-            messages.addAll(history);
+            if (drive.cachesPrompts()) {
+                // A server that keeps what repeats between requests (the Claude API) reads a prompt from its cache only up to
+                // the first thing that changed, and writes the rest anew at a higher price. The rules never change, so they go
+                // first; what is rebuilt every turn (the project's files, the goal, the files still owed, the check) goes after
+                // the conversation, so that a file written or a check run does not make the whole conversation new to the server.
+                messages.addObject().put("role", "system").put("content", systemRules());
+                messages.addAll(history);
+                messages.addObject().put("role", "system").put("content", systemNow().strip());
+            } else {
+                messages.addObject().put("role", "system").put("content", systemPrompt());
+                messages.addAll(history);
+            }
 
             int outBudget = outputBudget(messages);
             log.info("turn {}/{}  (out_budget={})", turn, maxTurns, outBudget);
@@ -2071,11 +2904,6 @@ public final class FamiliarLoop {
                 }
             }
 
-            // Hybrid tool_choice: force PROSE on the planning turn so the model emits the numbered PLAN
-            // (smallcode plan-then-execute — `required` would forbid the prose), then REQUIRE a tool on
-            // every work turn (force action, no prose runaways — the original reason for `required`). We
-            // open the prose door only on the one turn we want it.
-            boolean planTurn = multiConcern && !planResolved && turn == 1;
             boolean proseAnswerTurn = proseAnswerNext;
             proseAnswerNext = false;
             // DEADLINE TURN (research): telling the model the budget is nearly gone is not enough — measured,
@@ -2086,7 +2914,45 @@ public final class FamiliarLoop {
             boolean exhausted = deadlineTurn && turn >= FINISH_EARLY_MIN_TURN && turn < maxTurns
                     && finishEarly.getAsBoolean();
             if (exhausted) log.info("search exhausted (no marginal gain) → finishing turn brought forward at {}/{}", turn, maxTurns);
-            ArrayNode turnTools = (deadlineTurn && (turn >= maxTurns || exhausted)) ? onlyTaskDone(toolSchemas) : toolSchemas;
+            // A write-only turn names ONE file, in the tool's own schema: the first still missing. Asked for two files over two
+            // such turns, a run wrote the first one twice and the check's script never existed (2026-10-01). With the path fixed
+            // in the schema the file is not the model's choice; its content is.
+            String writeDue = null;
+            if (handOverTurnsLeft > 0 && !codingDeadline(turn)) {
+                List<String> due = handOverDue();
+                if (due.isEmpty()) {
+                    handOverTurnsLeft = 0;
+                } else {
+                    handOverTurnsLeft--;
+                    writeDue = due.get(0);
+                    log.info("  ↳ write-only turn {}/{} ({} more after it): {}", turn, maxTurns, handOverTurnsLeft, writeDue);
+                    ObjectNode ask = history.addObject().put("role", "user").put("content", "This turn: write `" + writeDue + "`, complete. "
+                            + "If its text is already in another file of the project, pass that file's path as copy_from and leave content out.");
+                    messages.add(ask);   // the request for this turn is already assembled
+                }
+            }
+            List<String> programTurn = null;
+            if (doneCheck != null && lastCheck != null && !lastCheck.passes() && !handOverMode && writeDue == null && !codingDeadline(turn)
+                    && checkThread == null && freshCheck == null && prepareThread == null
+                    && turn - lastProgramChangeTurn >= STALE_PROGRAM_TURNS && turn - lastProgramTurn >= STALE_PROGRAM_TURNS) {
+                programTurn = namedPrograms();
+                if (programTurn.isEmpty()) programTurn = null;
+                else {
+                    lastProgramTurn = turn;
+                    log.info("  ↳ program turn {}/{}: the check fails and {} unchanged for {} turns", turn, maxTurns, String.join(", ", programTurn), turn - lastProgramChangeTurn);
+                    ObjectNode ask = history.addObject().put("role", "user").put("content", "The done check does not pass (" + lastCheck.report()
+                            + "), and " + Deliverables.list(programTurn) + " " + (programTurn.size() == 1 ? "has" : "have") + " not changed in "
+                            + (turn - lastProgramChangeTurn) + " turns. This turn changes " + (programTurn.size() == 1 ? "it" : "one of them")
+                            + ": wire in what you have learned, with write_file or edit_file; the check then runs on the change."
+                            + (researchNotes.isBlank() ? "" : " The RESEARCH NOTES describe how this step is done in practice: compare what "
+                                    + "you built with what they describe, and build the difference in."));
+                    messages.add(ask);
+                }
+            }
+            ArrayNode turnTools = (deadlineTurn && (turn >= maxTurns || exhausted)) || codingDeadline(turn) ? onlyTaskDone(toolSchemas)
+                    : handOverMode ? onlyThese(toolSchemas, HAND_OVER_TOOLS)
+                    : writeDue != null ? writeOnlyOf(toolSchemas, writeDue)
+                    : programTurn != null ? programsOnly(toolSchemas, programTurn) : toolSchemas;
             ObjectNode assistant;
             // Last line of defence: never SEND a request that cannot fit. Compaction is a threshold
             // (70%) and the pinned block is budgeted, but a single large observation lands after both
@@ -2104,7 +2970,7 @@ public final class FamiliarLoop {
             try {
                 try {
                     assistant = chatThroughRestarts(messages, turnTools, outBudget,
-                            (planTurn || proseAnswerTurn) ? "none" : "required");
+                            proseAnswerTurn ? "none" : "required");
                 } catch (RuntimeException first) {
                     // The server counted more tokens than we did. It said how many: learn the real ratio from that,
                     // shrink the older observations to fit, and send once more. Only a second refusal ends the turn.
@@ -2117,7 +2983,7 @@ public final class FamiliarLoop {
                             turn, counted, String.format("%.2f", charsPerToken), again);
                     outBudget = outputBudget(messages);
                     assistant = chatThroughRestarts(messages, turnTools, outBudget,
-                            (planTurn || proseAnswerTurn) ? "none" : "required");
+                            proseAnswerTurn ? "none" : "required");
                 }
                 calibrate(requestChars(messages) + turnTools.toString().length(), drive.lastPromptTokens());
             } catch (RuntimeException e) {
@@ -2143,11 +3009,8 @@ public final class FamiliarLoop {
                     log.error("turn {}: {} consecutive drive failures — the endpoint is not serving "
                             + "this request shape. Stopping instead of retrying forever. Last: {}",
                             turn, consecutiveDriveFailures, e.getMessage());
-                    return new Result(false, ResultDocument.UNRECOVERABLE
-                            + " the drive failed " + consecutiveDriveFailures + " times in a row ("
-                            + String.valueOf(e.getMessage()).replaceAll("\s+", " ")
-                            + "). Check CODEZAIKU_DRIVE — for hosted APIs the base URL takes no "
-                            + "path (use https://api.anthropic.com, not .../v1).", turn);
+                    return new Result(false, driveFailureSummary(e, drive.baseUrl(), consecutiveDriveFailures,
+                            drive.generatedPerSecond(), drive.lastCallLimit()), turn);
                 }
                 log.warn("turn {}: drive call failed — nudging and continuing: {}", turn, e.getMessage());
                 // DISTINGUISH the two failure modes. llama.cpp's tool-call parser CRASHES on an oversized
@@ -2173,8 +3036,10 @@ public final class FamiliarLoop {
                 continue;
             }
             history.add(assistant);
+            int thought = assistant.path("reasoning_content").asText("").length();
+            if (thought > 0) log.info("  ↳ thinking: {} chars this turn", thought);
             consecutiveDriveFailures = 0;
-            observePlan(assistant.path("content").asText("")); // parse the plan (orientation only)
+            observePlan(assistant.path("content").asText(""), assistant.path("reasoning_content").asText("")); // the plan's steps said done (orientation only)
             if (chatMode) {
                 String c = unwrapToolMarkup(assistant.path("content").asText("").strip());
                 if (c.length() > bestChatProse.length()) bestChatProse = c;   // the longest is the real reply, not the "let me look" chatter
@@ -2199,29 +3064,6 @@ public final class FamiliarLoop {
                 continue;
             }
 
-            if (planTurn) {
-                // Intentionally prose-only — the plan is now parsed; switch to execution next turn.
-                //
-                // EXCEPT in chat. This line was the plan-restraint bug the conversation battery
-                // kept failing on THREE models identically (2026-08-29): after the person said
-                // "write ONLY PLAN.md — no code", the models wrote a prose plan here — and then
-                // THIS instruction ordered them to execute it. Three K=3 prompt-lever flips all
-                // failed because the pressure was never in the prompts; it was this harness line.
-                // In chat the person is the executor's trigger: hand the turn back to what THEY
-                // asked for, and let implementation wait for the turn where they ask.
-                log.info("  ↳ planning turn → {} steps parsed; {}", planSteps.size(),
-                        chatMode ? "chat: back to the ask" : "executing");
-                history.addObject().put("role", "user").put("content", chatMode
-                        ? "That is the plan. Now finish THIS turn in order: FIRST, when the "
-                          + "message asked for the plan in a file, create that file with "
-                          + "write_file and the full plan as its content. THEN call task_done "
-                          + "with the plan as the reply. (task_done reports what already "
-                          + "happened — a file only exists after a write_file call succeeds.) "
-                          + "Start building only if the message asked you to build."
-                        : "Now execute the plan — start with step 1, using the tools.");
-                continue;
-            }
-
             var calls = assistant.path("tool_calls");
             if ("length".equals(drive.lastFinishReason()) && calls.isArray() && !calls.isEmpty()) {
                 // The reply hit max_tokens, so its tool call is cut off: the arguments the server managed to parse are a
@@ -2234,6 +3076,28 @@ public final class FamiliarLoop {
                         + "complete, so nothing ran. Keep each tool call well under that: write a file in pieces (a first write_file, then "
                         + "edit_file calls that add the rest), and give task_done a summary of a few paragraphs at most — a long "
                         + "answer goes in a file or in your message text, not in the summary.");
+                continue;
+            }
+            if ((!calls.isArray() || calls.isEmpty()) && !drive.forcesToolCalls() && !"length".equals(drive.lastFinishReason())) {
+                // The drive cannot force a tool call (tool_choice is "auto"), so a reply of text alone is the model ending its
+                // turn — what such a model does when it has nothing further to run.
+                String said = unwrapToolMarkup(assistant.path("content").asText("").strip());
+                if (chatMode && !said.isBlank()) {
+                    log.info("turn {}: a reply in text with no tool call — in a chat that is the reply", turn);
+                    return new Result(true, withDraft(said.length() >= bestChatProse.length() ? said : bestChatProse), turn);
+                }
+                if (codingDeadline(turn) && !said.isBlank()) {
+                    restoreBestGreen();
+                    restoreBestArtifact();
+                    if (doneCheck != null) settleDoneCheck(turn);
+                    log.info("the deadline turn's report came as text (turn {}): {}", turn, preview(said));
+                    return new Result(false, TURN_LIMIT_REPORT + " (" + maxTurns + " turns). Where the work stands, in the "
+                            + "model's words:\n" + withDraft(said) + unwrittenLine() + checkLine(), turn);
+                }
+                log.info("turn {}: a reply in text with no tool call — asking for the next action or task_done", turn);
+                history.addObject().put("role", "user").put("content",
+                        "That message ran nothing: this harness acts only through tool calls. If there is more to do, make the next "
+                        + "tool call. If the work is finished, or this is as far as it goes, call task_done with your report.");
                 continue;
             }
             if (!calls.isArray() || calls.isEmpty()) {
@@ -2274,6 +3138,7 @@ public final class FamiliarLoop {
                         || "shell".equals(name))) {
                     mutatingCallRan = true;   // ground truth for the chat false-write bounce
                 }
+                if ("shell".equals(name)) noteInterpreter(args.path("command").asText(""));
                 if (!control && ("web_search".equals(name) || "web_fetch".equals(name))) {
                     webToolRan = true;        // ground truth for the chat citation bounce
                 }
@@ -2515,6 +3380,9 @@ public final class FamiliarLoop {
                     sourcesRead++;
                     sourcesSinceGap++;
                 }
+                if (excerptSink != null && name.equals("web_fetch") && !observation.startsWith("ERROR")) {
+                    excerptSink.accept(observation.length() > 700 ? observation.substring(0, 700) + "…" : observation);
+                }
                 if (name.equals("add_to_answer") && !observation.startsWith("ERROR")) draftUsed = true;
                 // SAVE-NUDGE (research, once): a small model ignores a NOVEL tool no matter what the goal
                 // says (measured: 109-row task, add_to_answer advertised + instructed, zero calls — then
@@ -2659,18 +3527,31 @@ public final class FamiliarLoop {
                     // normal bounce below has no turn left to act in, so the run used to ship a status
                     // description instead of the table (ws_en_028 regression: 40 turns of gathering, zero
                     // table). Grant exactly ONE bonus prose turn to write the answer from what was gathered.
+                    // The same turn for a THIN deadline answer: a pass before a coding task, told it had one turn left, thought 7,000
+                    // characters and finished with "placeholder — will not be final" (2026-10-04); the bounce below has no turn left,
+                    // and the notes fell back to the start of each page read. One text reply, and that text is the answer.
+                    boolean deadlineThin = researchMode && !epilogueGranted && turn >= maxTurns && thinOrStatus(withDraft(observation));
                     if (researchMode && !epilogueGranted && turn >= maxTurns
-                            && wantsStructured(goal) && !hasStructured(withDraft(observation))) {
+                            && (deadlineThin || (wantsStructured(goal) && !hasStructured(withDraft(observation))))) {
                         epilogueGranted = true;
                         epilogueTurns = 1;
                         proseAnswerNext = true;
-                        log.info("  ↳ deadline task_done without the artifact → one epilogue prose turn");
-                        history.addObject().put("role", "user").put("content",
-                                "Time is up — write your COMPLETE final answer now as plain text. Include, "
-                                + "literally, the table/formatted output the question asks for, built from what "
-                                + "you actually found; use the question's unavailable-marker (nan / NA / -) for "
-                                + "every cell you could not verify, and end with your sources. Do not call any "
-                                + "tool.");
+                        if (deadlineThin) {
+                            log.info("  ↳ deadline task_done with a thin answer ({} chars) → one epilogue prose turn", withDraft(observation).length());
+                            history.addObject().put("role", "user").put("content",
+                                    "Time is up, and the answer is what you pass on: what you passed is " + withDraft(observation).length() + " characters, and "
+                                    + "nothing you refer to exists outside this message. Write your COMPLETE answer now as plain text — the findings "
+                                    + "themselves, with their numbers and names, from what you actually read, then your sources. This text is your "
+                                    + "final answer; do not call any tool.");
+                        } else {
+                            log.info("  ↳ deadline task_done without the artifact → one epilogue prose turn");
+                            history.addObject().put("role", "user").put("content",
+                                    "Time is up — write your COMPLETE final answer now as plain text. Include, "
+                                    + "literally, the table/formatted output the question asks for, built from what "
+                                    + "you actually found; use the question's unavailable-marker (nan / NA / -) for "
+                                    + "every cell you could not verify, and end with your sources. Do not call any "
+                                    + "tool.");
+                        }
                         break;
                     }
                     // DELIVERABLE-IN-ANSWER (research, one-shot, objective): when the QUESTION demands a
@@ -2706,6 +3587,20 @@ public final class FamiliarLoop {
                                 + "call task_done again and say so plainly.");
                         break;
                     }
+                    // THIN ANSWER (research, once): the answer is the summary the finishing tool carries, and a model that has thought the
+                    // report through writes "see report below" there and nothing else — a pass on 2026-10-03 read eight pages, thought
+                    // 7,300 characters and handed over one line. The next turn is text only, and that text is the answer.
+                    boolean finishingTurnOnly = turnTools.size() == 1 && TaskDoneTool.NAME.equals(turnTools.get(0).path("function").path("name").asText());
+                    if (researchMode && !thinAnswerBounced && turn < maxTurns && !finishingTurnOnly && thinOrStatus(withDraft(observation))) {
+                        thinAnswerBounced = true;
+                        proseAnswerNext = true;
+                        log.info("  ↳ task_done with a thin answer ({} chars) → prose-answer turn (once)", withDraft(observation).length());
+                        history.addObject().put("role", "user").put("content",
+                                "The answer is what you pass on, and what you passed is " + withDraft(observation).length() + " characters: "
+                                + "nothing you refer to exists outside this message. Write your COMPLETE answer now as plain text — the findings "
+                                + "themselves, with their numbers and names, then your sources. This text will be your final answer; do not call any tool.");
+                        break;
+                    }
                     if (researchMode && !artifactBounced && turn < maxTurns
                             && wantsStructured(goal) && !hasStructured(withDraft(observation))) {
                         artifactBounced = true;
@@ -2736,6 +3631,51 @@ public final class FamiliarLoop {
                                 + "again now — but say plainly in the answer what remains uncertain or unverified.");
                         break; // one informational bounce; the next task_done ends the run regardless
                     }
+                    // THE DONE CHECK: the harness's own run of the goal's check decides what this finish is (see settleDoneCheck).
+                    if (coding && doneCheck != null) {
+                        String back = settleDoneCheck(turn);
+                        if (back != null) {
+                            history.addObject().put("role", "user").put("content", back);
+                            break;
+                        }
+                    }
+                    // DEADLINE (coding): the last turn's task_done is the report of a run that ran out of turns. It is not a claim
+                    // of done, so none of the checks below send it back (there is no turn left to act on them) and the run's
+                    // status stays what running out of turns has always given; the summary is now the run's own account.
+                    if (codingDeadline(turn)) {
+                        restoreBestGreen();
+                        restoreBestArtifact();
+                        log.info("task_done on the deadline turn {}: {}", turn, observation);
+                        return new Result(false, TURN_LIMIT_REPORT + " (" + maxTurns + " turns). Where the work stands, in the "
+                                + "model's words:\n" + withDraft(observation) + unwrittenLine() + checkLine(), turn);
+                    }
+                    // NAMED FILES: the goal names a file and it is not on disk. The harness's own look at the disk outranks the
+                    // model's account of being done; said once, with the way out if the file is not needed after all.
+                    if (coding && !deliverablesBounced && turn < maxTurns) {
+                        deliverables.refresh();
+                        List<String> unwritten = deliverables.missing();
+                        if (!unwritten.isEmpty()) {
+                            deliverablesBounced = true;
+                            boolean one = unwritten.size() == 1;
+                            log.info("  ↳ task_done, but the goal names {} and {} not on disk → one bounce", String.join(", ", unwritten), one ? "it is" : "they are");
+                            history.addObject().put("role", "user").put("content",
+                                    "Before finishing: the goal names " + Deliverables.list(unwritten) + ", and the harness does not "
+                                    + "find " + (one ? "it" : "them") + " on disk. Write " + (one ? "it" : "them") + " now from what you "
+                                    + "have — real content, with the real numbers from your last run, including where a target was "
+                                    + "missed — then call task_done again. If the goal is met without " + (one ? "it" : "them")
+                                    + ", call task_done again and say why.");
+                            break;
+                        }
+                    }
+                    // THE CHECK PASSES: the harness ran the goal's own check on the version that is on disk, and it passes. That is
+                    // the finish. The checks below (rounds of self-verification, the project's tests, the freshness note, the boot)
+                    // stand in for a measure of done that a run did not have; this run has one, and it says yes. A control run on
+                    // 2026-10-02 passed its check at turn 70, called task_done at turn 71, and was then sent back by those checks
+                    // for the 29 turns it had left and reported as failed.
+                    if (coding && !chatMode && doneCheck != null && lastCheck != null && lastCheck.passes()) {
+                        log.info("task_done at turn {} with the done check passing: {}", turn, observation);
+                        return new Result(true, withDraft(observation) + unwrittenLine() + checkLine(), turn);
+                    }
                     // KEEP-BEST-GREEN (coding-maintenance runs; ML dev-gated runs have their own artifact keep-best):
                     // the model claims done -- if the harness own test suite is green RIGHT NOW, snapshot this state.
                     // The self-verify reflection below re-engages the model and can thrash a solved task to red (30B M1:
@@ -2743,7 +3683,10 @@ public final class FamiliarLoop {
                     // at exit makes the FINAL on-disk state the best green one. Ground-truth = tests, not self-judgment.
                     // Not in chat: the person is the verifier, and the snapshot walks and copies the project tree —
                     // started in a home directory it walked a 210 GB .cache and the turn never came back (2026-09-18).
-                    if (!chatMode && devAnswersPath == null && ProjectTests.testsGreen(projectRoot)) {
+                    // Coding runs only: a research or report run changes no code, and running the tests of whatever project it was
+                    // started in cost minutes at the end of every such run (found when a research pass inside a test ran this
+                    // program's own suite, 2026-10-03).
+                    if (coding && !chatMode && devAnswersPath == null && ProjectTests.testsGreen(projectRoot)) {
                         String g = snapshotCheckpoint(9000 + turn);
                         if (g != null) { bestGreenCheckpoint = g; bestGreenTurn = turn;
                             log.info("  keep-best-green: tests pass at task_done -> snapshot saved (turn {})", turn); }
@@ -2889,13 +3832,12 @@ public final class FamiliarLoop {
                     // signal there, and bouncing on them OVERRODE an already-good deliverable and induced a thrash
                     // (sv14 reached a real pass @0.7375/dev 0.819, then the drive-gate sent it to fix tests and it
                     // broad-edited the pipeline to empty). So skip the drive-gate when the dev-gate is the arbiter.
-                    if (driveGateOnEnv && driveGate && devAnswersPath == null && driveBounces < MAX_DRIVE_BOUNCES
-                            && !ProjectTests.testsGreen(projectRoot)) {
+                    ProjectTests.Run tests = driveGateOnEnv && driveGate && devAnswersPath == null && driveBounces < MAX_DRIVE_BOUNCES
+                            ? ProjectTests.run(projectRoot) : null;
+                    if (tests != null && tests.verdict().ran() && !tests.verdict().passed()) {
                         driveBounces++;
                         log.info("  ↳ drive: task_done but tests RED → bounce ({}/{})", driveBounces, MAX_DRIVE_BOUNCES);
-                        history.addObject().put("role", "user").put("content",
-                                "Not done yet — the harness ran your tests and they do NOT pass. Make every test green "
-                                + "(fix the code or the test, whichever is wrong), then call task_done again.");
+                        history.addObject().put("role", "user").put("content", testsRedNote(tests));
                         break;
                     }
                     // EVIDENCE-FRESHNESS note, ONCE: if files changed since the last verification run, the
@@ -2947,7 +3889,7 @@ public final class FamiliarLoop {
                         if (prose.length() < bestChatProse.length()) prose = bestChatProse;
                         if (prose.length() > 200 && prose.length() > (observation == null ? 0 : observation.length())) answer = prose;
                     }
-                    return new Result(true, withDraft(answer), turn);
+                    return new Result(true, withDraft(answer) + (coding ? unwrittenLine() + checkLine() : ""), turn);
                 }
                 if (TaskBlockedTool.NAME.equals(name)) {
                     // RESEARCH BLOCKED-BOUNCE (one-shot): in research mode there is nothing to be blocked
@@ -3038,6 +3980,8 @@ public final class FamiliarLoop {
         return new Result(false, "max turns (" + maxTurns + ") reached without task_done", maxTurns);
         } finally {
             if (lsp != null) lsp.close();
+            Process p = checkProcess;
+            if (p != null) p.destroyForcibly();
         }
     }
 
@@ -3050,7 +3994,222 @@ public final class FamiliarLoop {
                 .matcher(summary).find();
     }
 
-    private String systemPrompt() {
+    /** What the model is told when the harness's own run of the project's tests fails: the command, and the end of what it printed. */
+    static String testsRedNote(ProjectTests.Run tests) {
+        String tail = tests.outputTail();
+        return "Not done yet — the harness ran the project's tests (`" + tests.command() + "`) and they do NOT pass."
+                + (tail.isBlank() ? "" : " The end of what they printed:\n```\n" + tail + "\n```\n")
+                + " Make every test green (fix the code or the test, whichever is wrong), then call task_done again.";
+    }
+
+    private String systemPrompt() { return systemRules() + researchBlock() + systemNow(); }
+
+    // ── RESEARCH BEFORE THE WORK ──────────────────────────────────────────────────────────────────────────────────────────────
+    // A capable model finished the video brief because it knew which pose library works on broadcast video and what a pitching
+    // release looks like; a 27B with the same harness built the same shape of tool with the wrong library, the wrong release
+    // rule and an invented formula, and in 200 turns never once used the search tool it had (2026-10-02/03). The knowledge is
+    // what differed, so the harness fetches it: the model names the questions whose answers decide the approach, a bounded
+    // research pass answers them from the web (and the library, where one is installed), and the notes stand in the prompt from
+    // the plan onward. Always, and bounded: on a task the model knows well the pass finds little and costs a few minutes.
+    private static final int RESEARCH_FIRST_TURNS = Config.getInt("CODEZAIKU_RESEARCH_FIRST_TURNS", 8);
+    private static final int RESEARCH_NOTES_CHARS = 6000;
+    private static final int LIBRARY_NOTES_CHARS = 1200;   // per question
+    private String researchNotes = "";
+    private Boolean researchFirstOn;   // set for tests; the setting decides otherwise
+    // RESEARCH WHEN STUCK: the pass before the work cannot know what will go wrong. When the check has failed several times running,
+    // the symptom is known — the numbers, and the method the program's own header describes — and a short research pass asks about
+    // that. A run diagnosed its own fault correctly (the release frame found in the wrong place) and could not fix it (2026-10-03).
+    private static final int STUCK_AFTER_FAILED_CHECKS = 3;
+    private static final int STUCK_RESEARCH_MOST = 2;
+    private static final int STUCK_RESEARCH_TURNS = Config.getInt("CODEZAIKU_RESEARCH_STUCK_TURNS", 6);
+    private int failedChecksSinceResearch = 0;
+    private int stuckResearches = 0;
+
+    /** For tests: whether the research pass runs before the plan. */
+    FamiliarLoop researchFirst(boolean on) { this.researchFirstOn = on; return this; }
+
+    /**
+     * Why the research pass before the work does not run, or null when it does. {@code off} never; {@code always} on every drive
+     * and whether or not a source answers; otherwise ({@code auto}, the default) when the drive is not frontier-class and a research
+     * source answers — a configured search backend or the library. A frontier model finished the brief without the pass (Claude,
+     * turn 38); a 27B needed it (the first of seven runs to pass had it). Without a source the pass has nothing to read.
+     */
+    static String researchFirstSkipped(String setting, boolean frontierDrive, boolean sourcesAnswer) {
+        String s = setting == null ? "auto" : setting.strip().toLowerCase(Locale.ROOT);
+        if (s.equals("off") || s.equals("false") || s.equals("0") || s.equals("no")) return "CODEZAIKU_RESEARCH_FIRST=off";
+        if (s.equals("always")) return null;
+        if (!sourcesAnswer) return "no search backend is configured and no library answers";
+        if (frontierDrive) return "the drive is frontier-class; CODEZAIKU_RESEARCH_FIRST=always runs the pass on it too";
+        return null;
+    }
+
+    /** A search backend of the person's choosing: the Brave key, or a SearXNG named in the settings. The Wikipedia fallback alone is not one. */
+    private static boolean searchConfigured() {
+        String brave = Config.get("CODEZAIKU_BRAVE_KEY"), searx = Config.get("CODEZAIKU_SEARXNG");
+        return (brave != null && !brave.isBlank()) || (searx != null && !searx.isBlank());
+    }
+
+    private String researchFirstSetting() {
+        return researchFirstOn != null ? (researchFirstOn ? "always" : "off") : Config.get("CODEZAIKU_RESEARCH_FIRST", "auto");
+    }
+
+    private void researchFirst() {
+        String setting = researchFirstSetting();
+        String skipped = researchFirstSkipped(setting, drive.frontier(), searchConfigured() || LibraryBridge.answers());
+        if (skipped != null) {
+            if (!skipped.startsWith("CODEZAIKU_RESEARCH_FIRST=off")) log.info("research before the work: not run — {}", skipped);
+            return;
+        }
+        long start = System.currentTimeMillis();
+        ArrayNode qm = j.createArrayNode();
+        qm.addObject().put("role", "system").put("content", "You are about to carry out a coding task. Before the work, a short piece of "
+                + "research is done for you, on the web and in the library. Write the questions whose answers decide how to build it well: "
+                + "which library, model or method does this kind of thing well on this kind of input, how a quantity the task turns on is "
+                + "defined or measured in practice, what usually goes wrong. Two or three questions, one line each, each one a question a "
+                + "search engine can answer. Nothing runs in this message. Reply in this format:\n\nQUESTIONS:\n1. <question>\n2. <question>"
+                + "\n\nWrite `QUESTIONS: none` when the task needs nothing you do not already know well.");
+        qm.addObject().put("role", "user").put("content", "THE TASK:\n" + goal + "\n\nThe questions:");
+        String reply = drive.classify(qm, 400);
+        List<String> questions = PlanReply.researchQuestions(reply);
+        boolean saidNone = questions.isEmpty();
+        log.info("research questions from the model: {}{}", saidNone ? "none" : questions, saidNone ? " (reply began: " + preview(reply) + ")" : "");
+        if (saidNone && maintenanceProject) {
+            // measured on 12 tasks (2026-10-04): the model never said none where research was needed, and said it on tasks on existing
+            // code it knew how to do (a rename, an off-by-one); on a pre-existing codebase its word is taken
+            log.info("research before the work: not run — the model says the task needs nothing it does not know well, and the project exists");
+            return;
+        }
+        if (saidNone) questions = List.of("How is this done well in practice, with which libraries, models or methods, and what usually goes wrong: "
+                + firstLines(goal, 3));
+        StringBuilder ask = new StringBuilder("A coding task is about to be built. Before it is, find out from the web:\n");
+        for (int i = 0; i < questions.size(); i++) ask.append(i + 1).append(". ").append(questions.get(i)).append('\n');
+        ask.append("\nFor each question: what is used in practice and why; which libraries, models or methods work for this kind of input "
+                + "and which are known to fall short; how the quantity is defined or measured; the pitfalls. Concrete names and numbers "
+                + "over generalities. Where options trade accuracy for speed, name both and say which one the task's own bar calls for. "
+                + "Where the task names the source its answers are judged against, that source's definition of the quantity is the one "
+                + "to report, with what it measures from (a point, a joint, an object) and how a tool working from video falls short of it."
+                + "\n\nThe task the questions are for, so they are read in context:\n")
+                .append(goal.length() > 2500 ? goal.substring(0, 2500) + "\n…" : goal);
+        String web = "";
+        List<String> excerpts = new ArrayList<>();
+        try {
+            // a task on existing code asks less of the pass than a tool built from nothing: half the turns
+            int passTurns = maintenanceProject ? Math.max(2, RESEARCH_FIRST_TURNS / 2) : RESEARCH_FIRST_TURNS;
+            Result r = FamiliarMain.research(ask.toString(), "broad", drive, passTurns, null, researchScratch(), excerpts::add, false);
+            web = r.summary() == null ? "" : r.summary().strip();
+        } catch (RuntimeException e) {
+            log.info("the research before the work failed ({}); the work starts without it", e.getMessage());
+        }
+        web = notesFrom(web, excerpts);
+        // the library's push is sized for a chat turn (a run's three questions came back as 220,000 characters, 2026-10-03): a page each
+        StringBuilder library = new StringBuilder();
+        for (String q : questions) {
+            String held = LibraryBridge.push(q, 2).strip();
+            if (held.isBlank()) continue;
+            library.append(held.length() > LIBRARY_NOTES_CHARS ? held.substring(0, LIBRARY_NOTES_CHARS) + "…" : held).append("\n\n");
+        }
+        StringBuilder notes = new StringBuilder();
+        if (!web.isBlank()) notes.append(web);
+        if (library.length() > 0) notes.append(notes.length() > 0 ? "\n\n" : "").append("From the library:\n").append(library.toString().strip());
+        String all = notes.toString();
+        if (all.length() > RESEARCH_NOTES_CHARS) all = all.substring(0, RESEARCH_NOTES_CHARS - 1200) + "\n…\n" + all.substring(all.length() - 1100);
+        researchNotes = all;
+        log.info("research notes begin: {}", preview(researchNotes));
+        log.info("research before the work: {} question{}{}; {} chars from the web ({} pages read), {} from the library, {} kept; {} s", questions.size(), questions.size() == 1 ? "" : "s",
+                saidNone ? " (the model said none were needed; the general one was asked)" : "", web.length(), excerpts.size(), library.length(), researchNotes.length(),
+                (System.currentTimeMillis() - start) / 1000);
+    }
+
+    /**
+     * After several failing checks running, research the symptom: the check's numbers against their bounds and the method the named
+     * programs describe in their own headers. What comes back is added to the notes under the turn it was found, and the check's
+     * note says so. At most a few times a run; "" when it does not run or finds nothing.
+     */
+    /**
+     * Where a research pass of the harness's own runs: an empty folder, not the project. The pass has no file tools, and its prompt
+     * describes the folder it runs in — the project's files would be an invitation to read them instead of researching. Falls back
+     * to the project when no folder can be made.
+     */
+    private Path researchScratch() {
+        try { return Files.createTempDirectory("codezaiku-research"); }
+        catch (IOException e) { return projectRoot; }
+    }
+
+    private String researchWhenStuck(DoneCheck.Outcome o, int turn) {
+        boolean on = !researchFirstSetting().strip().toLowerCase(Locale.ROOT).matches("off|false|0|no");
+        if (!on || handOverMode || failedChecksSinceResearch < STUCK_AFTER_FAILED_CHECKS || stuckResearches >= STUCK_RESEARCH_MOST) return "";
+        failedChecksSinceResearch = 0;
+        stuckResearches++;
+        StringBuilder method = new StringBuilder();
+        for (String p : namedPrograms()) {
+            try {
+                List<String> lines = Files.readAllLines(projectRoot.resolve(p));
+                method.append(p).append(":\n").append(String.join("\n", lines.subList(0, Math.min(lines.size(), 30)))).append("\n\n");
+            } catch (IOException ignored) { }
+        }
+        if (method.length() > 4000) method.setLength(4000);
+        String ask = "A tool is being built and its check keeps failing. The check: " + o.report() + "\n\nThe tool's own description of its method "
+                + "(the start of each program):\n" + method + "\nFind out, from the web: what commonly causes this kind of result with this kind of "
+                + "method — a systematic error (every value off in the same direction, a scale or a definition mismatch), a wrong choice of moment or "
+                + "input, a known weakness of the library or model used — and what practitioners do about it, concretely. Name the sources.\n\n"
+                + "The task, for context:\n" + (goal.length() > 1500 ? goal.substring(0, 1500) + "\n…" : goal);
+        long start = System.currentTimeMillis();
+        String found = "";
+        List<String> excerpts = new ArrayList<>();
+        try {
+            Result r = FamiliarMain.research(ask, "depth", drive, STUCK_RESEARCH_TURNS, null, researchScratch(), excerpts::add, false);
+            found = r.summary() == null ? "" : r.summary().strip();
+        } catch (RuntimeException e) {
+            log.info("the research on the failing check failed ({})", e.getMessage());
+        }
+        found = notesFrom(found, excerpts);
+        log.info("research on the failing check (turn {}, {} of {}): {} chars in {} s", turn, stuckResearches, STUCK_RESEARCH_MOST, found.length(), (System.currentTimeMillis() - start) / 1000);
+        if (found.isBlank()) return "";
+        if (found.length() > 3000) found = found.substring(0, 2600) + "\n…\n" + found.substring(found.length() - 380);
+        researchNotes = (researchNotes.isBlank() ? "" : researchNotes + "\n\n") + "AFTER THE CHECK FAILED (turn " + turn + "; " + o.report() + "):\n" + found;
+        return "\n\nThe check has failed " + STUCK_AFTER_FAILED_CHECKS + " times running, so the harness researched the symptom. The RESEARCH NOTES now "
+                + "carry a section \"AFTER THE CHECK FAILED (turn " + turn + ")\" on what causes this kind of result with this kind of method and what is "
+                + "done about it. Build its answer in before the next check.";
+    }
+
+    /**
+     * A research pass's findings: its written answer, and the pages it read where the answer is thin. A pass on 2026-10-03 read nine
+     * pages and answered in one line, "wrote full findings to RESEARCH.md", a file it had no tool to write; what it had read was lost.
+     * An answer under 1,200 characters, or one that points at a file instead of saying what was found, is followed by the start of
+     * each page read, so that the notes carry the knowledge whichever way the pass ends.
+     */
+    static String notesFrom(String answer, List<String> excerpts) {
+        String a = answer == null ? "" : answer.strip();
+        boolean pointsAtFile = a.matches("(?is).*\\b(wrote|written|saved|see|in)\\b[^.\\n]{0,60}\\b[\\w-]+\\.(md|txt|json)\\b.*") && a.length() < 2500;
+        if ((a.length() >= 1200 && !pointsAtFile) || excerpts.isEmpty()) return a;
+        StringBuilder sb = new StringBuilder(a);
+        sb.append(a.isEmpty() ? "" : "\n\n").append("What the pass read (the start of each page):\n");
+        int room = 3500;
+        for (String e : excerpts) {
+            if (room <= 0) break;
+            String piece = e.length() > room ? e.substring(0, room) + "…" : e;
+            sb.append("- ").append(piece.replace("\n", " ")).append('\n');
+            room -= piece.length();
+        }
+        return sb.toString().strip();
+    }
+
+    /**
+     * The notes as they stand in the prompt; empty when the pass found nothing or did not run. Said as the way the work is done:
+     * the first version said "evidence to build with, not instructions", and a run with the right release rule and the right
+     * libraries in its notes built its generic rule and its own cut detector, mentioning the notes nowhere in 200 turns (2026-10-03).
+     * What the prompt presents as something to consider is considered and set aside.
+     */
+    private String researchBlock() {
+        if (researchNotes.isBlank()) return "";
+        return "\n\nRESEARCH NOTES — how this kind of work is done in practice, found on the web and in the library before the work began, "
+                + "with sources. A step the notes describe is built the way they describe, with the libraries and the definitions they name, "
+                + "until a measurement of your own shows otherwise; a departure from them is a decision, stated when it is made.\n"
+                + researchNotes + "\n";
+    }
+
+    /** The part of the system prompt that is the same on every turn of a run: what the model is here for, and the rules of the work. */
+    private String systemRules() {
         // In CHAT the mission line changes, and it must change HERE: the opening "make every
         // message a tool call that does real work" out-shouts any later kickoff. Measured
         // 2026-08-29: with only a user-role kickoff amendment, three different models asked to
@@ -3135,13 +4294,17 @@ public final class FamiliarLoop {
                   files+permissions, `cat`/`grep` for exact content and format, and actually RUN any required
                   script and read its real stdout to confirm it matches character-for-character. Most failures are
                   the right overall approach with ONE exact detail missed; the per-requirement check catches them.
-                - Call task_done when the whole goal is built and your own build + tests pass. If the task
-                  truly cannot be completed — the spec contradicts itself, a needed capability is missing,
-                  or the build genuinely will not compile after real effort — call task_blocked with the
-                  concrete reason. An honest task_blocked report is the right call there; reserve task_done
-                  for a goal that is genuinely built and working.
-                """
-                + specCoverage()
+                - task_done ends the work. Call it when the goal is met, with the real results of your last
+                  run in the report; and call it when you have done what can be done in this run, with a
+                  report of where the work stands. The harness runs the tests and checks the files itself —
+                  the report's job is to be accurate, not to claim. task_blocked is for a task that cannot be
+                  done at all: the spec contradicts itself, or a needed capability is missing.
+                """;
+    }
+
+    /** The part of the system prompt that is rebuilt every turn: the plan, what is remembered, examples, the project's files, the goal, the files still owed, the check. */
+    private String systemNow() {
+        return specCoverage()
                 + planSection()
                 + memory.pinned()
                 + workedExamples()
@@ -3155,7 +4318,9 @@ public final class FamiliarLoop {
                 // A tenth of the window, in this model's own characters per token. It was a fifth at a guessed 3 chars per
                 // token: on a 32k window the block came to 10,382 tokens and the fixed part of every request was 71%.
                 + "\n\n" + ProjectShape.render(projectRoot, (int) (nctx / 10 * charsPerToken))
-                + "\n\nGOAL:\n" + goal;
+                + "\n\nGOAL:\n" + goal
+                + deliverables.pinned()
+                + (doneCheck == null ? "" : doneCheck.pinned(lastCheck, prepareLine()));
     }
 
     /**
@@ -3184,11 +4349,15 @@ public final class FamiliarLoop {
         int cur = total;
         for (int i = 0; i < total; i++) if (!completedSteps.contains(i)) { cur = i; break; }
         boolean allDone = completedSteps.size() >= total;
+        // "Currently around step 1" on turn 90 is a false statement to a model that never said which step it finished (its
+        // messages are tool calls); the position is shown only once a step has been marked.
+        boolean marked = !completedSteps.isEmpty();
         StringBuilder sb = new StringBuilder(allDone
                 ? "\n\nPLAN (all " + total + " steps marked done — verify the whole goal, then call task_done):"
-                : "\n\nPLAN (do them ALL before task_done; currently around step " + (cur + 1) + " of " + total + "):");
+                : marked ? "\n\nPLAN (do them ALL before task_done; currently around step " + (cur + 1) + " of " + total + "):"
+                : "\n\nPLAN (the outline for this task; do every step before task_done):");
         for (int i = 0; i < total; i++) {
-            String mark = completedSteps.contains(i) ? "✓" : (!allDone && i == cur ? "→" : " ");
+            String mark = completedSteps.contains(i) ? "✓" : (marked && !allDone && i == cur ? "→" : " ");
             sb.append("\n").append(mark).append(' ').append(i + 1).append(". ").append(planSteps.get(i));
         }
         return sb.append('\n').toString();
@@ -3564,7 +4733,8 @@ public final class FamiliarLoop {
      * Faithful structured compaction (L1, the #1 cross-harness pattern — pi/opencode): when the one growing
      * conversation nears the window, replace the OLD span with an LLM-written STRUCTURED checkpoint that
      * preserves exact paths/commands/errors and is iteratively updated. File lists tracked MECHANICALLY.
-     * Cuts only at a turn boundary. If the summary call fails, degrade to eliding stale tool observations.
+     * Cuts only at a turn boundary. A summary that is not usable is asked for once more; after that the harness writes the
+     * checkpoint from its own record of the span ({@link Checkpoint#fromRecord}).
      */
     private int ctxHighWater = 0;
 
@@ -3582,6 +4752,15 @@ public final class FamiliarLoop {
         if (pct >= ctxHighWater + 10) {
             ctxHighWater = pct - (pct % 10);
             log.info("ctx high-water: {}% of {} ({} tokens; compaction fires at 70%)", pct, nctx, used);
+        }
+        // The oldest thinking goes first, before any of the transcript is summarised away.
+        int shedAt = (int) (nctx * SHED_THINKING_AT);
+        if (used > shedAt) {
+            int shed = shedOldestThinking(history, (long) ((used - shedAt) * charsPerToken));
+            if (shed > 0) {
+                used = sysTokens + estimateTokens(history);
+                log.info("ctx above {}% of the window: dropped {} chars of the oldest thinking; now {}%", (int) (SHED_THINKING_AT * 100), shed, nctx > 0 ? used * 100 / nctx : 0);
+            }
         }
         if (used < (int) (nctx * 0.70)) return;
 
@@ -3620,11 +4799,19 @@ public final class FamiliarLoop {
             else tail.add(history.get(i));
         }
 
-        String summary = summarize(oldSpan);
-        if (summary == null) {
-            elideFallback(history);
-            return;
+        // How much of what is being dropped is the model's own thinking: the oldest of it is shed before compaction, so what is
+        // left here is the recent replies'.
+        long spanChars = 0, thinkingChars = 0;
+        for (JsonNode m : oldSpan) {
+            spanChars += m.toString().length();
+            thinkingChars += m.path("reasoning_content").asText("").length();
         }
+        log.info("compacting {} old msgs at {}% of the window; the model's thinking is {}% of their characters",
+                oldSpan.size(), pct, spanChars == 0 ? 0 : thinkingChars * 100 / spanChars);
+
+        String summary = summarize(oldSpan);
+        boolean fromRecord = summary == null;
+        if (fromRecord) summary = Checkpoint.fromRecord(oldSpan, checkpoint);
         checkpoint = summary;
         String wr = commonDirPrefix(filesModified);
         String filesBlock = "\n\n## Files\n- working location: "
@@ -3635,19 +4822,27 @@ public final class FamiliarLoop {
 
         ObjectNode ckpt = j.createObjectNode();
         ckpt.put("role", "user");
+        // The goal is stated by the harness. The summary used to open with its own "## Goal", written from the transcript alone:
+        // "analyse one video clip" stood in the checkpoint for a goal that asked for a tool, an evaluation and a results file.
         ckpt.put("content", "[EARLIER WORK — compacted checkpoint of the session so far]\n"
+                + "## Goal\nUnchanged: the GOAL at the end of the system prompt, in full"
+                + (deliverables.isEmpty() ? "." : ", with the list of the files it names and which are written.") + "\n\n"
                 + summary + filesBlock);
 
         history.removeAll();
         history.add(ckpt);
         history.addAll(tail);
-        log.info("compacted: {} old msgs → structured checkpoint ({} chars), kept {} recent msgs",
-                oldSpan.size(), summary.length(), tail.size());
+        log.info("compacted: {} old msgs → {} ({} chars), kept {} recent msgs",
+                oldSpan.size(), fromRecord ? "checkpoint written by the harness from its record" : "structured checkpoint", summary.length(), tail.size());
         log.info("=== CHECKPOINT ===\n{}{}", summary.length() > 1400 ? summary.substring(0, 1400) + "…" : summary,
                 filesBlock);
     }
 
-    /** LLM-summarize the old span into the structured checkpoint, carrying the prior one forward. */
+    /**
+     * LLM-summarize the old span into the structured checkpoint, carrying the prior one forward. The summary is checked
+     * ({@link Checkpoint#defect}) and asked for once more when it fails; null when both fail, and the caller writes the checkpoint
+     * from the record.
+     */
     private String summarize(ArrayNode oldSpan) {
         StringBuilder convo = new StringBuilder();
         for (var m : oldSpan) {
@@ -3663,20 +4858,48 @@ public final class FamiliarLoop {
             if (!content.isBlank()) convo.append(role).append(": ").append(content).append('\n');
         }
         String old = convo.toString();
-        if (old.length() > 24000) old = old.substring(old.length() - 24000);
+        // The latest part of the record, and no more of it than a third of the window: on a small window the fixed 24,000
+        // characters were more than the summary request could hold.
+        int recordChars = (int) Math.min(SUMMARY_RECORD_CHARS, nctx / 3 * charsPerToken);
+        if (old.length() > recordChars) old = old.substring(old.length() - recordChars);
 
         ArrayNode sm = j.createArrayNode();
         sm.addObject().put("role", "system").put("content", SUMMARIZE_PROMPT);
-        sm.addObject().put("role", "user").put("content",
-                (checkpoint.isBlank() ? "" : "PRIOR CHECKPOINT (carry forward + update):\n" + checkpoint + "\n\n")
-                        + "CONVERSATION TO COMPACT:\n" + old);
-        try {
-            String s = drive.chat(sm, null, Math.min(nctx / 3, 2048)).path("content").asText("");
-            return s.isBlank() ? null : s;
-        } catch (Exception e) {
-            log.warn("compaction summarize failed: {}", e.getMessage());
-            return null;
+        sm.addObject().put("role", "user").put("content", summaryRequest(goal, checkpoint, old));
+        int budget = Math.min(nctx / 3, SUMMARY_MAX_TOKENS);
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            String reply;
+            boolean cutOff = false;
+            if (attempt == 1) {
+                reply = drive.classify(sm, budget);
+            } else {
+                // The ordinary call: a server that does not take the no-thinking switch answers the first with nothing. Twice
+                // the room, since here the model's thinking is counted against it.
+                try {
+                    reply = drive.chat(sm, null, Math.min(nctx / 2, budget * 2)).path("content").asText("");
+                    cutOff = "length".equals(drive.lastFinishReason());
+                } catch (Exception e) {
+                    log.warn("compaction summarize failed: {}", e.getMessage());
+                    reply = "";
+                }
+            }
+            String why = Checkpoint.defect(reply, cutOff);
+            if (why == null) {
+                if (attempt > 1) log.info("compaction: the second summary is usable");
+                return Checkpoint.withoutSection(Checkpoint.text(reply), "Goal");
+            }
+            log.info(attempt == 1 ? "compaction: the summary is not usable ({}) — asking once more" : "compaction: the second summary is not usable either ({})", why);
         }
+        return null;
+    }
+
+    /** What the summariser is given: the goal, the checkpoint so far, the record, and the instruction again after the record. */
+    static String summaryRequest(String goal, String prior, String record) {
+        String g = goal == null ? "" : goal.strip();
+        if (g.length() > SUMMARY_GOAL_CHARS) g = g.substring(0, SUMMARY_GOAL_CHARS) + "…";
+        return "THE GOAL of the session (unchanged; for measuring progress):\n" + g + "\n\n"
+                + (prior == null || prior.isBlank() ? "" : "PRIOR CHECKPOINT (carry forward + update):\n" + prior + "\n\n")
+                + "RECORD OF THE SESSION TO COMPACT:\n<<<\n" + record + "\n>>>\n\n" + SUMMARIZE_CLOSING;
     }
 
     private static final int ELIDE_KEEP_TAIL = 6;
@@ -3717,7 +4940,6 @@ public final class FamiliarLoop {
         }
     }
 
-    /** Degrade path: elide stale tool observations in place (keeps decisions + last 8 msgs). */
     /**
      * Shrink old tool results in place, keeping a bounded HEAD and a bounded TAIL.
      *
@@ -3757,10 +4979,6 @@ public final class FamiliarLoop {
     private static final int MASK_THRESHOLD = 1_200;
     private static final int MASK_HEAD = 700;
     private static final int MASK_TAIL = 400;
-
-    private void elideFallback(ArrayNode history) {
-        maskObservations(history, 8);
-    }
 
     private int estimateTokens(ArrayNode messages) {
         return (int) (requestChars(messages) / charsPerToken) + schemaTokens;

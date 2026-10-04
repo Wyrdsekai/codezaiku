@@ -55,5 +55,8 @@ class TemplateKwargsTest {
         JsonNode req = requestSeenByDrive(null);
         assertFalse(req.has("chat_template_kwargs"),
                 "no kwargs configured -> none on the wire");
+        assertFalse(req.has("reasoning_effort"), "no effort configured -> the server's own default");
+        assertFalse(req.has("thinking_budget_tokens"),
+                "no thinking limit configured -> none on the wire, since a hosted API may refuse the field");
     }
 }

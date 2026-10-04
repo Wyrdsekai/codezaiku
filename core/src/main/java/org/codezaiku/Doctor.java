@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Locale;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.codezaiku.drive.anthropic.Claude;
 import org.codezaiku.drive.aws.Bedrock;
 import org.codezaiku.exec.Shell;
 import org.codezaiku.research.LibraryBridge;
@@ -92,6 +93,17 @@ final class Doctor {
                 bedrock.chat(Config.get("CODEZAIKU_MODEL", "local-model"), body, Duration.ofSeconds(60));
                 drive = true;
             } catch (RuntimeException e) { driveDetail = e.getMessage(); }
+        } else if (Claude.is(driveUrl)) {
+            // The Claude API: a short reply from the model that is set, and the API's own words when it refuses. The model
+            // list answering proves the key; this proves the model's name as well.
+            drive = false;
+            try {
+                var body = new ObjectMapper().createObjectNode();
+                body.putArray("messages").addObject().put("role", "user").put("content", "hi");
+                body.put("max_tokens", 16);
+                new Claude(driveUrl, () -> Config.get("CODEZAIKU_API_KEY")).chat(Config.get("CODEZAIKU_MODEL", "local-model"), body, Duration.ofSeconds(60), null, null);
+                drive = true;
+            } catch (RuntimeException e) { driveDetail = e.getMessage(); }
         } else if (!drive) {
             ChatProbe probe = chatProbe(driveUrl);
             drive = probe.ok();
@@ -113,9 +125,13 @@ final class Doctor {
                     false, !newer, newer ? latest + " is available" : "", newer ? "codezaiku update now  (has ResearchZosho's own updater install it; the library and settings stay)" : answers ? "" : "the library is installed but not running: `researchzosho service install` starts it now and at every login, `researchzosho serve` runs it in this terminal"));
         }
         // no drive: when this machine can serve one on demand, that is the fix to name (ModelServer); the docker line otherwise
-        String offer = drive ? null : ModelServer.offer();
+        // A hosted API the person chose (the Claude API, Bedrock) that refused has said what is wrong in its own words: the fix
+        // is to put that right, not to serve a model on this machine instead.
+        boolean hostedRefused = !drive && (onBedrock || Claude.is(driveUrl));
+        String offer = drive || hostedRefused ? null : ModelServer.offer();
         checks.add(new Check("model server at " + driveUrl, true, drive,
-                drive ? "" : driveDetail.isEmpty() ? "nothing answered /v1/models" : driveDetail, driveFix(offer)));
+                drive ? "" : driveDetail.isEmpty() ? "nothing answered /v1/models" : driveDetail,
+                hostedRefused ? "put right what the line above names, then run `codezaiku doctor` again" : driveFix(offer)));
 
         if (drive) {
             int ctx = 0;

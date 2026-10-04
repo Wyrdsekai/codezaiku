@@ -1,32 +1,132 @@
 # Changelog
 
-## 0.3.11
-
-This release adds Amazon Bedrock as a model, with your own AWS account. `codezaiku update now` updates ResearchZosho too, through ResearchZosho's own updater, and programs that keep CodeZaiku up to date get a JSON answer and exit codes to act on. `model serve install` uses a model server that another program already runs, such as Wyrdsekai's.
+## 0.3.12
 
 ### Added
 
-- Amazon Bedrock as the model, with your own AWS account. `codezaiku bedrock models` lists what Bedrock offers your account in a region, `codezaiku bedrock test <model>` sends one small request with a tool in it to see that you may use the model, and `codezaiku bedrock use <model>` makes it CodeZaiku's model. Claude, Llama, Nova, Qwen, Mistral and the other chat models go through Bedrock's Converse API, with tools and pictures.
-- It uses your own AWS sign-in through the AWS command line (single sign-on, an assumed role, keys), signs each request itself, and saves nothing of that sign-in. What you may use is decided in your AWS account. When AWS refuses, the message says what AWS answered and which of the usual causes it is. `docs/BEDROCK.md` has the steps, and the policy for whoever manages the AWS account. AWS GovCloud and the China regions work by naming the region.
-- `codezaiku doctor` checks a Bedrock drive by asking the chosen model for one token.
-- `codezaiku update --json` and `codezaiku update now --json`, for a program that keeps CodeZaiku up to date, such as Wyrdsekai. Each prints one JSON document on stdout, with the same fields as ResearchZosho's updater, and progress goes to stderr. The exit code says what happened: 0 updated or already current, 75 another update is running (ask again later), 3 this install cannot update itself, 1 failed. With `--json`, only CodeZaiku is updated. `docs/DEPLOYING_AS_A_BACKEND.md` has the fields.
-- One update at a time. An update holds a lock file in `~/.codezaiku` from start to end, and checks the version again against the installed files once it has the lock, because another program may have updated them in the meantime. A second update started meanwhile answers "busy" and changes nothing.
-- `codezaiku model serve install`, and `doctor` when it offers to set up a model, first look for a model server that another program already runs on this machine: Wyrdsekai's on port 8200, llama.cpp, vLLM, Ollama or LM Studio. When it serves one of the models CodeZaiku knows, Qwen3.6-35B-A3B among them, which Wyrdsekai runs as its brain, CodeZaiku uses that server and downloads nothing. `model serve install --own` installs CodeZaiku's own model instead.
+- Research before the work. Before a multi-step coding task is planned, the model is asked for two or three questions a search
+  engine can answer (which library or method fits, how the quantity the task turns on is defined or measured, what usually goes
+  wrong). A short research pass answers them on the web and, where ResearchZosho is installed, in the library. The notes and their
+  sources stay in the prompt from the plan onward. Settings: `CODEZAIKU_RESEARCH_FIRST` (`auto` by default, `always`, `off`),
+  `CODEZAIKU_RESEARCH_FIRST_TURNS` (8).
+- Research when stuck. After three failing checks in a row, a second pass researches the symptom (the check's numbers and the
+  method from each program's header) and adds a section to the notes. `CODEZAIKU_RESEARCH_STUCK_TURNS` (6); at most twice a run.
+- Prepare step for a check. The plan can name a `prepare:` command next to the check: a program that does the slow, deterministic
+  part once (reading every input, extracting features) and stores the results for the check to read. CodeZaiku runs it before the
+  check and again only when that program changes. A check that takes over five minutes and has no prepare step is offered one
+  (`python evaluate.py` is offered `python prepare.py`); nothing runs until the model writes it.
+- Claude Messages API. `drive = https://api.anthropic.com` (or any `/v1/messages` endpoint) uses Claude's own API instead of the
+  OpenAI-compatible endpoint. `CODEZAIKU_REASONING_EFFORT` sets Claude's effort. Tools, system prompt and conversation are cached at
+  the API; the `usage ←` log line shows cache reads and writes. The log keeps a summary of the model's thinking. Context window and
+  output limit come from the API's model listing; at most 200,000 tokens of the window are used unless `CODEZAIKU_CTX` is set.
+  `CODEZAIKU_TEMP=none` and `CODEZAIKU_TOOL_CHOICE=auto` are not needed on this drive. `codezaiku doctor` shows the API's own
+  error when a key or model name is refused.
+- `CODEZAIKU_REASONING_EFFORT`: reasoning effort for thinking models (`low`, `medium`, `high`, `xhigh` on Qwen3.8), sent per
+  request, so a server set up for quick chat can think harder in a coding run.
+- `CODEZAIKU_THINKING_BUDGET`: maximum thinking tokens per reply, for servers that accept the limit (llama.cpp). Unset: no limit.
+- `CODEZAIKU_DRIVE_CLASS`: `frontier` or `small`, for when the model's name does not say (see Changed).
+- `write_file` accepts `copy_from`: the file's content is taken from a file already in the project.
 
 ### Changed
 
-- `codezaiku update now` keeps ResearchZosho up to date too. It updates CodeZaiku, then, when ResearchZosho is installed, asks ResearchZosho's own updater to update it and says what came of each. A failure of one does not stop the other. When another program is updating ResearchZosho at that moment, it says so and leaves it alone.
-- Each program's own updater replaces its files. Once ResearchZosho is installed, CodeZaiku never downloads or replaces it: `codezaiku install researchzosho` asks its updater instead, which restarts its own service, so the advice to reinstall the service by hand is gone. A ResearchZosho older than 0.5.0 is asked the same way; its updater answers in words, and "already" there means up to date.
-- `codezaiku update` shows ResearchZosho's installed and latest versions and its update setting below CodeZaiku's.
-- Auto mode (`CODEZAIKU_UPDATE=auto`) updates CodeZaiku only. ResearchZosho's own service updates ResearchZosho, with its own setting. `doctor` and the chat name `codezaiku update now` when a newer ResearchZosho is out.
-- The README's opening, the npm package's description and keywords, and the MCP Registry entry say what CodeZaiku does and which model servers it works with.
-- The source uses imports instead of fully-qualified class names, 616 of them in 68 files. The program works the same.
+- Project environments. A run installs packages into a per-project environment under `~/.codezaiku/envs`, not into the user's
+  Python or global package folders: a Python venv that still sees system packages, plus npm, cargo, go and gem install folders
+  pointed at the same place. Every command activates it first. `CODEZAIKU_PROJECT_ENV=off` disables it. Linux, macOS and WSL;
+  native Windows unchanged.
+- When the research pass runs. `auto` (default): when the drive is not a frontier-class model and a search source answers (a Brave
+  key, a SearXNG in the settings, or the ResearchZosho library). `always`: on every drive. `off`: never. On an existing codebase the
+  model's `QUESTIONS: none` is honoured and the pass gets half the turns; a project built from nothing is always researched.
+  Basis: Claude finished the test brief without research; of eight 27B runs, the one that passed had the pass, and a second run with
+  it did not.
+- Frontier-class is decided by the model's family name, wherever it runs: `claude-*` (through any gateway), `gpt-5*`, `gpt-4.1*`,
+  `o3*`, `o4*`, `gemini-2.5-pro`, `gemini-3*`, `grok-4*`, `deepseek-v3*`, `deepseek-r1`, `kimi-k2*`, `qwen3-max*`, `glm-5*`. A
+  family's `mini`, `nano`, `flash`, `lite`, `small`, `tiny`, `distill` or `haiku` variant counts as small. The Claude API is frontier
+  regardless of name. `CODEZAIKU_DRIVE_CLASS` overrides the list.
+- A run whose declared check passes ends at the first `task_done`. The older end-of-run steps (verify rounds, project tests, the
+  changed-files note) no longer run after a passing check. The shell stays available after the pass; the files that passed are kept,
+  and a later change that breaks the check is reverted.
+- Project tests at `task_done` run inside the project's environment. A run that is sent back is told the command and shown the end
+  of its output.
+- Drives that refuse a forced tool call (Claude Opus 5.5, Fable 5.1, Sonnet 5.5) work: after the first refusal CodeZaiku stops
+  forcing for the session (`CODEZAIKU_TOOL_CHOICE=auto` sets this up front). A text-only reply ends the turn: it is the chat reply,
+  the run's report on the last turn, or otherwise answered with a request for the next action.
+- A shell command run with `timeout N` gets N seconds, up to `CODEZAIKU_SHELL_HEAVY_TIMEOUT_SEC` (20 minutes). Previously every
+  command was stopped at five minutes.
+- Drive timeouts follow the server's measured speed: each call may wait as long as that speed needs, twice as long after a timeout,
+  and never longer than `CODEZAIKU_DRIVE_TIMEOUT_MAX` (30 minutes by default). `CODEZAIKU_DRIVE_TIMEOUT` is the minimum.
+- A run that stops because the server failed repeatedly reports the reason (too slow, with the last wait and tokens per second; no
+  answer; or the server's message) instead of "context overflow". Status `failed`, as before.
 
 ### Fixed
 
-- `codezaiku install researchzosho` updated an installed ResearchZosho by unpacking the plain tarball over it. On a machine without Java 21, a ResearchZosho that carried its own Java then no longer started. Its own updater now does the update and keeps that kind of build. A first install beside a CodeZaiku that runs on its own Java now takes ResearchZosho's build with its own Java too.
-- On Windows, `codezaiku update now` downloaded the release and then failed, because the running program holds its own files, and its advice to try again from a new terminal could not work. It now says at once to close CodeZaiku and run the installer again, and exits with 3.
-- A coding run whose model server went away for a moment, while it restarted or loaded its model, counted each refused request as a failed call, answered it with a note about malformed JSON, and ended after eight of them, within seconds. It now waits for the server, up to 10 minutes, and goes on with the same turn.
+Long coding runs on local models could use every turn and end with the work half done and nothing reported. The causes, each fixed:
+
+- Compaction summaries are checked (text, with progress and next steps). An unusable one is requested again; if the second is
+  unusable too, CodeZaiku writes the summary from its own record. The request states the task, disables thinking, and asks for a
+  bounded summary with progress and next steps first.
+- The files a task names are tracked. Each turn shows which exist and which do not; `task_done` with one missing is bounced once;
+  the final summary names any that were never written. Files present at the start are excluded.
+- Write-only turns. In runs of 20 turns or more, when a named program is unwritten at the halfway point, or a named program or
+  document at the start of the final stretch, `write_file` is the only tool offered for up to three turns. Files a program produces
+  are excluded.
+- The last turn of a coding run offers only `task_done`; its summary is the run's report. Status `incomplete`, as before.
+- The end-game note asks for the named files and a report of where the work stands, whether or not every target was reached. It
+  used to say "only when that final run is green".
+- Only the latest reply's thinking stays in the conversation; older thinking is dropped first once the conversation passes half
+  the window.
+- The plan for a multi-step task is requested before the first turn in a call of its own, with no tools offered, and shown every
+  turn.
+- The research passes CodeZaiku runs itself (before the task, when stuck) get web, literature and library tools only and run in an
+  empty folder. Given the project's files, they read code instead of researching. `codezaiku research` keeps the project as before.
+- A research run that ends its last turn with a thin answer (a placeholder, or a pointer to a file that does not exist) gets one
+  text-only turn, and that text is the answer. The same turn already existed for an answer that described a table instead of
+  containing one.
+- Behind llama-swap, a model that is not loaded yet has no upstream `/props`, and a run starting then read a window of 8,192 until
+  the model was loaded. CodeZaiku now sends one request of one token first, which loads the model, and reads the window after it.
+
+## 0.3.11
+
+Amazon Bedrock as a model server; `codezaiku update now` also updates ResearchZosho; JSON output and exit codes for programs that
+run updates; `model serve install` reuses a model server another program already runs.
+
+### Added
+
+- Amazon Bedrock, with your own AWS account. `codezaiku bedrock models` lists the models your account can use in a region;
+  `codezaiku bedrock test <model>` sends one small request with a tool; `codezaiku bedrock use <model>` sets it as the model. Chat
+  models (Claude, Llama, Nova, Qwen, Mistral and others) go through the Converse API, with tools and images. Sign-in is the AWS
+  CLI's own (SSO, assumed role, keys); each request is signed by CodeZaiku and nothing of the sign-in is stored. Refusals show AWS's
+  message and the likely cause. GovCloud and China regions work by region name. Setup and an account policy: `docs/BEDROCK.md`.
+- `codezaiku doctor` checks a Bedrock drive with a one-token request.
+- `codezaiku update --json` and `codezaiku update now --json`: one JSON document on stdout (same fields as ResearchZosho's updater),
+  progress on stderr. Exit codes: 0 updated or current, 75 another update is running, 3 this install cannot update itself, 1 failed.
+  With `--json` only CodeZaiku is updated. Fields: `docs/DEPLOYING_AS_A_BACKEND.md`.
+- One update at a time: a lock file in `~/.codezaiku` for the whole update, and the version re-checked against the installed files
+  once the lock is held. A second update started meanwhile reports "busy" and changes nothing.
+- `codezaiku model serve install` (and `doctor`, when it offers to set up a model) first looks for a model server already running on
+  the machine — Wyrdsekai's on port 8200, llama.cpp, vLLM, Ollama, LM Studio. If it serves a model CodeZaiku knows (Qwen3.6-35B-A3B
+  among them), that server is used and nothing is downloaded. `model serve install --own` installs CodeZaiku's own model instead.
+
+### Changed
+
+- `codezaiku update now` updates CodeZaiku, then ResearchZosho through ResearchZosho's own updater, and reports each. One failing
+  does not stop the other; if another program is updating ResearchZosho at that moment, it is left alone.
+- `codezaiku install researchzosho` on an installed ResearchZosho asks its updater (which restarts its service) instead of unpacking
+  over it. A ResearchZosho older than 0.5.0 is asked the same way.
+- `codezaiku update` shows ResearchZosho's installed and latest versions and its update setting.
+- `CODEZAIKU_UPDATE=auto` updates CodeZaiku only; ResearchZosho's service updates ResearchZosho under its own setting. `doctor` and
+  the chat mention `codezaiku update now` when a newer ResearchZosho is out.
+- README opening, npm description and keywords, and the MCP Registry entry describe CodeZaiku and the model servers it works with.
+- Fully-qualified class names replaced by imports (616 in 68 files). No behaviour change.
+
+### Fixed
+
+- `codezaiku install researchzosho` unpacked the plain tarball over an installed ResearchZosho; on a machine without Java 21 a
+  ResearchZosho with its own bundled Java then failed to start. The updater now does the update and keeps the bundled-Java build; a
+  first install beside a CodeZaiku with bundled Java takes the bundled-Java build too.
+- Windows: `codezaiku update now` downloaded the release and failed because the running program holds its own files. It now says to
+  close CodeZaiku and run the installer again, and exits with 3.
+- A coding run counted each refused request from a restarting model server as a failed call and ended after eight within seconds.
+  It now waits for the server (up to 10 minutes) and continues the same turn.
 
 ## 0.3.10
 

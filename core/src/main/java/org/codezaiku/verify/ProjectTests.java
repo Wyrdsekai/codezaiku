@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.codezaiku.shape.ProjectFacts;
 import org.codezaiku.exec.Shell;
+import org.codezaiku.tools.ProjectEnv;
 
 import java.io.File;
 /**
@@ -62,12 +63,32 @@ public final class ProjectTests {
         }
     }
 
+    /** One run of the project's tests: the verdict, the command that ran, and what it printed. */
+    public record Run(Verdict verdict, String command, String output) {
+        /** The end of what the tests printed: where a runner names the tests that fail and why. */
+        public String outputTail() {
+            String o = output == null ? "" : output.strip();
+            String[] lines = o.split("\\R");
+            String tail = String.join("\n", List.of(lines).subList(Math.max(0, lines.length - 40), lines.length));
+            return tail.length() > 3000 ? "…" + tail.substring(tail.length() - 3000) : tail;
+        }
+    }
+
     /** Run the project's tests and report what happened, counts included where the runner says so. */
-    public static Verdict verdict(Path projectRoot) {
+    public static Verdict verdict(Path projectRoot) { return run(projectRoot).verdict(); }
+
+    /**
+     * Run the project's tests inside the project's own environment, the one the model's commands run in. They used to run in
+     * the person's base environment: a run that had installed its packages into the project's environment and passed its tests
+     * there was told its tests fail (a control run on 2026-10-02 was sent back four times over tests that pass).
+     */
+    public static Run run(Path projectRoot) {
+        String command = "", output = "";
         try {
             Path work = findWorkDir(projectRoot);
             String testCmd = ProjectFacts.testCommand(work);
-            if (testCmd == null) return Verdict.notRun();
+            if (testCmd == null) return new Run(Verdict.notRun(), command, output);
+            command = testCmd;
             // OS-level timeout on the command itself — NOT just the Java waitFor below. A model test can
             // hang forever (e.g. `client = TestClient(app)` at module level when the app's startup blocks;
             // an accidental `while True`; a real socket op), and sh()'s readAllBytes() blocks on the open
@@ -80,25 +101,26 @@ public final class ProjectTests {
             // 127 and the caller read that as the SUITE failing — every project on macOS reporting
             // red whether or not it passed. Timeout picks a mechanism that exists on this host.
             int secs = RUN_BUDGET_MS / 1000;
-            Sh r = sh(work.toString(), Timeout.wrap(secs, testCmd + " 2>&1"));
-            if (r.exit == -1) return Verdict.notRun();          // we never got to run it
+            Sh r = sh(work.toString(), ProjectEnv.prelude(projectRoot), Timeout.wrap(secs, testCmd + " 2>&1"));
+            output = r.out;
+            if (r.exit == -1) return new Run(Verdict.notRun(), command, output);          // we never got to run it
             // A suite that collected NOTHING did not fail — it did not run. pytest exits 5 for "no
             // tests collected", which a plain non-zero check reads as a failing suite, so a project
             // with a manifest and no tests reported `failed` and a host deciding outcomes from test
             // results would mark the task failed for having no tests. Measured, not theorised.
-            if (noTestsCollected(r.exit, r.out)) return Verdict.notRun();
+            if (noTestsCollected(r.exit, r.out)) return new Run(Verdict.notRun(), command, output);
             // Nor is an ABSENT RUNNER a failing suite. A stock macOS box has no pytest, so without
             // this every python project there reported red — and the same holds for any Linux box
             // where the runner was never installed. Measured on macOS 26.5.
-            if (runnerMissing(r.exit, r.out)) return Verdict.notRun();
+            if (runnerMissing(r.exit, r.out)) return new Run(Verdict.notRun(), command, output);
             boolean green = r.exit == 0;
             int[] counts = TestCounts.parse(r.out);
             if (counts == null) counts = TestCounts.fromJUnitXml(work);
             Integer passed = counts == null ? null : counts[0];
             Integer failed = counts == null ? null : counts[1];
-            return new Verdict(true, green, passed, failed);
+            return new Run(new Verdict(true, green, passed, failed), command, output);
         } catch (Exception e) {
-            return Verdict.notRun();
+            return new Run(Verdict.notRun(), command, output);
         }
     }
 
@@ -178,7 +200,10 @@ public final class ProjectTests {
 
     private record Sh(int exit, String out) {}
 
-    private static Sh sh(String cwd, String command) {
+    private static Sh sh(String cwd, String command) { return sh(cwd, "", command); }
+
+    /** {@code prelude}: the shell text that switches the project's environment on, or nothing. */
+    private static Sh sh(String cwd, String prelude, String command) {
         try {
             // The working directory is set on the PROCESS, never with a `cd` inside the command string.
             // On Windows `bash` resolves to C:\Windows\System32\bash.exe — the WSL launcher — whenever
@@ -187,7 +212,7 @@ public final class ProjectTests {
             // not found", so runnerMissing() did not fire: the oracle reported ran=true with NO counts,
             // turning a passing suite into testsPassed=0 / status=failed. ProcessBuilder's directory is
             // translated by the launcher, which is why the model's own ShellTool never hit this.
-            Process p = Shell.pb("( " + command + " )")
+            Process p = Shell.pb(prelude + "( " + command + " )")
                     .directory(new File(cwd))
                     .redirectErrorStream(true).start();
             String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);

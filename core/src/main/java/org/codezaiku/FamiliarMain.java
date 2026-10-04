@@ -17,6 +17,8 @@ import org.codezaiku.tools.VerifyTool;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
+import java.io.PrintStream;
+import java.util.function.Consumer;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -125,7 +127,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.11";
+    public static final String VERSION = "0.3.12";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -2770,6 +2772,27 @@ public final class FamiliarMain {
     }
 
     public static FamiliarLoop.Result research(String question, String mode, String baseUrl, int maxTurns) {
+        return research(question, mode, new DriveClient(baseUrl, MODEL), maxTurns, System.out, Path.of(System.getProperty("user.dir")));
+    }
+
+    /**
+     * The research loop itself. {@code out} takes the progress lines; null means none — a coding run that researches before it
+     * builds has its result document on stdout, and nothing else may go there. {@code cwd}: the folder the loop works from.
+     */
+    public static FamiliarLoop.Result research(String question, String mode, DriveClient drive, int maxTurns, PrintStream out, Path cwd) {
+        return research(question, mode, drive, maxTurns, out, cwd, null);
+    }
+
+    /** {@code excerpts}: who wants the start of each page the run reads, or null. */
+    public static FamiliarLoop.Result research(String question, String mode, DriveClient drive, int maxTurns, PrintStream out, Path cwd, Consumer<String> excerpts) {
+        return research(question, mode, drive, maxTurns, out, cwd, excerpts, true);
+    }
+
+    /**
+     * {@code projectFiles} false: the pass has the web, the literature and the library's memory, and no file of the project — the
+     * form the harness's own passes take, whose question already carries what they need from the project.
+     */
+    public static FamiliarLoop.Result research(String question, String mode, DriveClient drive, int maxTurns, PrintStream out, Path cwd, Consumer<String> excerpts, boolean projectFiles) {
         boolean broad = !"depth".equalsIgnoreCase(mode);
         String shape = broad
                 ? "BROAD survey: run SEVERAL DIFFERENT web_search queries covering the different facets and "
@@ -2809,7 +2832,7 @@ public final class FamiliarMain {
         // RESEARCH MEMORY POOL: seed the run with what earlier runs already established, so research is
         // CUMULATIVE (skip settled ground, push the frontier) instead of restarting from zero each time.
         String known = ResearchMemory.promptBlock(question);
-        if (!known.isEmpty()) System.out.println("research memory: recalled prior findings");
+        if (!known.isEmpty()) say(out, "research memory: recalled prior findings");
         String goal = "RESEARCH (read-only; you have web_search and web_fetch).\n\nQUESTION: " + question
                 + "\n\n" + known + shape + dataDoors + assemble
                 + "\n\nRules: base every claim on a source you actually FETCHED — do not answer from memory. "
@@ -2820,29 +2843,29 @@ public final class FamiliarMain {
                 + "Note when sources conflict or when something is uncertain. Finish by calling task_done with a "
                 + "written answer that (a) answers the question directly up front, (b) gives the supporting "
                 + "detail, and (c) ends with a SOURCES list of the URLs you actually used.";
-        System.out.println("research (" + (broad ? "broad" : "depth") + "): " + question);
-        System.out.println("search backend: " + WebSearchTool.endpoint());
-        var drive = new DriveClient(baseUrl, MODEL);
-        Path cwd = Path.of(System.getProperty("user.dir"));
+        say(out, "research (" + (broad ? "broad" : "depth") + "): " + question);
+        say(out, "search backend: " + WebSearchTool.endpoint());
         var draft = new AnswerDraftTool();
-        var tools = ToolRegistry.research(cwd, question, draft);
+        var tools = projectFiles ? ToolRegistry.research(cwd, question, draft) : ToolRegistry.researchWeb(question, draft);
         // The search controller: the steerer rides on web_search; its exhausted() is the loop's
         // early-finish signal. Stats are printed per run so over-search is a number, not a feeling.
         var ws = (WebSearchTool) tools.find("web_search");
         FamiliarLoop.Result res = new FamiliarLoop(drive, tools, cwd, goal, maxTurns, null, null)
-                .research().answerDraft(draft::draft)
+                .research().answerDraft(draft::draft).excerpts(excerpts)
                 .finishEarlyIf(() -> ws != null && ws.steer().exhausted())
                 .run();
         if (ws != null) {
-            System.out.println("search controller: " + ws.steer().queries() + " queries, "
+            say(out, "search controller: " + ws.steer().queries() + " queries, "
                     + ws.steer().queriesAfterSaturation() + " after saturation"
                     + (ws.steer().exhausted() ? " — finished on exhaustion" : ""));
         }
         // Harvest the answer into the pool so the NEXT run starts from here (dedup handled on write).
         int stored = ResearchMemory.harvest(question, res.summary());
-        if (stored > 0) System.out.println("research memory: stored " + stored + " new finding(s)");
+        if (stored > 0) say(out, "research memory: stored " + stored + " new finding(s)");
         return res;
     }
+
+    private static void say(PrintStream out, String line) { if (out != null) out.println(line); }
 
     /**
      * A short note naming the DIRECT data doors for question families where page-search fails (measured on

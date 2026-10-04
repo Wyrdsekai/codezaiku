@@ -66,10 +66,17 @@ tasks.test {
     // short-circuits it, so a test can build a loop offline. No test depends on the resolution
     // itself; anything that did would set its own value.
     environment("CODEZAIKU_CTX", "8192")
+    // The research pass before a plan would run inside every multi-step loop test; the test for it switches it on itself.
+    environment("CODEZAIKU_RESEARCH_FIRST", "off")
+    // No test reaches a library that happens to run on the machine: the bridge is pointed at a port nothing listens on.
+    environment("CODEZAIKU_LIBRARIAN_URL", "http://127.0.0.1:9")
     // The suite must never read the developer's household config: with CODEZAIKU_EMBED set in
     // ~/.codezaiku/config, index tests reached the live embedder (2026-09-02). Explicitly off.
     environment("CODEZAIKU_EMBED", "off")
     environment("CODEZAIKU_RERANK", "off")
+    // Every shell command a test runs would otherwise make a project environment (a Python venv) for its temporary folder under the
+    // real ~/.codezaiku/envs: the first full run after ProjectEnv made seven, 86 MB (2026-09-29). ProjectEnvTest switches it on itself.
+    environment("CODEZAIKU_PROJECT_ENV", "off")
     environment("CODEZAIKU_ENRICH", "both")
 }
 

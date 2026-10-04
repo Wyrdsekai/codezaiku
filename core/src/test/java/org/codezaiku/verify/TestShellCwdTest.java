@@ -53,6 +53,31 @@ class TestShellCwdTest {
         assertEquals("here", out(r), "the shell was not running in the workspace");
     }
 
+    /**
+     * The tests run inside the project's own environment, where the run installed its packages. They used to run in the person's
+     * base environment, and a suite that passes in the project's environment was reported as failing.
+     */
+    @Test
+    void theShellRunsInsideTheProjectsEnvironment() throws Exception {
+        Method m = ProjectTests.class.getDeclaredMethod("sh", String.class, String.class, String.class);
+        m.setAccessible(true);
+        Object r = m.invoke(null, work.toString(), "export CZ_ENV_PROBE=switched-on; ", "echo \"env: $CZ_ENV_PROBE\"");
+        assertEquals(0, exit(r));
+        assertEquals("env: switched-on", out(r), "the command did not see what the environment's prelude set");
+    }
+
+    @Test
+    void aFailingRunSaysWhichCommandRanAndKeepsTheEndOfItsOutput() {
+        StringBuilder printed = new StringBuilder();
+        for (int i = 1; i <= 60; i++) printed.append("line ").append(i).append('\n');
+        printed.append("FAILED tests/test_angle.py::test_release - ImportError: numpy.core.multiarray failed to import\n1 failed, 3 passed in 2.1s\n");
+        ProjectTests.Run run = new ProjectTests.Run(new ProjectTests.Verdict(true, false, 3, 1), "python3 -m pytest -q", printed.toString());
+        String tail = run.outputTail();
+        assertTrue(tail.contains("ImportError: numpy.core.multiarray") && tail.endsWith("1 failed, 3 passed in 2.1s"), tail);
+        assertTrue(tail.startsWith("line 23") && !tail.contains("line 22\n"), "the last forty lines: " + tail);
+        assertEquals("", new ProjectTests.Run(ProjectTests.Verdict.notRun(), "", null).outputTail());
+    }
+
     @Test
     void aWorkspaceThatCannotBeEnteredIsNotAPassingRun() throws Exception {
         Object r = sh(work.resolve("does-not-exist").toString(), "echo reached");
