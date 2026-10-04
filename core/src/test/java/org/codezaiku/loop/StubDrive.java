@@ -1,6 +1,7 @@
 package org.codezaiku.loop;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import java.util.concurrent.atomic.AtomicInteger;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpServer;
@@ -67,6 +68,19 @@ final class StubDrive implements AutoCloseable {
     }
 
     /** An assistant message that is text. */
+    private static final AtomicInteger WAITS = new AtomicInteger();
+
+    /**
+     * What a stub answers while the harness has a check running in the background: a harmless shell command that differs every time,
+     * after a short pause. Re-reading the same file was what the stubs did, and on a slow runner (CI) the harness's spin block —
+     * the same command repeated with no new result — ended the run before a one-second check came back (2026-10-04); a real model
+     * never answers in zero time, and never issues the identical command forty times.
+     */
+    static ObjectNode waiting() {
+        try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        return calls("shell", "{\"command\":\"echo waiting " + WAITS.incrementAndGet() + "\"}");
+    }
+
     static ObjectNode says(String text) {
         return J.createObjectNode().put("role", "assistant").put("content", text);
     }

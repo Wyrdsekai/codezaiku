@@ -75,7 +75,7 @@ class DoneCheckLoopTest {
                 finishes[0]++;
                 return StubDrive.calls("task_done", "{\"summary\":\"the score is 5\"}");
             }
-            return StubDrive.calls("read_file", "{\"path\":\"note.txt\"}");
+            return StubDrive.waiting();
         })) {
             FamiliarLoop.Result r = new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 60, null, null).run();
 
@@ -116,7 +116,7 @@ class DoneCheckLoopTest {
                 if (step[0] < 4) { step[0] = 4; return write("RESULTS.md", "score: 5\n"); }
                 return StubDrive.calls("task_done", "{\"summary\":\"the score is 5\"}");
             }
-            return StubDrive.calls("read_file", "{\"path\":\"note.txt\"}");
+            return StubDrive.waiting();
         })) {
             FamiliarLoop.Result r = new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 80, null, null).run();
 
@@ -147,7 +147,7 @@ class DoneCheckLoopTest {
                 if (step[0] < 4) { step[0] = 4; return write("RESULTS.md", "score: 5\n"); }
                 return StubDrive.calls("task_done", "{\"summary\":\"the score is 5\"}");
             }
-            return StubDrive.calls("read_file", "{\"path\":\"note.txt\"}");
+            return StubDrive.waiting();
         })) {
             FamiliarLoop.Result r = new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 80, null, null).slowCheckAfter(-1).run();
 
@@ -173,7 +173,7 @@ class DoneCheckLoopTest {
                 if (step[0] == 2) { step[0] = 3; return write("RESULTS.md", "score: 5\n"); }
                 return StubDrive.calls("task_done", "{\"summary\":\"done\"}");
             }
-            return StubDrive.calls("read_file", "{\"path\":\"scorer.sh\"}");
+            return StubDrive.waiting();
         })) {
             FamiliarLoop.Result r = new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 60, null, null).run();
             assertTrue(r.done());
@@ -194,7 +194,7 @@ class DoneCheckLoopTest {
                 if (step[0] == 2) { step[0] = 3; return write("RESULTS.md", "score: 5\n"); }
                 return StubDrive.calls("task_done", "{\"summary\":\"done\"}");
             }
-            return StubDrive.calls("read_file", "{\"path\":\"scorer.sh\"}");
+            return StubDrive.waiting();
         })) {
             FamiliarLoop.Result r = new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 60, null, null).run();
             assertTrue(r.done());
@@ -213,7 +213,7 @@ class DoneCheckLoopTest {
             if (step[0] == 1 && seen.contains("best run of the check so far")) { step[0] = 2; return write("scorer.sh", "echo score: 1\n"); }
             if (step[0] == 2 && seen.contains("WORSE than the best run so far")) { step[0] = 3; return StubDrive.calls("task_done", "{\"summary\":\"stopping here\"}"); }
             if (step[0] == 3) return StubDrive.calls("task_done", "{\"summary\":\"stopping here\"}");
-            return StubDrive.calls("read_file", "{\"path\":\"scorer.sh\"}");
+            return StubDrive.waiting();
         })) {
             FamiliarLoop.Result r = new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 80, null, null).run();
             assertTrue(r.done());
@@ -234,7 +234,7 @@ class DoneCheckLoopTest {
             JsonNode tools = req.path("tools");
             boolean programTurn = tools.size() == 3 && tools.get(1).path("function").path("parameters").path("properties").path("path").has("enum");
             if (programTurn) return StubDrive.calls("task_done", "{\"summary\":\"seen\"}");   // ends the run once the turn arrives
-            return StubDrive.calls("read_file", "{\"path\":\"note.txt\"}");
+            return StubDrive.waiting();
         })) {
             new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 80, null, null).run();
             JsonNode found = null;

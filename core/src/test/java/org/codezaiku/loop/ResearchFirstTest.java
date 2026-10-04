@@ -167,15 +167,17 @@ class ResearchFirstTest {
             case "second-look" -> StubDrive.says("DONE CHECK:\nrun: sh scorer.sh\npass: score >= 3\n");
             default -> {
                 String seen = StubDrive.userText(req);
-                // a scorer that stays at 1 through three versions, then the fix
-                if (step[0] < 3 && (step[0] == 0 || seen.contains("does not pass yet"))) { step[0]++; yield StubDrive.calls("write_file", "{\"path\":\"scorer.sh\",\"content\":\"# version " + step[0] + "\\necho score: 1\\n\"}"); }
+                // a scorer that stays at 1 through three versions, then the fix: the next version only once the last one's check has
+                // reported (counted from the notes), so that every version is checked and the third failing check is reached
+                int reported = 0; for (int at = seen.indexOf("does not pass yet"); at >= 0; at = seen.indexOf("does not pass yet", at + 1)) reported++;
+                if (step[0] < 3 && reported >= step[0]) { step[0]++; yield StubDrive.calls("write_file", "{\"path\":\"scorer.sh\",\"content\":\"# version " + step[0] + "\\necho score: 1\\n\"}"); }
                 if (step[0] == 3 && seen.contains("AFTER THE CHECK FAILED")) { step[0] = 4; yield StubDrive.calls("write_file", "{\"path\":\"scorer.sh\",\"content\":\"echo score: 5\\n\"}"); }
                 if (seen.contains("PASSES")) { if (step[0] == 4) { step[0] = 5; yield StubDrive.calls("write_file", "{\"path\":\"RESULTS.md\",\"content\":\"score: 5\\n\"}"); } yield StubDrive.calls("task_done", "{\"summary\":\"5\"}"); }
-                yield StubDrive.calls("read_file", "{\"path\":\"TASK.md\"}");
+                yield StubDrive.waiting();
             }
         })) {
             Files.writeString(tmp.resolve("TASK.md"), "the task");
-            FamiliarLoop.Result r = new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 80, null, null).researchFirst(true).run();
+            FamiliarLoop.Result r = new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 200, null, null).researchFirst(true).run();   // the stub waits 100 ms a turn while checks run
             assertTrue(r.done(), r.summary());
             assertEquals(2, researchAsks.size(), "the pass before the work, then the pass on the symptom: " + researchAsks.size());
             String stuck = researchAsks.get(1);
