@@ -50,7 +50,8 @@ final class Deliverables {
     // A name is taken only when it stands alone: not inside a URL or a longer path (a "/", ":" or "." before it), and not a pattern
     // or placeholder ("<id>.json", "*.py", "{name}.md", "$OUT.csv").
     private static final Pattern NAMED = Pattern.compile(
-            "(?<![\\w./:@<{$*\\\\-])((?:\\.{1,2}/)?(?:[\\w-]+/)*[\\w-]+(?:\\.[\\w-]+)*\\.(?:" + EXT + "))(?![\\w/>}*(-])(?!\\.[\\w])");
+            "(?<!%)"   // not the tail of a percent-escape: `..%2Fapp%2Fconfig.py` names no file `2Fconfig.py`
+            + "(?<![\\w./:@<{$*\\\\-])((?:\\.{1,2}/)?(?:[\\w-]+/)*[\\w-]+(?:\\.[\\w-]+)*\\.(?:" + EXT + "))(?![\\w/>}*(-])(?!\\.[\\w])");
     private static final Pattern PLAIN_NAMED = Pattern.compile("(?<![\\w./-])(Dockerfile|Makefile)(?![\\w/-])(?!\\.\\w)");
     // Products that are spelled like a file.
     private static final Set<String> NOT_FILES = Set.of("node.js", "next.js", "vue.js", "react.js", "d3.js", "three.js", "express.js",

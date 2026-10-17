@@ -138,6 +138,7 @@ public final class McpServer {
                                 + "(default: auto-detect from project state — empty->create, broken/bug->repair, else maintain)."),
                         prop("maxTurns", "integer", "Optional loop budget (default 40)."),
                         prop("drive", "string", "Optional model server URL (default " + DEFAULT_DRIVE + ")."),
+                        prop("model", "string", "Optional: a saved model's name (codezaiku model list) — its own address, id, effort and prices — or a model id on the drive."),
                         prop("async", "boolean", "If true, run in the background and return a job id to poll with the job_status tool, instead of blocking until the tool concludes."))));
         tools.add(tool("fix",
                 "Run CodeZaiku's autonomous-SRE operator on a stack or host: senses health, localizes the root "
@@ -172,6 +173,7 @@ public final class McpServer {
                         prop("scope", "string", "Optional git ref/range to review (e.g. 'HEAD~1', 'main..HEAD'); omit for the whole tree."),
                         prop("maxTurns", "integer", "Optional loop budget (default 30)."),
                         prop("drive", "string", "Optional model server URL (default " + DEFAULT_DRIVE + ")."),
+                        prop("model", "string", "Optional: a saved model's name (codezaiku model list) — its own address, id, effort and prices — or a model id on the drive."),
                         prop("async", "boolean", "If true, run in the background and return a job id to poll with job_status."))));
         tools.add(tool("research",
                 "Research a question on the WEB (searches, fetches and reads real sources, then synthesizes a "
@@ -182,6 +184,7 @@ public final class McpServer {
                         prop("mode", "string", "broad (survey the landscape, default) | depth (deep-read a narrow question)."),
                         prop("maxTurns", "integer", "Optional loop budget (default 30)."),
                         prop("drive", "string", "Optional model server URL (default " + DEFAULT_DRIVE + ")."),
+                        prop("model", "string", "Optional: a saved model's name (codezaiku model list) — its own address, id, effort and prices — or a model id on the drive."),
                         prop("async", "boolean", "If true, run in the background and return a job id to poll with job_status."))));
         tools.add(tool("research_memory",
                 "Inspect the RESEARCH MEMORY POOL — findings accumulated from earlier research runs. Omit query "
@@ -257,7 +260,8 @@ public final class McpServer {
                     int maxTurns = args.path("maxTurns").asInt(40);
                     String drive = args.path("drive").asText(DEFAULT_DRIVE);
                     String mode = args.hasNonNull("mode") ? args.get("mode").asText() : null;
-                    FamiliarLoop.Result res = FamiliarMain.runLoop(project, goal, drive, maxTurns, "none", mode);
+                    String model = args.hasNonNull("model") ? args.get("model").asText() : null;
+                    FamiliarLoop.Result res = FamiliarMain.runLoopTracked(project, goal, drive, maxTurns, "none", mode, model).result();
                     // isError is reserved for tool FAILURE. Hitting the turn budget is a completion STATUS, not
                     // an error — the loop ran and may have produced correct work; the caller re-invokes to continue.
                     return new JobRegistry.ToolResult("status: " + (res.done()
@@ -299,9 +303,10 @@ public final class McpServer {
                     String scope = args.hasNonNull("scope") ? args.get("scope").asText() : null;
                     int maxTurns = args.path("maxTurns").asInt(30);
                     String drive = args.path("drive").asText(DEFAULT_DRIVE);
+                    String model = args.hasNonNull("model") ? args.get("model").asText() : null;
                     // Anchor here too: an agent consuming this over MCP has even less ability than a
                     // human to notice that a line number was invented.
-                    String summary = FamiliarMain.review(project, scope, drive, maxTurns).summary();
+                    String summary = FamiliarMain.review(project, scope, drive, maxTurns, model).summary();
                     return new JobRegistry.ToolResult(FamiliarMain.anchorReview(project, scope, summary), false);
                 }
                 case "research": {
@@ -309,7 +314,8 @@ public final class McpServer {
                     String mode = args.path("mode").asText("broad");
                     int maxTurns = args.path("maxTurns").asInt(30);
                     String drive = args.path("drive").asText(DEFAULT_DRIVE);
-                    var res = FamiliarMain.research(question, mode, drive, maxTurns);
+                    String model = args.hasNonNull("model") ? args.get("model").asText() : null;
+                    var res = FamiliarMain.research(question, mode, drive, maxTurns, model);
                     return new JobRegistry.ToolResult(res.summary(), false);
                 }
                 case "research_memory": {

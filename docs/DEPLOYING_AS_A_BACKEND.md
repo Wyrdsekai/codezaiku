@@ -106,6 +106,8 @@ codezaiku run --text <TASK|@FILE|-> --output-format json --no-session -q \
               [--provider <p>] [--model <m>] [--task-id <id>] [--max-turns <n>]
 ```
 
+- **`--model <m>`** is a saved model's name or a model id on the drive; a saved model's monthly cap, when reached, ends the run
+  at once with `status: failed` and the figures in `error`, before anything is sent.
 - **The subprocess working directory is the workspace.** There is no workspace flag; set the child
   process's CWD. All paths in the result are relative to it.
 - **stdout carries exactly one JSON document.** Narration goes to stderr, so you can log it for humans
@@ -161,9 +163,19 @@ Two details worth having:
   "filesSource": "ledger+git",
   "turns": 8,
   "summary": "Created mul.py with mul(a, b)…",
-  "model": "local-model"
+  "model": "deepseek/deepseek-v4.1-flash",
+  "savedModel": "deepseek",
+  "host": "openrouter.ai",
+  "usage": { "prompt": 412300, "cached": 361000, "written": 0, "completion": 9800 },
+  "cost": 0.0412
 }
 ```
+
+`--model <m>` names a saved model (`codezaiku model add deepseek openrouter … --prices …`), which brings its own address, id and
+prices, or a model id on the drive. `savedModel`, `host`, `usage` (the tokens the server reported: prompt, of which read from
+its cache and written to it, and completion) and `cost` (at the saved model's prices, dollars) are present only when there was
+one; `model` is always the id that answered. The same job adds a line to `~/.codezaiku/spend.jsonl`, which `codezaiku spend`
+adds up.
 
 **Exit code and `status` always agree**, so a caller can branch on the code alone:
 

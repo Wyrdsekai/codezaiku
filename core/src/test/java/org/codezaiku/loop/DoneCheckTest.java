@@ -33,9 +33,24 @@ class DoneCheckTest {
     }
 
     @Test
+    void aBareTestRunnerIsRunThroughTheInterpreter() {
+        String py = "\"$(command -v python3 || command -v python)\" -m pytest";
+        assertEquals(py + " -q", DoneCheck.portable("pytest -q"));
+        assertEquals(py, DoneCheck.portable("pytest"));
+        assertEquals("timeout 900 " + py + " tests/", DoneCheck.portable("timeout 900 pytest tests/"));
+        assertEquals(py + " -x", DoneCheck.portable("py.test -x"));
+        assertEquals("python -m pytest -q", DoneCheck.portable("python -m pytest -q"), "already through the interpreter");
+        assertEquals("python evaluate.py", DoneCheck.portable("python evaluate.py"));
+        assertEquals("npm test", DoneCheck.portable("npm test"));
+        assertEquals("pytest-watch", DoneCheck.portable("pytest-watch"), "another program whose name starts the same");
+        DoneCheck c = DoneCheck.parse("DONE CHECK:\nrun: pytest -q\npass: exit 0\n");
+        assertEquals(py + " -q", c.command);
+    }
+
+    @Test
     void aTestCommandThatMustExitZeroHasNoBoundsAndNoneMeansNoCheck() {
         DoneCheck tests = DoneCheck.parse("PLAN:\n1. a\n2. b\n\nDONE CHECK:\nrun: `pytest -q`\npass: exit 0\n");
-        assertEquals("pytest -q", tests.command);
+        assertEquals("\"$(command -v python3 || command -v python)\" -m pytest -q", tests.command);
         assertTrue(tests.conditions.isEmpty());
         assertTrue(tests.pinned(null).contains("pass when: it exits 0"));
         assertNull(DoneCheck.parse("PLAN:\n1. a\n2. b\n\nDONE CHECK:\nrun: none\n"));

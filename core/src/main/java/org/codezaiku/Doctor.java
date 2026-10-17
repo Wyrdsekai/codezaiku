@@ -15,6 +15,7 @@ import java.util.Locale;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.codezaiku.drive.anthropic.Claude;
+import org.codezaiku.drive.openai.OpenAI;
 import org.codezaiku.drive.aws.Bedrock;
 import org.codezaiku.exec.Shell;
 import org.codezaiku.research.LibraryBridge;
@@ -101,7 +102,17 @@ final class Doctor {
                 var body = new ObjectMapper().createObjectNode();
                 body.putArray("messages").addObject().put("role", "user").put("content", "hi");
                 body.put("max_tokens", 16);
-                new Claude(driveUrl, () -> Config.get("CODEZAIKU_API_KEY")).chat(Config.get("CODEZAIKU_MODEL", "local-model"), body, Duration.ofSeconds(60), null, null);
+                new Claude(driveUrl, () -> DriveClient.keyFor(driveUrl)).chat(Config.get("CODEZAIKU_MODEL", "local-model"), body, Duration.ofSeconds(60), null, null);
+                drive = true;
+            } catch (RuntimeException e) { driveDetail = e.getMessage(); }
+        } else if (OpenAI.is(driveUrl)) {
+            // OpenAI's own API: one word from the model that is set, through the Responses API, and the API's own words when it refuses
+            drive = false;
+            try {
+                var body = new ObjectMapper().createObjectNode();
+                body.putArray("messages").addObject().put("role", "user").put("content", "Answer with the one word OK.");
+                body.put("max_tokens", 64);
+                new OpenAI(driveUrl, () -> DriveClient.keyFor(driveUrl)).chat(Config.get("CODEZAIKU_MODEL", "local-model"), body, Duration.ofSeconds(60));
                 drive = true;
             } catch (RuntimeException e) { driveDetail = e.getMessage(); }
         } else if (!drive) {
@@ -266,7 +277,7 @@ final class Doctor {
         if (status >= 200 && status < 300) return new ChatProbe(true, "");
         if (status == 401 || status == 403) {
             return new ChatProbe(false, "the endpoint rejected the credential (HTTP " + status
-                    + ") — check CODEZAIKU_API_KEY");
+                    + ") — check CODEZAIKU_API_KEY, or keep a key for this host: codezaiku model key <host> --file <path>");
         }
         if (status == 404) {
             return new ChatProbe(false, "no /v1/chat/completions at this URL (HTTP 404) — "

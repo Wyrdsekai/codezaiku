@@ -34,6 +34,11 @@ import java.util.function.IntConsumer;
 import org.codezaiku.drive.aws.AwsCredentials;
 import org.codezaiku.drive.anthropic.Claude;
 import org.codezaiku.drive.aws.Bedrock;
+import org.codezaiku.drive.openai.OpenAI;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 /**
  * Thin client over the llama.cpp drive at :8200 (OpenAI-compatible).
  *
@@ -56,9 +61,37 @@ public final class DriveClient {
     private final String model;
     /** One HTTP client for every DriveClient: each owns a selector thread and an executor, and a client per instance
      *  leaked threads until a small macOS runner failed with "pthread_create failed (EAGAIN)" (ResearchZosho, 2026-09-14). */
+    static { HttpSettings.apply(); }   // before the first client: the pool's idle limit is read once, JVM-wide
     private static final HttpClient SHARED_HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private final HttpClient http;
     private final ObjectMapper json = new ObjectMapper();
+    /** Requests sent again because the pooled connection they first went down was dead (tests read it). */
+    static final AtomicLong STALE_RETRIES = new AtomicLong();
+
+    /**
+     * A request that failed because the server had closed the pooled connection while it was idle: nothing of it was answered, so it is
+     * sent once more, on a fresh connection. A request the server took and is slow on (a timeout) is not this, and is never sent twice.
+     */
+    static boolean staleConnection(IOException e) {
+        if (e instanceof HttpTimeoutException) return false;
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t.getClass().getSimpleName().equals("ConnectionExpiredException")) return true;
+            String m = t.getMessage() == null ? "" : t.getMessage();
+            if (m.contains("header parser received no bytes") || m.contains("connection closed locally") || m.contains("Connection reset")
+                    || m.contains("Broken pipe") || m.contains("EOF reached while reading")) return true;
+        }
+        return false;
+    }
+
+    private HttpResponse<String> send(HttpRequest req) throws IOException, InterruptedException {
+        try { return http.send(req, HttpResponse.BodyHandlers.ofString()); }
+        catch (IOException e) {
+            if (!staleConnection(e)) throw e;
+            STALE_RETRIES.incrementAndGet();
+            log.info("the connection to {} had been closed while idle, so the request is sent again on a new one ({})", baseUrl, e.getMessage());
+            return http.send(req, HttpResponse.BodyHandlers.ofString());
+        }
+    }
     // Tolerant reader for SALVAGED tool calls (text-mode recovery, below): the re-emitted JSON can still
     // carry single quotes / unescaped control chars / a trailing comma. Mirrors the loop's parseArgs reader.
     private static final ObjectMapper LENIENT = JsonMapper.builder()
@@ -76,13 +109,23 @@ public final class DriveClient {
         this.bedrock = Bedrock.is(this.baseUrl)
                 ? new Bedrock(Bedrock.settings(this.baseUrl, Config::get, System.getenv())) : null;
         // drive = https://api.anthropic.com: the Claude API in its own format, which has the effort setting and prompt caching
-        this.claude = Claude.is(this.baseUrl) ? new Claude(this.baseUrl, DriveClient::apiKey) : null;
+        final String here = this.baseUrl;
+        this.claude = Claude.is(this.baseUrl) ? new Claude(this.baseUrl, () -> keyFor(here)) : null;
+        // drive = https://api.openai.com: OpenAI's Responses API, the way to its current models (chat completions refuses them tools)
+        this.openai = OpenAI.is(this.baseUrl) ? new OpenAI(this.baseUrl, () -> keyFor(here)) : null;
     }
 
     /** Amazon Bedrock behind this client, or null for every other drive. */
     private final Bedrock bedrock;
     /** The Claude API behind this client, or null for every other drive. */
     private final Claude claude;
+    /** OpenAI's own API behind this client, or null for every other drive. */
+    private final OpenAI openai;
+
+    /** The effort for this client's working replies when a saved model names one; null reads CODEZAIKU_REASONING_EFFORT. */
+    private volatile String effort;
+    /** A saved model's own effort, which wins over the setting. Blank or null: the setting. */
+    public DriveClient effort(String e) { this.effort = e == null || e.isBlank() ? null : e.strip(); return this; }
 
     /**
      * Bearer credential for the endpoint, or null when none is configured.
@@ -96,10 +139,41 @@ public final class DriveClient {
         return (k == null || k.isBlank()) ? null : k.trim();
     }
 
+    /**
+     * The credential for an endpoint: the key kept for its host ({@code codezaiku model key <host> …}, the setting {@code key.<host>})
+     * when there is one, else the one key setting (CODEZAIKU_API_KEY). Null when neither is set.
+     */
+    public static String keyFor(String endpoint) {
+        String host = hostOf(endpoint);
+        if (host != null) { String own = hostKey(host); if (own != null) return own; }
+        return apiKey();
+    }
+
+    /** The key kept for one host, from the setting {@code key.<host>} (dots as in the host name); null when none is kept. */
+    public static String hostKey(String host) {
+        if (host == null || host.isBlank()) return null;
+        String k = Config.get(hostKeySetting(host));
+        return k == null || k.isBlank() ? null : k.trim();
+    }
+
+    /** The setting that keeps a host's key: {@code CODEZAIKU_KEY_OPENROUTER_AI} for openrouter.ai, written as {@code key.openrouter.ai}. */
+    public static String hostKeySetting(String host) { return "CODEZAIKU_KEY_" + host.strip().toLowerCase(Locale.ROOT).replace('.', '_').replace('-', '_').toUpperCase(Locale.ROOT); }
+
+    /** The host of an address, lower case; null for anything that is not one. */
+    public static String hostOf(String url) {
+        if (url == null) return null;
+        try {
+            String h = URI.create(url.strip()).getHost();
+            return h == null ? null : h.toLowerCase(Locale.ROOT);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     /** Apply the credential, if there is one. Every request to the drive goes through here —
      *  including doctor's health probe and endpoint detection, which live outside this package. */
     public static HttpRequest.Builder auth(HttpRequest.Builder b) {
-        return auth(b, apiKey());
+        return auth(b, keyFor(address(b)));
     }
 
     /** The decision itself, separated so it can be exercised without the process environment. */
@@ -168,6 +242,11 @@ public final class DriveClient {
             new AtomicLong();
     /** Of the prompt tokens, those a server with a prompt cache read from it and wrote to it: they are priced differently. */
     public static final AtomicLong SESSION_CACHE_READ_TOKENS = new AtomicLong(), SESSION_CACHE_WRITTEN_TOKENS = new AtomicLong();
+
+    /** The job this thread works for counts its tokens here: {prompt, cached, written, completion}. Per thread, like the usage sink. */
+    private static final ThreadLocal<long[]> COUNT = new ThreadLocal<>();
+    public static void countInto(long[] acc) { if (acc == null) COUNT.remove(); else COUNT.set(acc); }
+    public static void stopCounting() { COUNT.remove(); }
 
     /** Per-request HTTP timeout. Five minutes suits every drive we had — until a 744B with
      *  CPU-resident experts needed 10-20 min per long generation and every call "failed" at
@@ -242,6 +321,8 @@ public final class DriveClient {
         if (bedrock != null) return Bedrock.contextWindow(model, Config.getInt("CODEZAIKU_BEDROCK_CONTEXT", 0));
         // The Claude API lists each model's window. The current models read a million tokens; without a setting 200,000 are used
         if (claude != null) return claude.contextWindow(model, 0);
+        // OpenAI's models list does not say: the standard-price tier
+        if (openai != null) return openai.contextWindow(model);
 
         Integer n = fromLlamaCppProps();
         if (n != null) return n;
@@ -258,6 +339,11 @@ public final class DriveClient {
             return n;
         }
 
+        // A hosted API that does not say (Nebius, Hugging Face's router, DeepSeek): the window the current models have at least
+        if (hostedApi()) {
+            log.info("context window {} assumed for a hosted API that does not report one ({}); set CODEZAIKU_CTX to the model's", HOSTED_CTX, baseUrl);
+            return HOSTED_CTX;
+        }
         // Only degrade when a server ANSWERED but does not serve these endpoints. An unreachable
         // drive must still fail here, immediately and by name.
         //
@@ -288,11 +374,13 @@ public final class DriveClient {
         try {
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/models")))
                     .timeout(Duration.ofSeconds(5)).GET().build();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = send(req);
             if (resp.statusCode() != 200) return null;
-            JsonNode m = json.readTree(resp.body()).path("data").path(0);
+            JsonNode data = json.readTree(resp.body()).path("data");
+            JsonNode m = data.path(0);
+            for (JsonNode x : data) if (x.path("id").asText("").equals(model)) { m = x; break; }   // a hosted list has many models: this one's
             int n = m.path("context_length").asInt(m.path("max_model_len").asInt(0));
-            return n > 0 ? Math.min(n, 131072) : null;
+            return n > 0 ? Math.min(n, hostedApi() ? 1_000_000 : 131072) : null;
         } catch (Exception e) {
             return null;
         }
@@ -302,11 +390,12 @@ public final class DriveClient {
     private boolean reachable() {
         if (bedrock != null) { try { AwsCredentials.get(bedrock.settings().profile()); return true; } catch (RuntimeException e) { return false; } }
         if (claude != null) return claude.answers();
+        if (openai != null) return openai.reachable();
         for (String path : new String[]{"/v1/models", "/"}) {
             try {
                 HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + path)))
                         .timeout(Duration.ofSeconds(8)).GET().build();
-                http.send(req, HttpResponse.BodyHandlers.ofString());
+                send(req);
                 return true;
             } catch (Exception ignored) {
                 // try the next probe
@@ -348,7 +437,7 @@ public final class DriveClient {
     private boolean looksLikeLlamaSwap() {
         try {
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/running"))).timeout(Duration.ofSeconds(10)).GET().build();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = send(req);
             return resp.statusCode() == 200 && resp.body().contains("\"running\"");
         } catch (Exception e) { return false; }
     }
@@ -360,7 +449,7 @@ public final class DriveClient {
             String body = "{\"model\":" + json.writeValueAsString(model) + ",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}";
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions"))).timeout(Duration.ofMinutes(10))
                     .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = send(req);
             boolean ok = resp.statusCode() == 200 && resp.body().contains("\"choices\"");
             log.info("the model server loads {} on demand: a one-token request {} in {} s", model, ok ? "loaded it" : "did not load it (" + resp.statusCode() + ")", (System.currentTimeMillis() - t0) / 1000);
             return ok;
@@ -373,7 +462,7 @@ public final class DriveClient {
     /** {@code default_generation_settings.n_ctx} from a llama.cpp /props page at {@code url}, or null. */
     private Integer propsAt(String url) throws Exception {
         HttpRequest req = auth(HttpRequest.newBuilder(URI.create(url))).timeout(Duration.ofSeconds(10)).GET().build();
-        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> resp = send(req);
         if (resp.statusCode() != 200) return null;
         JsonNode n = json.readTree(resp.body()).path("default_generation_settings").path("n_ctx");
         return n.isInt() ? n.asInt() : null;
@@ -387,7 +476,7 @@ public final class DriveClient {
                     .timeout(Duration.ofSeconds(10))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(body)).build();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = send(req);
             if (resp.statusCode() != 200) return null;
             JsonNode info = json.readTree(resp.body()).path("model_info");
             var fields = info.fields();
@@ -576,7 +665,7 @@ public final class DriveClient {
         // `reasoning_effort` field. llama.cpp hands it to the model's chat template (checked: a value the template does not know
         // comes back as the template's own error) and OpenAI-style hosted APIs read it. On the Claude API it becomes Claude's own
         // effort setting (output_config.effort).
-        String effort = reasoningEffort(Config.get("CODEZAIKU_REASONING_EFFORT"));
+        String effort = reasoningEffort(this.effort != null ? this.effort : Config.get("CODEZAIKU_REASONING_EFFORT"));
         if (effort != null && !noThink && bedrock == null) body.put("reasoning_effort", effort);
         // A limit on the thinking of one reply, for a server that takes one (llama.cpp's thinking_budget_tokens: the thinking
         // is ended at that many tokens and the reply goes on). Sent only when set: a hosted API may refuse a field it does not know.
@@ -599,6 +688,18 @@ public final class DriveClient {
             try { return accept(claude.chat(model, body, driveTimeout(), streamingOn() ? onDelta : null, streamingOn() ? onThink : null), "claude"); }
             catch (Claude.Refused e) { throw new IllegalStateException(e.getMessage(), e); }
         }
+        if (openai != null) {
+            // the Responses API is asked for the whole reply at once
+            log.info("drive → openai {}: {} msgs, max_tokens={}, tools={}, tool_choice={}{}", model, messages.size(), maxTokens, tools == null ? 0 : tools.size(), toolChoice, effort == null ? "" : ", effort " + effort);
+            try { return accept(openai.chat(model, body, driveTimeout()), "openai"); }
+            catch (OpenAI.Refused e) { throw new IllegalStateException(e.getMessage(), e); }
+        }
+        if (hostedApi()) {
+            // a hosted API takes no template field of llama.cpp's, and some fields only where its models list says so
+            hostedShape(body, baseUrl);
+            // OpenRouter routes a request among providers: only one that takes every field sent (the tools) may get it
+            if (openRouter() && tools != null && !tools.isEmpty()) body.putObject("provider").put("require_parameters", true);
+        }
         body.put("stream", streamingOn());
         try {
             String payload = json.writeValueAsString(body);
@@ -614,22 +715,24 @@ public final class DriveClient {
             log.info("drive → {} msgs, {} req-chars, max_tokens={}, tools={}, tool_choice={}",
                     messages.size(), payload.length(), maxTokens,
                     tools == null ? 0 : tools.size(), toolChoice);
-            HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
-                    .timeout(callLimit(maxTokens, payload.length()))
-                    .header("Content-Type", "application/json")
+            HttpRequest req = chatRequest(callLimit(maxTokens, payload.length()))
                     .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
             long sentAt = System.nanoTime();
             // Retry a 5xx: llama.cpp (--jinja) returns HTTP 500 when the MODEL emits a malformed tool call
             // (bad JSON args — an unescaped quote/newline), and that's the model's sampling, not a real
             // server fault. At temp 0.7 a re-send re-samples and usually produces valid JSON. (A single bad
             // tool call must NOT abort the run — the loop also catches, as a backstop.)
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-            for (int attempt = 2; attempt <= 4 && resp.statusCode() >= 500; attempt++) {
+            // A 429 is waited out for as long as retry-after says (a hosted API's rate limit), up to six times.
+            HttpResponse<String> resp = send(req);
+            for (int attempt = 2, waited = 0; (attempt <= 4 && resp.statusCode() >= 500) || (waited < 6 && limited(resp)); attempt++) {
                 String b = resp.body();
-                log.warn("drive HTTP {} (retry {}/4): {}", resp.statusCode(), attempt,
+                long ms = 300L;
+                if (limited(resp)) { waited++; long after = retryAfterSeconds(resp); ms = after > 0 ? Math.min(after, 120) * 1000 : Math.min(5_000L * waited, 60_000); attempt--; }
+                log.warn("drive HTTP {} ({}), waiting {} ms: {}", resp.statusCode(), limited(resp) ? "rate limit, wait " + waited + "/6" : "retry " + attempt + "/4", ms,
                         b.length() > 200 ? b.substring(0, 200) : b);
-                try { Thread.sleep(300L); } catch (InterruptedException ignored) { }
-                resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+                try { Thread.sleep(ms); } catch (InterruptedException ignored) { }
+                sentAt = System.nanoTime();
+                resp = send(req);
             }
             if (resp.statusCode() == 400 && "required".equals(toolChoice) && refusesForcedToolChoice(resp.body())) {
                 // The server will not force a tool call for this model. It said so; from here every request asks with "auto",
@@ -654,6 +757,8 @@ public final class DriveClient {
                 throw new IllegalStateException("drive HTTP " + resp.statusCode() + ": " + resp.body());
             }
             JsonNode parsedBody = json.readTree(resp.body());
+            // OpenRouter answers 200 as soon as a provider takes the request; a provider's failure after that is an error object in the body, with no choices
+            if (parsedBody.path("error").isObject() && !parsedBody.has("choices")) throw new IllegalStateException("drive answered an error: " + parsedBody.path("error").path("message").asText(resp.body()));
             ObjectNode answer = accept(parsedBody, resp.body());
             noteSpeed(parsedBody, System.nanoTime() - sentAt);
             return answer;
@@ -691,6 +796,12 @@ public final class DriveClient {
                 SESSION_CACHE_READ_TOKENS.addAndGet(cacheRead);
                 SESSION_CACHE_WRITTEN_TOKENS.addAndGet(cacheWritten);
                 SESSION_PROMPT_TOKENS.addAndGet(u.path("prompt_tokens").asLong(0));
+                long[] acc = COUNT.get();
+                if (acc != null) {
+                    // an OpenAI-style server says what it read from its cache under prompt_tokens_details
+                    long cached = cacheRead > 0 ? cacheRead : u.path("prompt_tokens_details").path("cached_tokens").asLong(0);
+                    acc[0] += u.path("prompt_tokens").asLong(0); acc[1] += cached; acc[2] += cacheWritten; acc[3] += u.path("completion_tokens").asLong(0);
+                }
                 lastPromptTokens = u.path("prompt_tokens").asInt(0);
                 lastCompletionTokens = u.path("completion_tokens").asInt(0);
                 SESSION_COMPLETION_TOKENS.addAndGet(u.path("completion_tokens").asLong(0));
@@ -702,6 +813,121 @@ public final class DriveClient {
             }
             return (ObjectNode) msg;
         }
+    }
+
+    /** The chat request's builder: the endpoint under the drive's root, the credential, and OpenRouter's own headers. */
+    private HttpRequest.Builder chatRequest(Duration timeout) {
+        HttpRequest.Builder rb = auth(HttpRequest.newBuilder(URI.create(Config.v1(baseUrl) + "/chat/completions")))
+                .timeout(timeout)
+                .header("Content-Type", "application/json");
+        if (openRouter()) rb.header("HTTP-Referer", "https://codezaiku.org").header("X-Title", "CodeZaiku");
+        return rb;
+    }
+
+    /** The window assumed for a hosted API that reports none. */
+    static final int HOSTED_CTX = 128_000;
+    /** A quick ask's output budget on a hosted API: room for the least thinking the model does and the answer after it. */
+    static final int QUICK_FLOOR = 4096;
+
+    /** Whether this drive is OpenRouter, which has its own headers and routing fields. */
+    boolean openRouter() { String h = hostOf(baseUrl); return h != null && h.endsWith("openrouter.ai"); }
+
+    /** Whether this drive is a hosted API on the OpenAI-style path (not Claude's, OpenAI's own or Bedrock, which have clients of their own). */
+    boolean hostedApi() { return hostedApi(baseUrl); }
+
+    /** OpenRouter, Gemini, Nebius, Hugging Face's router, DeepSeek, Mistral, Groq, xAI, Together, Fireworks, Moonshot: metered APIs that speak the OpenAI chat format. */
+    public static boolean hostedApi(String url) {
+        String h = hostOf(url);
+        if (h == null) return false;
+        for (String suffix : new String[]{"openrouter.ai", "googleapis.com", "nebius.com", "huggingface.co", "api.deepseek.com", "api.mistral.ai", "api.groq.com", "api.x.ai",
+                "api.together.xyz", "api.fireworks.ai", "api.moonshot.ai", "api.cerebras.ai", "api.sambanova.ai"})
+            if (h.endsWith(suffix)) return true;
+        return false;
+    }
+
+    /**
+     * The request as a hosted API takes it: llama.cpp's template and thinking-budget fields are dropped (OpenAI-style APIs refuse or
+     * ignore an unknown field), on OpenRouter only the fields the model's endpoints take are sent (its models list says; a request
+     * naming one they do not take is routed to no endpoint) and the effort goes in its own field, and a call marked as needing no
+     * thinking asks instead for little of it, in each API's own word — a reasoning model that thinks through the whole answer budget
+     * gives an empty one-word answer.
+     */
+    public static ObjectNode hostedShape(ObjectNode body, String url) {
+        JsonNode kw = body.remove("chat_template_kwargs");
+        body.remove("thinking_budget_tokens");
+        boolean quick = kw != null && kw.path("enable_thinking").isBoolean() && !kw.path("enable_thinking").asBoolean();
+        String h = hostOf(url);
+        if (h == null) return body;
+        if (quick && templateHost(h)) {
+            // a host that runs vLLM hands the field to the model's own template, whose word for no thinking differs by model (DeepSeek's is
+            // "thinking"): both are said. Without it a decision through Nebius thought through its whole budget and came back cut (2026-10-16).
+            ObjectNode t = body.putObject("chat_template_kwargs"); t.put("enable_thinking", false); t.put("thinking", false);
+        }
+        if (quick && h.endsWith("api.deepseek.com")) body.putObject("thinking").put("type", "disabled");   // DeepSeek's own API has its own field
+        if (h.endsWith("openrouter.ai")) {
+            Set<String> ok = OpenRouterModels.supportedParameters(body.path("model").asText(""));
+            // OpenRouter's word for the effort is reasoning.effort; reasoning_effort is dropped where the model takes neither
+            if (body.has("reasoning_effort")) {
+                String e = body.remove("reasoning_effort").asText("");
+                if ((ok == null || ok.contains("reasoning")) && !e.isBlank()) body.putObject("reasoning").put("effort", e);
+            }
+            if (ok != null) for (String f : new String[]{"temperature", "top_p", "stop", "parallel_tool_calls", "seed", "frequency_penalty", "presence_penalty", "logit_bias", "logprobs", "response_format", "min_p", "top_k", "repetition_penalty"})
+                if (body.has(f) && !ok.contains(f)) body.remove(f);
+        }
+        if (quick) {
+            // the thinking counts against the answer's budget on every hosted API, and a model that will not stop thinking (MiniMax M3 through
+            // OpenRouter, 2026-10-16: a 1,200-token decision all thinking, the answer cut) must still get its answer out
+            if (body.path("max_tokens").asInt(0) < QUICK_FLOOR) body.put("max_tokens", QUICK_FLOOR);
+            if (h.endsWith("openrouter.ai")) {
+                // off where the model allows it (OpenRouter's models list says), else as little as it allows
+                if (OpenRouterModels.reasoningMandatory(body.path("model").asText(""))) body.putObject("reasoning").put("effort", "low");
+                else body.putObject("reasoning").put("enabled", false);
+            }
+            else if (h.endsWith("googleapis.com")) body.put("reasoning_effort", "low");
+        }
+        return body;
+    }
+
+    /** Hosts that run vLLM and hand {@code chat_template_kwargs} to the model's template: Nebius (measured), Hugging Face's router, Together, Fireworks. */
+    static boolean templateHost(String h) {
+        for (String s : new String[]{"nebius.com", "huggingface.co", "api.together.xyz", "api.fireworks.ai"}) if (h.endsWith(s)) return true;
+        return false;
+    }
+
+    /** OpenRouter's models list, read once (no key needed): whether a model's reasoning can be turned off, and which request fields it takes. */
+    static final class OpenRouterModels {
+        record Entry(boolean reasoningMandatory, Set<String> parameters) { }
+        private static volatile Map<String, Entry> entries;
+        /** Tests set this; null reads the list. */
+        static volatile Map<String, Entry> OVERRIDE;
+        private static Map<String, Entry> list() {
+            Map<String, Entry> m = OVERRIDE != null ? OVERRIDE : entries;
+            if (m != null) return m;
+            m = new HashMap<>();
+            try {
+                HttpRequest req = HttpRequest.newBuilder(URI.create("https://openrouter.ai/api/v1/models")).timeout(Duration.ofSeconds(20)).GET().build();
+                HttpResponse<String> r = SHARED_HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+                if (r.statusCode() == 200) for (JsonNode x : new ObjectMapper().readTree(r.body()).path("data")) {
+                    Set<String> p = new HashSet<>();
+                    for (JsonNode q : x.path("supported_parameters")) p.add(q.asText());
+                    m.put(x.path("id").asText(""), new Entry(x.path("reasoning").path("mandatory").asBoolean(false), p));
+                }
+            } catch (Exception e) { log.warn("OpenRouter's models list could not be read ({}); decisions ask for little reasoning rather than none, and every field is sent", e.getMessage()); }
+            entries = m;
+            return m;
+        }
+        /** Unknown: ask for little, which every model takes. */
+        static boolean reasoningMandatory(String model) { Entry e = list().get(model); return e == null || e.reasoningMandatory(); }
+        /** The request fields the model's endpoints take, or null for a model the list does not know. */
+        static Set<String> supportedParameters(String model) { Entry e = list().get(model); return e == null ? null : e.parameters(); }
+    }
+
+    /** A 429: the server's rate limit, to be waited out. */
+    static boolean limited(HttpResponse<String> resp) { return resp.statusCode() == 429; }
+
+    /** The seconds the server asks us to wait, from its retry-after header; 0 when it names none. */
+    static long retryAfterSeconds(HttpResponse<String> resp) {
+        return resp.headers().firstValue("retry-after").map(v -> { try { return Long.parseLong(v.strip()); } catch (NumberFormatException e) { return 0L; } }).orElse(0L);
     }
 
     /**
@@ -728,6 +954,11 @@ public final class DriveClient {
                 return content.isBlank() ? msg.path("reasoning_content").asText("") : content;
             } catch (RuntimeException e) { log.warn("classify() failed against bedrock: {}", e.getMessage()); return ""; }
         }
+        if (openai != null) {
+            try { return accept(openai.chat(model, body, driveTimeout()), "openai").path("content").asText(""); }
+            catch (RuntimeException e) { log.warn("classify() failed against openai: {}", e.getMessage()); return ""; }
+        }
+        if (hostedApi()) hostedShape(body, baseUrl);
         if (claude != null) {
             try {
                 ObjectNode msg = accept(claude.chat(model, body, driveTimeout(), null, null), "claude");
@@ -742,7 +973,7 @@ public final class DriveClient {
                     .timeout(callLimit(maxTokens, payload.length())).header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
             long sentAt = System.nanoTime();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = send(req);
             if (resp.statusCode() != 200) {
                 log.warn("classify HTTP {}: {}", resp.statusCode(),
                         resp.body().length() > 200 ? resp.body().substring(0, 200) : resp.body());
@@ -841,7 +1072,7 @@ public final class DriveClient {
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
                     .timeout(driveTimeout()).header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = send(req);
             if (resp.statusCode() != 200) {
                 log.warn("recovery re-request returned HTTP {} — cannot salvage", resp.statusCode());
                 return null;
@@ -915,9 +1146,7 @@ public final class DriveClient {
         var sink = onDelta;
         if (sink == null) return null;
         try {
-            HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
-                    .timeout(driveTimeout())
-                    .header("Content-Type", "application/json")
+            HttpRequest req = chatRequest(driveTimeout())
                     .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
             HttpResponse<InputStream> resp =
                     http.send(req, HttpResponse.BodyHandlers.ofInputStream());

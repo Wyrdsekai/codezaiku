@@ -8,6 +8,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import org.codezaiku.drive.DriveClient;
+import org.codezaiku.drive.Auto;
+import org.codezaiku.drive.SavedModels;
+import org.codezaiku.drive.Spend;
 import org.codezaiku.library.Library;
 import org.codezaiku.library.LibraryIndex;
 import org.codezaiku.loop.FamiliarLoop;
@@ -27,6 +30,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -81,6 +85,21 @@ public final class ChatRepl {
     private String driveUrl;
     private String model;
     private DriveClient drive;
+    /** The saved model the session runs on, when it was chosen by one; its effort and prices apply. */
+    private SavedModels.Entry entry;
+    /** The tokens since the session started, or since the last /model: what the ledger gets at the switch or the end. */
+    private final long[] chatUsage = new long[4];
+
+    /** The saved model this session starts on (codezaiku chat --model <name>). */
+    public ChatRepl entry(SavedModels.Entry e) { this.entry = e; return this; }
+
+    /** The tokens so far, on the ledger against the model that answered them, and the count begins again. */
+    private void settleSpend() {
+        if (chatUsage[0] + chatUsage[3] == 0) return;
+        SavedModels.Entry e = entry != null ? entry : SavedModels.choose(driveUrl, model).entry();
+        try { Spend.record("chat", root, e, chatUsage.clone(), e.cost(chatUsage)); } catch (IOException ex) { /* the ledger is a convenience, never a reason to stop */ }
+        Arrays.fill(chatUsage, 0);
+    }
     private final int maxTurns;
 
     private final ChatConsent consent;
@@ -200,6 +219,12 @@ public final class ChatRepl {
 
     /** Runs until the person leaves. Returns a process exit code. */
     public int run() throws IOException {
+        DriveClient.countInto(chatUsage);
+        try { return runChat(); }
+        finally { DriveClient.stopCounting(); settleSpend(); }
+    }
+
+    private int runChat() throws IOException {
         // Quiet screen, complete file: the console threshold goes to WARN and everything streams to
         // a per-run file under the session store — /logging changes the screen, never the file.
         logs.init(ChatSession.storeDir(root).resolve("logs"));
@@ -228,7 +253,7 @@ public final class ChatRepl {
                 line -> { if (io != null) io.println("  ! " + line); });
         banner(io);
         try (LibraryIndex index = new LibraryIndex(FamiliarMain.libraryIndexDir())) {
-            drive = new DriveClient(driveUrl, model);
+            drive = new DriveClient(driveUrl, model).effort(entry == null ? null : entry.effort());
             var lsp = LspClient.forProject(root, ProjectFacts.language(root));
             var library = new Library();
             lspRef = lsp; libraryRef = library; indexRef = index; ioRef = io;
@@ -605,7 +630,9 @@ public final class ChatRepl {
                     io.println("    no token usage reported yet (local drives report it too — after the first turn)");
                 } else {
                     io.println(String.format("    this session: %,d prompt + %,d completion = %,d tokens", pt, ct, pt + ct));
-                    io.println("    (a metered drive bills these; the run log's 'usage ←' lines are the per-call record)");
+                    SavedModels.Entry priced = entry != null ? entry : SavedModels.choose(driveUrl, model).entry();
+                    if (priced.prices() != null) io.println("    since this model was chosen: " + Spend.usageLine(chatUsage, priced.cost(chatUsage), true) + " at " + priced.describe() + "'s prices");
+                    else io.println("    (a metered drive bills these; `codezaiku model set <name> --prices in/out` puts a price on them)");
                 }
             }
             case "/tasks" -> {
@@ -756,34 +783,47 @@ public final class ChatRepl {
             }
             case "/model" -> {
                 if (arg.isEmpty()) {
-                    io.println("  drive " + driveUrl + "  model " + model);
-                    var names = Config.keysWithPrefix("CODEZAIKU_MODEL_");
-                    for (String k : names) {
-                        if (!k.endsWith("_URL")) continue;
-                        String nm = k.substring("CODEZAIKU_MODEL_".length(), k.length() - 4)
-                                .toLowerCase(Locale.ROOT);
-                        io.println("    " + nm + "  ->  " + Config.get(k, ""));
-                    }
-                    io.println("  /model <url|saved-name> [modelId]   — switches after a live probe");
+                    io.println("  drive " + driveUrl + "  model " + model + (entry == null || entry.name().isBlank() ? "" : "  (" + entry.name() + ")"));
+                    for (SavedModels.Entry e : SavedModels.all().values()) if (!e.name().equals(SavedModels.DEFAULT)) io.println("    " + e.line());
+                    io.println("  /model <saved name>        — the rest of this session runs on it: its own address, id, effort and prices");
+                    io.println("  /model auto                — best judgement picks among the saved models, and says why");
+                    io.println("  /model <url> [modelId]     — switches after a live probe");
                     break;
                 }
                 String[] parts = arg.split("\\s+");
                 String target = parts[0];
-                // A saved name (codezaiku model add <name> <url>) resolves to its URL.
-                String savedUrl = Config.get(
-                        "CODEZAIKU_MODEL_" + target.toUpperCase(Locale.ROOT) + "_URL");
-                if (savedUrl != null && !savedUrl.isBlank()) target = savedUrl;
+                // A saved model (codezaiku model add <name> …) brings its own address, id, effort and prices
+                if (target.equalsIgnoreCase(Auto.NAME)) {
+                    SavedModels.Choice pick = SavedModels.choose(Auto.Job.of("chat", "B", true, root));
+                    settleSpend();
+                    driveUrl = pick.drive(); model = pick.model(); entry = pick.entry();
+                    drive = new DriveClient(driveUrl, model).effort(entry.effort());
+                    io.println("  " + pick.why());
+                    break;
+                }
+                SavedModels.Entry saved = SavedModels.nameOk(target).isEmpty() ? SavedModels.get(target) : null;
+                if (saved != null) {
+                    String why = Spend.capReached(saved);
+                    if (why != null) { io.println("  " + why); break; }
+                    settleSpend();
+                    driveUrl = saved.drive(); model = saved.model(); entry = saved;
+                    drive = new DriveClient(driveUrl, model).effort(entry.effort());
+                    io.println("  now on " + saved.line());
+                    break;
+                }
                 // Probe BEFORE switching — the same rule as `model use`: a dead endpoint is reported
                 // now, not discovered as a confusing failure in the next turn. And it must answer
                 // /v1/models, not merely accept a TCP connection.
                 String serves = probeModels(target);
                 if (serves == null) {
-                    io.println("  nothing answering /v1/models at " + target + " — not switching");
+                    io.println("  nothing answering /v1/models at " + target + " — not switching" + (target.startsWith("http") ? "" : " (and no saved model has that name: `codezaiku model list`)"));
                     break;
                 }
+                settleSpend();
                 driveUrl = target;
                 if (parts.length > 1) model = parts[1];
-                drive = new DriveClient(driveUrl, model);
+                entry = SavedModels.choose(driveUrl, model).entry();
+                drive = new DriveClient(driveUrl, model).effort(entry.effort());
                 io.println("  drive -> " + driveUrl + (serves.isBlank() ? "" : "  (serving " + serves + ")"));
             }
             case "/undo" -> {

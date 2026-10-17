@@ -1,5 +1,6 @@
 package org.codezaiku;
 
+import org.codezaiku.drive.SavedModels;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -286,9 +287,9 @@ public final class Setup {
             }
         }
         if (base == null) {
-            String typed = ask("   Where is your model server? (an address such as http://localhost:11434 or https://api.openai.com/v1, or leave blank)", "");
+            String typed = ask("   Where is your model server? (an address such as http://localhost:11434, or a host word: anthropic, openai, openrouter, gemini, nebius, huggingface, deepseek; or leave blank)", "");
             if (!typed.isBlank()) {
-                base = typed;
+                base = SavedModels.hostAddress(typed);
                 if (!local(base) && (key == null || key.isBlank())) {
                     String k = ask("   Does it need a key? (paste it, or leave blank)", "");
                     if (!k.isBlank()) key = k;

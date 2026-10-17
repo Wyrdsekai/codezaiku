@@ -21,8 +21,10 @@ public final class ModelClass {
     private ModelClass() { }
 
     /** The frontier families, as the start of a model name after any provider prefix; a trailing dash means "any model of the family". */
-    static final List<String> FRONTIER_FAMILIES = List.of("claude-", "gpt-5", "gpt-4.1", "o3", "o4", "gemini-2.5-pro", "gemini-3", "grok-4",
-            "deepseek-v3", "deepseek-r1", "kimi-k2", "qwen3-max", "glm-5");
+    /** Families whose main line carries a word the small markers would otherwise read as a small variant. */
+    static final List<String> FULL_LINES = List.of("deepseek-v4");
+    static final List<String> FRONTIER_FAMILIES = List.of("claude-", "gpt-6", "gpt-5", "gpt-4.1", "o3", "o4", "gemini-2.5-pro", "gemini-3", "grok-4",
+            "deepseek-v4", "deepseek-v3", "deepseek-r1", "kimi-k3", "kimi-k2", "qwen3-max", "glm-5");
 
     /** The words that mark a family's smaller variants. */
     static final List<String> SMALL_MARKERS = List.of("mini", "nano", "flash", "lite", "small", "tiny", "distill", "haiku");
@@ -45,6 +47,7 @@ public final class ModelClass {
         int slash = m.lastIndexOf('/');
         if (slash >= 0) m = m.substring(slash + 1);            // openai/gpt-5; /m/GLM-5.3-big.gguf
         if (m.endsWith(".gguf")) m = m.substring(0, m.length() - 5);
+        for (String line : FULL_LINES) if (familyIn(m, line)) return true;   // DeepSeek V4's "Flash" is its full model, not a small variant
         for (String marker : SMALL_MARKERS) if (token(m, marker)) return false;
         for (String family : FRONTIER_FAMILIES) if (familyIn(m, family)) return true;
         return false;

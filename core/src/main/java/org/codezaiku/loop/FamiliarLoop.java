@@ -1084,6 +1084,10 @@ public final class FamiliarLoop {
     private int sourcesSinceGap = 0;
     private boolean finalGapChecked = false;
     private int selfVerifyCount = 0;
+    /** Every path the model wrote or edited this run. The self-verify reflection reads these and no other file: the harness judges the
+     *  model's own work, never the project's pre-existing code. Measured 2026-10-16 on the maintenance battery: scanning the whole tree
+     *  flagged the app's own placeholder modules ("for demo purposes") in 116 of 175 runs and sent every model off rewriting them. */
+    private final Set<String> filesTouched = new LinkedHashSet<>();
     private static final int MAX_SELFVERIFY = 3;
     private boolean editedSinceSelfVerify = false;
     // ESCALATION (research-backed #2 lever — route the hard link to a stronger model when retry-self isn't
@@ -2106,15 +2110,15 @@ public final class FamiliarLoop {
                   + "indicate|return(s)? a placeholder|would (do|use|be|call|run) the (actual|real)|in practice");
             // WEAK: stand-in markers; require >=2 distinct to fire (reduces false positives on legit uses).
             String[] weak = {"simulat", "placeholder", "mock", " stub", "dummy", "heuristic", "for now", "hardcod"};
+            // only the files this run wrote or edited: a project's pre-existing placeholders are not the model's doing
             List<Path> srcs = new ArrayList<>();
-            try (Stream<Path> w = Files.walk(projectRoot)) {
-                w.filter(Files::isRegularFile).forEach(p -> {
-                    String rel = projectRoot.relativize(p).toString().toLowerCase();
-                    if (rel.contains("build/") || rel.contains("node_modules/") || rel.contains(".venv/")
-                            || rel.contains("__pycache__/") || rel.contains(".git/") || rel.contains(".cp-checkpoints")
-                            || rel.contains("/data/") || rel.startsWith("data/") || rel.contains("test")) return;
-                    if (p.getFileName().toString().matches(".*\\.(py|js|ts|jsx|tsx|rs|go|java|kt|rb)$")) srcs.add(p);
-                });
+            for (String touched : filesTouched) {
+                Path p;
+                try { p = projectRoot.resolve(touched).normalize(); } catch (Exception e) { continue; }
+                if (!p.startsWith(projectRoot) || !Files.isRegularFile(p)) continue;
+                String rel = projectRoot.relativize(p).toString().toLowerCase();
+                if (rel.contains("test")) continue;
+                if (p.getFileName().toString().matches(".*\\.(py|js|ts|jsx|tsx|rs|go|java|kt|rb)$")) srcs.add(p);
             }
             for (Path p : srcs) {
                 String code;
@@ -3348,6 +3352,7 @@ public final class FamiliarLoop {
                         lastWritePath = wp;
                         unbrokenWrites++;
                         writeChainPaths.add(wp);
+                        filesTouched.add(wp);
                         dirtySinceVerify = true; // edits invalidate prior build/test evidence
                         editedSinceSelfVerify = true; // a changed file warrants another self-verify pass
                         callCounts.clear();

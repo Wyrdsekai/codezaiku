@@ -12,6 +12,7 @@ class ModelClassTest {
     void frontierFamiliesThroughAGatewayOrOnALocalCard() {
         for (String m : new String[]{"claude-opus-5-5", "anthropic/claude-sonnet-5-5", "openai/gpt-5", "gpt-5.1", "gpt-4.1", "o3", "o3-pro", "o4",
                 "google/gemini-2.5-pro", "gemini-3-pro-preview", "x-ai/grok-4-fast", "deepseek/deepseek-v3.2", "deepseek-r1", "moonshotai/kimi-k2-thinking",
+                "gpt-6.1-sol", "openai/gpt-6-luna", "deepseek/deepseek-v4.1-flash", "deepseek-ai/DeepSeek-V4.1-Flash:cheapest", "moonshotai/kimi-k3", "z-ai/glm-5.1",
                 "qwen3-max-2026-01", "glm-5", "/m/GLM-5.3-big-IQ2_M.gguf", "GLM_5.3_big_IQ2_M.gguf"})
             assertTrue(ModelClass.frontierName(m), m);
     }

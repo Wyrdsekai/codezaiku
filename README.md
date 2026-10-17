@@ -147,6 +147,9 @@ codezaiku setup               # the first ten minutes: the model (found, served 
 codezaiku model serve install # this machine's memory, on demand: the measured model, llama.cpp behind a proxy that starts it when asked and stops it after 20 idle minutes (CUDA in Docker on Linux, Metal on macOS, Vulkan on Windows)
 codezaiku model detect        # finds Ollama / llama.cpp / LM Studio / vLLM if running
 codezaiku model use http://localhost:8200
+codezaiku model add deepseek openrouter deepseek/deepseek-v4.1-flash --prices 0.032/0.144/0.002   # a hosted model under a name,
+codezaiku model key openrouter --file ~/openrouter-key.txt                                        # its key kept for its host,
+                              # chosen per job: codezaiku code . "…" --model deepseek; `codezaiku spend` says what the jobs cost
 
 # 3. check the environment — names exactly what is missing and how to fix it
 codezaiku doctor

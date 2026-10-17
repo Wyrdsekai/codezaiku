@@ -1,6 +1,7 @@
 package org.codezaiku.acp;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import org.codezaiku.drive.HttpSettings;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -41,6 +42,7 @@ import java.util.function.Function;
 import org.codezaiku.ModelChoice;
 import org.codezaiku.Models;
 import org.codezaiku.drive.DriveClient;
+import org.codezaiku.drive.SavedModels;
 import org.codezaiku.mcp.McpClient;
 import org.codezaiku.tools.McpBridgeTool;
 import org.codezaiku.tools.Tool;
@@ -104,6 +106,7 @@ public final class AcpServer {
     ObjectNode setConfigOptionForTest(String sessionId, JsonNode params) { return setConfigOption(sessions.get(sessionId), params); }
 
     public static void main(String[] args) throws Exception {
+        HttpSettings.apply();
         PrintStream wire = System.out;
         // Before anything can log or narrate: stdout is the protocol channel from here on.
         System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.err), true, StandardCharsets.UTF_8));
@@ -326,12 +329,12 @@ public final class AcpServer {
         // usage_update after every model call: how much of the context window the session holds. The window is asked
         // of the drive once, on the first call; a drive that will not say gets no update, since a made-up size would
         // draw a wrong meter in the host.
-        final String driveUrl = Config.get("CODEZAIKU_DRIVE", "http://localhost:8200");
-        final String driveModel = s.model;
+        // the session's model may be a saved one, which brings its own address
+        final SavedModels.Choice chosen = SavedModels.choose(Config.get("CODEZAIKU_DRIVE", "http://localhost:8200"), s.model);
         final int[] window = {0};
         DriveClient.USAGE_SINK.set(used -> {
             if (window[0] == 0) {
-                try { window[0] = new DriveClient(driveUrl, driveModel).contextWindow(); } catch (RuntimeException e) { window[0] = -1; }
+                try { window[0] = new DriveClient(chosen.drive(), chosen.model()).contextWindow(); } catch (RuntimeException e) { window[0] = -1; }
             }
             if (window[0] > 0 && used > 0) sessionUpdate(s.id, usageUpdate(used, window[0]));
         });
@@ -373,7 +376,11 @@ public final class AcpServer {
                 .summary(summary)
                 .interrupted(cancelled)
                 .error(failure)
-                .model(Config.get("CODEZAIKU_MODEL", "local-model"))
+                .model(t != null && t.run() != null ? t.run().model() : chosen.model())
+                .savedModel(t != null && t.run() != null ? t.run().name() : null)
+                .host(t != null && t.run() != null ? t.run().host() : null)
+                .usage(t != null && t.run() != null ? t.run().usage() : null)
+                .cost(t != null && t.run() != null && t.run().priced() ? t.run().cost() : null)
                 .verdict(verdict)
                 .build();
 
@@ -409,23 +416,27 @@ public final class AcpServer {
         ObjectNode o = all.addObject();
         o.put("id", "model");
         o.put("name", "Model");
-        o.put("description", "The model on the drive that answers this session.");
+        o.put("description", "The model that answers this session: a saved model by name (its own address, id and prices), or a model on the drive.");
         o.put("category", "model");
         o.put("type", "select");
         o.put("currentValue", s.model);
         var options = o.putArray("options");
-        for (String m : choices(s)) options.addObject().put("value", m).put("name", m);
+        for (String m : choices(s)) {
+            SavedModels.Entry e = SavedModels.nameOk(m).isEmpty() && !m.equals(SavedModels.DEFAULT) ? SavedModels.get(m) : null;
+            options.addObject().put("value", m).put("name", e == null ? m : m + " — " + e.model() + " via " + e.host());
+        }
         return all;
     }
 
     /**
-     * The models a host may pick from: the session's own first, then the drive's models that can hold a conversation.
-     * A drive usually lists its embedding model too ("embed" sorts first), and a picker that offers it lets a person
-     * select a model that answers no prompt at all.
+     * The models a host may pick from: the session's own first, then the saved models by name (each with its own address), then the
+     * drive's models that can hold a conversation. A drive usually lists its embedding model too ("embed" sorts first), and a picker
+     * that offers it lets a person select a model that answers no prompt at all.
      */
     static LinkedHashSet<String> choices(Session s) {
         var out = new LinkedHashSet<String>();
         out.add(s.model);
+        for (String n : SavedModels.names()) if (!n.equals(SavedModels.DEFAULT)) out.add(n);
         for (String m : s.offeredModels) if (!ModelChoice.looksUnableToChat(m)) out.add(m);
         return out;
     }

@@ -127,6 +127,10 @@ public final class ResultDocument {
     private String error;
     private String model;
     private String provider;
+    private String savedModel;
+    private String host;
+    private long[] usage;
+    private Double cost;
     private ProjectTests.Verdict verdict;
 
     public static ResultDocument of(Path workspace, String status) {
@@ -149,6 +153,14 @@ public final class ResultDocument {
     public ResultDocument error(String v) { this.error = v; return this; }
     public ResultDocument model(String v) { this.model = v; return this; }
     public ResultDocument provider(String v) { this.provider = v; return this; }
+    /** The saved model the run used, by name, when it was chosen by one. */
+    public ResultDocument savedModel(String v) { this.savedModel = v == null || v.isBlank() ? null : v; return this; }
+    /** The host the model answered from. */
+    public ResultDocument host(String v) { this.host = v == null || v.isBlank() ? null : v; return this; }
+    /** The run's tokens: prompt, read from the cache, written to it, completion. Null when no server reported any. */
+    public ResultDocument usage(long[] v) { this.usage = v != null && v[0] + v[3] > 0 ? v : null; return this; }
+    /** What the run cost at the saved model's prices; null when none are saved. */
+    public ResultDocument cost(Double v) { this.cost = v; return this; }
 
     /** The test-oracle verdict, which decides {@code status} and fills the counts. */
     public ResultDocument verdict(ProjectTests.Verdict v) { this.verdict = v; return this; }
@@ -192,6 +204,13 @@ public final class ResultDocument {
         if (error != null) d.put("error", error);
         if (model != null) d.put("model", model);
         if (provider != null) d.put("provider", provider);
+        if (savedModel != null) d.put("savedModel", savedModel);
+        if (host != null) d.put("host", host);
+        if (usage != null) {
+            ObjectNode u = d.putObject("usage");
+            u.put("prompt", usage[0]); u.put("cached", usage[1]); u.put("written", usage[2]); u.put("completion", usage[3]);
+        }
+        if (cost != null) d.put("cost", Math.round(cost * 10000) / 10000.0);
         return d;
     }
 }

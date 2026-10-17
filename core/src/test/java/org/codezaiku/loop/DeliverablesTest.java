@@ -34,6 +34,8 @@ class DeliverablesTest {
     @Test
     void theNamesAreFilesNotPlaceholdersKeysOrLicences() {
         assertEquals(List.of("data/pitches.jsonl", "measure.py", "evaluate.py", "RESULTS.md", "requirements.txt"), Deliverables.named(BRIEF));
+        assertEquals(List.of("latest.csv"), Deliverables.named("a name such as `..%2F..%2Fapp%2Fconfig.py` returns the source; `latest.csv` must still be served"),
+                "a percent-escape is not a file name");
     }
 
     @Test

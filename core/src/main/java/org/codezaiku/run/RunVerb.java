@@ -1,6 +1,7 @@
 package org.codezaiku.run;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.codezaiku.drive.HttpSettings;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -52,6 +53,7 @@ public final class RunVerb {
     private static final AtomicBoolean EMITTED = new AtomicBoolean(false);
 
     public static void main(String[] args) {
+        HttpSettings.apply();
         Args a;
         try {
             a = Args.parse(args);
@@ -168,8 +170,12 @@ public final class RunVerb {
                     .summary(t == null ? null : t.result().summary())
                     .interrupted(interrupted)
                     .error(error)
-                    .model(a.model == null ? Config.get("CODEZAIKU_MODEL", "local-model") : a.model)
+                    .model(t != null && t.run() != null ? t.run().model() : a.model == null ? Config.get("CODEZAIKU_MODEL", "local-model") : a.model)
                     .provider(a.provider)
+                    .savedModel(t != null && t.run() != null ? t.run().name() : null)
+                    .host(t != null && t.run() != null ? t.run().host() : null)
+                    .usage(t != null && t.run() != null ? t.run().usage() : null)
+                    .cost(t != null && t.run() != null && t.run().priced() ? t.run().cost() : null)
                     .verdict(verdict)
                     .build();
         }

@@ -1,10 +1,14 @@
 package org.codezaiku;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.codezaiku.drive.HttpSettings;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.codezaiku.acp.AcpServer;
 import org.codezaiku.drive.DriveClient;
+import org.codezaiku.drive.Auto;
+import org.codezaiku.drive.SavedModels;
+import org.codezaiku.drive.Spend;
 import org.codezaiku.gate.Gate;
 import org.codezaiku.gate.GateResult;
 import org.codezaiku.gate.GateLoader;
@@ -127,7 +131,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.12";
+    public static final String VERSION = "0.3.13";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -147,7 +151,19 @@ public final class FamiliarMain {
     }
 
     public static void main(String[] args) {
+        HttpSettings.apply();
         quietenThirdPartyStartupNoise();
+        // --model <saved name|model id>: the model for this job, for the verbs that take one (code, loop, review, research, chat).
+        // `run` reads its own flags, and `model set` has a --model of its own.
+        String modelFlag = null;
+        if (args.length >= 1 && !args[0].equals("run") && !args[0].equals("model")) {
+            try {
+                modelFlag = flag(args, "--model", null);
+                String wait = flag(args, "--wait", null);   // --wait <minutes>: how long the person will wait for this job (0 = any); best judgement reads it
+                if (wait != null) { waitFlag = Double.parseDouble(wait); args = withoutFlag(args, "--wait"); }
+            } catch (IllegalArgumentException e) { System.err.println("codezaiku: " + e.getMessage()); System.exit(2); }
+            if (modelFlag != null) args = withoutFlag(args, "--model");
+        }
         // `--version` is how a host harness health-checks an installed CLI before dispatching work
         // to it — backend adapters run `<exe> --version` and mark the backend unavailable
         // if it fails. We answered "unknown command", so CodeZaiku would have been skipped before it
@@ -175,6 +191,11 @@ public final class FamiliarMain {
         }
         if (args.length >= 1 && args[0].equals("model")) {
             System.exit(Models.command(Arrays.copyOfRange(args, 1, args.length)));
+        }
+        if (args.length >= 1 && args[0].equals("spend")) {
+            // what the jobs cost, from the ledger every job adds a line to
+            System.out.println(Spend.report());
+            return;
         }
         if (args.length >= 1 && args[0].equals("config")) {
             System.exit(configCommand(Arrays.copyOfRange(args, 1, args.length)));
@@ -353,9 +374,10 @@ public final class FamiliarMain {
             if (turns <= 0) turns = 1_000_000;   // "unlimited": far past any real conversation,
                                                  // small enough that + epilogue cannot overflow
             try {
+                SavedModels.Choice onModel = chosenOrExit(flag(args, "--drive", DEFAULT_DRIVE), modelFlag, Auto.Job.of("chat", "B", true, root));
                 System.exit(new ChatRepl(
-                        root, flag(args, "--drive", DEFAULT_DRIVE), MODEL, mode, turns,
-                        flag(args, "--from", null)).run());
+                        root, onModel.drive(), onModel.model(), mode, turns,
+                        flag(args, "--from", null)).entry(onModel.entry()).run());
             } catch (IOException e) {
                 System.err.println("chat: could not open a terminal: " + e.getMessage());
                 System.exit(1);
@@ -459,7 +481,7 @@ public final class FamiliarMain {
             String baseUrl = driveArg(args, 3);
             int maxTurns = args.length >= 5 ? Integer.parseInt(args[4]) : 40;
             String gateName = args.length >= 6 ? args[5] : "none";
-            loop(root, goal, baseUrl, maxTurns, gateName);
+            loop(root, goal, baseUrl, maxTurns, gateName, modelFlag);
             return;
         }
         if (args.length >= 3 && args[0].equals("decompose")) {
@@ -468,7 +490,7 @@ public final class FamiliarMain {
             String baseUrl = driveArg(args, 3);
             int maxTurnsPerSub = args.length >= 5 ? Integer.parseInt(args[4]) : 20;
             String gateName = args.length >= 6 ? args[5] : "none";
-            decompose(root, goal, baseUrl, maxTurnsPerSub, gateName);
+            decompose(root, goal, baseUrl, maxTurnsPerSub, gateName, modelFlag);
             return;
         }
         if (args.length >= 3 && args[0].equals("ops")) {
@@ -534,7 +556,8 @@ public final class FamiliarMain {
             String scopeSpec = (args.length >= 3 && !args[2].isBlank()) ? args[2] : null;
             String baseUrl = driveArg(args, 3);
             int maxTurns = args.length >= 5 ? Integer.parseInt(args[4]) : 30;
-            String summary = review(root, scopeSpec, baseUrl, maxTurns).summary();
+            chosenOrExit(baseUrl, modelFlag);
+            String summary = review(root, scopeSpec, baseUrl, maxTurns, modelFlag).summary();
             System.out.println("\n=== REVIEW ===\n" + anchorReview(root, scopeSpec, summary));
             writeSarif(lastReviewFindings);
             System.exit(0);
@@ -557,7 +580,8 @@ public final class FamiliarMain {
             if ("fan".equalsIgnoreCase(mode)) {
                 System.out.println("\n=== RESEARCH ===\n" + researchFan(question, baseUrl, maxTurns).summary());
             } else {
-                FamiliarLoop.Result res = research(question, mode, baseUrl, maxTurns);
+                chosenOrExit(baseUrl, modelFlag);
+                FamiliarLoop.Result res = research(question, mode, baseUrl, maxTurns, modelFlag);
                 System.out.println("\n=== RESEARCH ===\n" + res.summary());
             }
             System.exit(0);
@@ -917,7 +941,8 @@ public final class FamiliarMain {
                 --mode artifact                 the deliverable is ONE file: write it and stop.
                                                 Without it the harness drives toward passing tests,
                                                 so a one-file task grows a test suite to satisfy them
-                --model <m> / --provider <p>    per-invocation model; provider is recorded only
+                --model <saved name|id>         the model for this run: a saved model (its own address,
+                                                id and prices) or an id on the drive; --provider is recorded only
                 -q                              silence narration entirely
                 --text @FILE  (or -)            read the task from a file (or stdin). Windows needs
                                                 this for a task over ~8K: cmd.exe refuses a longer
@@ -928,7 +953,11 @@ public final class FamiliarMain {
             SETUP
               init [--force]                    write a starter config to ~/.codezaiku/config
               config list|get|set|unset|edit    read and change settings
-              model detect|list|add|use         find and switch model servers
+              model detect|list|add|set|use|remove|key|test|auto|private
+                                                the saved models: addresses, ids, prices per million tokens,
+                                                monthly caps, tiers, a key kept per host; what auto would pick;
+                                                a project marked private (local models only)
+              spend                             what the jobs cost, by host and by saved model
               model serve install|status|stop|uninstall|check
                                                 a model server on this machine, on demand (the row for your card)
               smoke [drive]                     check the model server answers
@@ -942,6 +971,9 @@ public final class FamiliarMain {
               library-search <query> | kp-index | crate-index | error-query | dep-source
                                                 the knowledge library
 
+            Every job that drives a model takes --model <saved name|model id|auto>: code, loop, decompose, review, research, chat, run.
+            With a second model saved, auto is the default: best judgement picks by tier, wait and price, and says why.
+            --wait <minutes> says how long you will wait for this job (0 = as long as it takes); auto.wait_minutes is the setting.
             Configuration is by environment variable; see docs/CONFIGURATION.md.
             """.formatted(DEFAULT_DRIVE));
     }
@@ -970,8 +1002,12 @@ public final class FamiliarMain {
      * gracefully when the index is absent (LibraryIndex.available()==false → no-op reader; reads are
      * lock-free, so always-on is safe under concurrent runs).
      */
-    private static void decompose(Path root, String goal, String baseUrl, int maxTurns, String gateName) {
-        var drive = new DriveClient(baseUrl, MODEL);
+    private static void decompose(Path root, String goal, String baseUrl, int maxTurns, String gateName, String model) {
+        SavedModels.Choice chosenModel = chosenOrExit(baseUrl, model, Auto.Job.of("decompose", Auto.tierForCoding(goal, false), true, root));
+        System.out.println("model: " + chosenModel.entry().describe());
+        var drive = new DriveClient(chosenModel.drive(), chosenModel.model()).effort(chosenModel.entry().effort());
+        long[] usage = new long[4];
+        DriveClient.countInto(usage);
         LibraryIndex index = new LibraryIndex(libraryIndexDir());
         Library library = new Library();
         System.out.println("decompose: library ON"
@@ -984,11 +1020,15 @@ public final class FamiliarMain {
         // Shared language-server client: per-edit diagnostics + edit_file symbol-span fallback + replace_symbol.
         var lsp = LspClient.forProject(root, ProjectFacts.language(root));
         var tools = ToolRegistry.standard(root, lsp);
-        var result = new FamiliarLoop(drive, tools, root, goal, maxTurns, library, index)
-                .lsp(lsp)
-                .run();
+        FamiliarLoop.Result result;
+        try {
+            result = new FamiliarLoop(drive, tools, root, goal, maxTurns, library, index)
+                    .lsp(lsp)
+                    .run();
+        } finally { DriveClient.stopCounting(); }
         System.out.println("\n=== LOOP " + (result.done() ? "task_done" : "ended")
                 + " after " + result.turns() + " turns ===\n" + result.summary());
+        System.out.println(settle("decompose", root, chosenModel, usage).line());
         System.out.println("(read the code at " + root + " to judge quality)");
         try { index.close(); } catch (Exception ignored) { }
     }
@@ -2247,12 +2287,71 @@ public final class FamiliarMain {
         System.exit(r.pass() ? 0 : 1);
     }
 
-    private static void loop(Path root, String goal, String baseUrl, int maxTurns, String gateName) {
-        FamiliarLoop.Result result = runLoop(root, goal, baseUrl, maxTurns, gateName);
+    private static void loop(Path root, String goal, String baseUrl, int maxTurns, String gateName, String model) {
+        chosenOrExit(baseUrl, model, Auto.Job.of("code", Auto.tierForCoding(goal, false), true, root));
+        Tracked t = runLoopTracked(root, goal, baseUrl, maxTurns, gateName, null, model);
+        FamiliarLoop.Result result = t.result();
         System.out.println("\n=== LOOP " + (result.done() ? "task_done" : "STOPPED")
                 + " after " + result.turns() + " turns ===");
         System.out.println(result.summary());
+        if (t.run() != null) System.out.println(t.run().line());
         System.exit(result.done() ? 0 : 1);
+    }
+
+    /**
+     * The model for a job: a saved model by name (its own address, id, effort and prices), else a model id on the drive. A saved
+     * model whose monthly cap is reached refuses the job before it starts, with the figures.
+     */
+    static SavedModels.Choice chosen(String driveArg, String model) { return chosen(driveArg, model, Auto.Job.of("code", "B", true, null)); }
+
+    /**
+     * {@code model} "auto", or nothing named while auto is the default (the setting on and a second model saved): best judgement
+     * picks for the job and says why. A named model is taken as it is; the settings' drive when auto is off.
+     */
+    static SavedModels.Choice chosen(String driveArg, String model, Auto.Job job) {
+        boolean auto = model != null && model.strip().equalsIgnoreCase(Auto.NAME);
+        boolean settingsDrive = driveArg == null || driveArg.isBlank() || Config.driveBase(driveArg).equalsIgnoreCase(Config.driveBase(Config.get("CODEZAIKU_DRIVE", "http://localhost:8200")));
+        if (auto || ((model == null || model.isBlank()) && settingsDrive && Auto.isDefault())) {
+            SavedModels.Choice c = SavedModels.choose(job.waiting(waitMinutes()));
+            System.out.println(c.why());
+            return c;
+        }
+        SavedModels.Choice c = SavedModels.choose(driveArg, model);
+        String why = Spend.capReached(c.entry());
+        if (why != null) throw new IllegalStateException(why);
+        return c;
+    }
+
+    /** The wait a person accepts for a job somebody is waiting for: --wait <minutes> (0 = any), else the setting (5). */
+    private static volatile double waitFlag = -1;
+    static double waitMinutes() { return waitFlag >= 0 ? waitFlag : Config.getInt("CODEZAIKU_AUTO_WAIT_MINUTES", 5); }
+
+    /** The same for the command line: the refusal is printed, and the command ends. */
+    static SavedModels.Choice chosenOrExit(String driveArg, String model) { return chosenOrExit(driveArg, model, Auto.Job.of("code", "B", true, null)); }
+
+    static SavedModels.Choice chosenOrExit(String driveArg, String model, Auto.Job job) {
+        try { return chosen(driveArg, model, job); }
+        catch (IllegalStateException e) { System.err.println(e.getMessage()); System.exit(3); return null; }
+    }
+
+    /** The job's tokens and cost on the ledger, and the line a person reads about them. */
+    static ModelRun settle(String kind, Path where, SavedModels.Choice c, long[] usage) { return settle(kind, where, c, usage, 0, null); }
+
+    static ModelRun settle(String kind, Path where, SavedModels.Choice c, long[] usage, long secs, String status) {
+        double cost = c.entry().cost(usage);
+        ModelRun run = new ModelRun(c.entry().name() == null ? "" : c.entry().name(), c.model(), c.entry().host(), usage, cost, c.entry().prices() != null);
+        if (usage[0] + usage[3] > 0) {
+            try { Spend.record(kind, where, c.entry(), usage, cost, secs, status); }
+            catch (IOException e) { System.err.println("the spend ledger could not be written: " + e.getMessage()); }
+        }
+        return run;
+    }
+
+    /** The command line's args without one flag and its value. */
+    static String[] withoutFlag(String[] args, String name) {
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < args.length; i++) { if (args[i].equals(name)) { i++; continue; } out.add(args[i]); }
+        return out.toArray(new String[0]);
     }
 
     /** The coding-familiar loop, returnable (no System.exit, no printing of the banner) — used by the CLI
@@ -2274,7 +2373,14 @@ public final class FamiliarMain {
      * unscoped shell command that could modify files also ran, in which case the list is a lower bound
      * and the caller should reconcile against git rather than present it as the whole set.
      */
-    public record Tracked(FamiliarLoop.Result result, List<String> files, boolean filesComplete) { }
+    public record Tracked(FamiliarLoop.Result result, List<String> files, boolean filesComplete, ModelRun run) {
+        public Tracked(FamiliarLoop.Result result, List<String> files, boolean filesComplete) { this(result, files, filesComplete, null); }
+    }
+
+    /** What a job ran on and what it cost: the saved model's name (blank when none), the model id, the host, the tokens, the dollars. */
+    public record ModelRun(String name, String model, String host, long[] usage, double cost, boolean priced) {
+        public String line() { return "model: " + (name.isBlank() ? model + " via " + host : name + " (" + model + " via " + host + ")") + " — " + Spend.usageLine(usage, cost, priced); }
+    }
 
     /** As {@link #runLoop}, also returning which files the run wrote. */
     public static Tracked runLoopTracked(Path root, String goal, String baseUrl, int maxTurns,
@@ -2321,7 +2427,12 @@ public final class FamiliarMain {
         String conventions = ProjectConventions.promptBlock(root);
         if (!conventions.isEmpty()) System.out.println("project conventions: loaded");
         goal = mode.preamble() + "\n\n" + conventions + "TASK:\n" + goal;
-        var drive = new DriveClient(baseUrl, model == null || model.isBlank() ? MODEL : model);
+        SavedModels.Choice chosenModel = chosen(baseUrl, model, Auto.Job.of("code", Auto.tierForCoding(goal, mode == CodeMode.CREATE), true, root));
+        System.out.println("model: " + chosenModel.entry().describe());
+        var drive = new DriveClient(chosenModel.drive(), chosenModel.model()).effort(chosenModel.entry().effort());
+        long[] usage = new long[4];
+        long startedAt = System.currentTimeMillis();
+        DriveClient.countInto(usage);
         var lsp = LspClient.forProject(root, ProjectFacts.language(root));
         var tools = ToolRegistry.standard(root, lsp); // no gate; lsp powers edit_file fallback + replace_symbol
         if (hooks != null && hooks.listener() != null) tools.listener(hooks.listener());
@@ -2329,6 +2440,7 @@ public final class FamiliarMain {
         if (hooks != null && hooks.extraTools() != null) for (var extra : hooks.extraTools()) tools.add(extra);
         BooleanSupplier cancel = hooks == null ? null : hooks.cancelled();
         FamiliarLoop.Result result;
+        try {
         // LIBRARY A/B (CODEZAIKU_LIB_OFF=1): OFF arm passes null library+index -> no idioms, no error-grounding
         // injection, no worked-examples. ProjectShape (project-shape snapshot) stays ON either way (always-on).
         if ("1".equals(Config.get("CODEZAIKU_LIB_OFF")) || "off".equalsIgnoreCase(Config.get("CODEZAIKU_LIB_OFF"))) {
@@ -2344,15 +2456,30 @@ public final class FamiliarMain {
                         .lsp(lsp).cancelIf(cancel).run();
             }
         }
+        } finally { DriveClient.stopCounting(); }
         var scope = tools.scope();
+        ModelRun run = settle("code", root, chosenModel, usage, (System.currentTimeMillis() - startedAt) / 1000, result.done() ? "success" : "incomplete");
+        System.out.println(run.line());
         return new Tracked(result,
                 scope == null ? List.of() : scope.written(),
-                scope != null && !scope.mayBeIncomplete());
+                scope != null && !scope.mayBeIncomplete(), run);
     }
 
     /** Read-only code REVIEW → structured findings (no edits). Reuses the familiar's navigation with the
      *  read-only tool surface. {@code scopeSpec} = null/blank for the whole tree, a git ref/range, or {@code @path} to a unified diff on disk. */
-    public static FamiliarLoop.Result review(Path root, String scopeSpec, String baseUrl, int maxTurns) {
+    public static FamiliarLoop.Result review(Path root, String scopeSpec, String baseUrl, int maxTurns) { return review(root, scopeSpec, baseUrl, maxTurns, null); }
+
+    /** {@code model}: a saved model's name, or a model id on the drive; null for the settings. The review's tokens go on the ledger. */
+    public static FamiliarLoop.Result review(Path root, String scopeSpec, String baseUrl, int maxTurns, String model) {
+        SavedModels.Choice c = chosen(baseUrl, model, Auto.Job.of("review", "B", true, root));
+        long[] usage = new long[4];
+        long startedAt = System.currentTimeMillis();
+        DriveClient.countInto(usage);
+        try { return reviewWith(root, scopeSpec, new DriveClient(c.drive(), c.model()).effort(c.entry().effort()), maxTurns); }
+        finally { DriveClient.stopCounting(); System.out.println(settle("review", root, c, usage, (System.currentTimeMillis() - startedAt) / 1000, "done").line()); }
+    }
+
+    static FamiliarLoop.Result reviewWith(Path root, String scopeSpec, DriveClient drive, int maxTurns) {
         // HAND THE MODEL THE DIFF — do not ask it to go and fetch one. Measured: asked to review
         // "the changes in `git diff HEAD~2`", the 9B ran `git status --short`, saw a clean tree, and
         // concluded "no changes to review" — it never ran git diff at all, then wandered for 30 turns.
@@ -2393,7 +2520,7 @@ public final class FamiliarMain {
                 + "task_done saying so without reporting any finding. Do NOT edit anything."
                 + evidence;
         System.out.println("review: " + root + (scopeSpec == null ? "" : " @ " + scopeSpec));
-        var drive = new DriveClient(baseUrl, MODEL);
+
         var lsp = LspClient.forProject(root, ProjectFacts.language(root));
         PathScope scope = new PathScope(root);
         var reporter = new ReportFindingTool(diff, f -> readWithinProject(scope, f));
@@ -2429,7 +2556,7 @@ public final class FamiliarMain {
         if (bundles.size() > 1) {
             System.out.println("review: change is " + diff.length() / 1000 + "k — splitting into "
                     + bundles.size() + " bundles so none of it is truncated");
-            return reviewBundles(root, scopeSpec, baseUrl, maxTurns, bundles, passes, drive, lsp, scope);
+            return reviewBundles(root, scopeSpec, maxTurns, bundles, passes, drive, lsp, scope);
         }
         try (var index = new LibraryIndex(libraryIndexDir())) {
             List<List<ReviewReport.Finding>> collected = new ArrayList<>();
@@ -2465,7 +2592,7 @@ public final class FamiliarMain {
      * a file appears in both.
      */
     private static FamiliarLoop.Result reviewBundles(
-            Path root, String scopeSpec, String baseUrl, int maxTurns,
+            Path root, String scopeSpec, int maxTurns,
             List<DiffBundler.Bundle> bundles, int passes,
             DriveClient drive, LspClient lsp, PathScope scope) {
         List<List<ReviewReport.Finding>> collected = new ArrayList<>();
@@ -2771,8 +2898,17 @@ public final class FamiliarMain {
         return sb.toString();
     }
 
-    public static FamiliarLoop.Result research(String question, String mode, String baseUrl, int maxTurns) {
-        return research(question, mode, new DriveClient(baseUrl, MODEL), maxTurns, System.out, Path.of(System.getProperty("user.dir")));
+    public static FamiliarLoop.Result research(String question, String mode, String baseUrl, int maxTurns) { return research(question, mode, baseUrl, maxTurns, null); }
+
+    /** {@code model}: a saved model's name, or a model id on the drive; null for the settings. The run's tokens go on the ledger. */
+    public static FamiliarLoop.Result research(String question, String mode, String baseUrl, int maxTurns, String model) {
+        Path cwd = Path.of(System.getProperty("user.dir"));
+        SavedModels.Choice c = chosen(baseUrl, model, Auto.Job.of("research", "A", true, cwd));
+        long[] usage = new long[4];
+        long startedAt = System.currentTimeMillis();
+        DriveClient.countInto(usage);
+        try { return research(question, mode, new DriveClient(c.drive(), c.model()).effort(c.entry().effort()), maxTurns, System.out, cwd); }
+        finally { DriveClient.stopCounting(); System.out.println(settle("research", cwd, c, usage, (System.currentTimeMillis() - startedAt) / 1000, "done").line()); }
     }
 
     /**

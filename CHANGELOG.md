@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.13
+
+You can now keep several models, on your own card or from a service, pick one for each coding job or let
+CodeZaiku choose, and see what each job cost. MODELS.md says which models did best in our tests, local ones
+first.
+
+### Added
+
+- **Several models, by name.** `codezaiku model add <name> …` keeps a model with its address, its prices and, if you like, a
+  monthly spending limit. `codezaiku code <project> "…" --model <name>` runs one job on it; the chat, the MCP tools, ACP and
+  `run` take the same choice.
+- **Let CodeZaiku choose.** `--model auto` picks the model for the job and says why: the cheapest one that is good enough and,
+  when you are waiting, quick enough. A free local model wins whenever it qualifies. Once two models are saved, this is what
+  happens when you name none. A project marked private is read by local models only.
+- **What a job cost.** Every job reports its model and what it cost. `codezaiku spend` adds it up by month. A job that would go
+  past a model's monthly limit does not start.
+- **A key per service.** `codezaiku model key openrouter --file <file>` keeps a key for one service, and it goes to that service
+  and nowhere else.
+- **OpenAI directly, and the other services.** Type `openai` in setup with your key. OpenRouter, Gemini, Nebius, Hugging Face
+  and DeepSeek work with a key, and a busy service is waited for.
+- **Which model, measured.** MODELS.md lists the models we tried on two sets of coding tasks, with what each passed, how long a
+  job took and what it cost, at the prices of 16 and 17 October 2026. "Let CodeZaiku choose" starts from those results.
+
+### Fixed
+
+- The check that a run has not faked its core now reads only the files the run wrote. It used to flag the project's own code
+  and send the model off to rewrite it.
+- A declared `pytest` check runs the project's own tests even when a package of the same name is installed elsewhere.
+- The research pass before a coding task no longer runs for the newest frontier models, which do not need it.
+- A percent-escaped path in a task is no longer read as a file the task names.
+
 ## 0.3.12
 
 ### Added

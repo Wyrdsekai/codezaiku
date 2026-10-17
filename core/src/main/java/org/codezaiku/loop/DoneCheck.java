@@ -54,6 +54,18 @@ final class DoneCheck {
     /** The command that does the check's slow step once and stores its results; null when none is declared. */
     final String prepare;
 
+    /**
+     * A bare test runner is run through the interpreter, so the project's own package imports from the working folder as it does when
+     * the model runs the tests: {@code pytest -q} becomes {@code python -m pytest -q}. Bare {@code pytest} does not put the working
+     * folder on the path, and when an {@code app} package was installed elsewhere in the environment the check imported that one and
+     * failed to collect, so a finished run was judged red and an earlier version put back (measured 2026-10-16, 22 runs).
+     */
+    static String portable(String command) {
+        Matcher m = Pattern.compile("^((?:timeout\\s+\\S+\\s+)?)(?:pytest|py\\.test)(\\s.*|$)").matcher(command);
+        if (!m.matches()) return command;
+        return m.group(1) + "\"$(command -v python3 || command -v python)\" -m pytest" + m.group(2);
+    }
+
     private DoneCheck(String command, List<Condition> conditions, String prepare) {
         this.command = command;
         this.conditions = conditions;
@@ -80,7 +92,7 @@ final class DoneCheck {
         if (end > 0) block = block.substring(0, end);
         Matcher r = RUN.matcher(block);
         if (!r.find()) return null;
-        String command = r.group(1).replaceAll("^`|`$", "").strip();
+        String command = portable(r.group(1).replaceAll("^`|`$", "").strip());
         if (command.isEmpty() || command.equalsIgnoreCase("none") || command.equalsIgnoreCase("n/a")) return null;
         List<Condition> conditions = new ArrayList<>();
         Matcher p = PASS.matcher(block);

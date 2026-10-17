@@ -199,11 +199,22 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 | `CODEZAIKU_CHECK_TIMEOUT_SEC` | How long the harness's own run of a task's declared check may take, in seconds (default 3600). It runs in the background. |
 | `CODEZAIKU_REASONING_EFFORT` | How hard a thinking model thinks before each working reply, sent as `reasoning_effort`: the levels are the model's own (Qwen3.8: `low`, `medium`, `xhigh`; OpenAI-style APIs: `low`, `medium`, `high`). llama.cpp passes it to the model's chat template. Unset: the server's default. On the Claude API it is Claude's own effort setting: `low`, `medium`, `high`, `xhigh`, `max`. |
 | `CODEZAIKU_THINKING_BUDGET` | The most tokens a model may think before each reply, for a server that takes such a limit (llama.cpp's `thinking_budget_tokens`). The thinking ends there and the reply goes on. Unset: no limit. |
+| `model.<name>.url` / `.id` / `.prices` / `.effort` / `.cap` / `.note` | A saved model (0.3.13), written by `codezaiku model add <name> <address> [<id>] [--prices in/out[/cache]] [--effort e] [--cap dollars] [--note text]` and chosen per job with `--model <name>`. `url` is the address (a host word becomes one), `id` the model id the server selects by, `prices` dollars per million tokens, `effort` the model's own level, `cap` dollars a month after which a job on it is refused. The drive and model settings are the saved model called `default`. |
+| `auto` / `auto.wait_minutes` / `auto.max_dollars` / `auto.local_only` | Best judgement (0.3.13). `auto` is on by default: with a second model saved, a job that names no model is given to the saved model that clears its tier and the wait at the lowest price, and the pick is printed with its reasoning. `auto.wait_minutes` (5) is the wait accepted for a job somebody is waiting for; `auto.max_dollars` caps a job's estimated cost; `auto.local_only` keeps every job on local models. A project with the file `.codezaiku/private` in it (`codezaiku model private <dir> on`) is read by local models only. `model.<name>.tier` (A, B, C) overrides the measured default for the model's family. |
+| `key.<host>` | The key for one host, written by `codezaiku model key <host> …` (`key.openrouter.ai`, `key.api.anthropic.com`): sent to that host and to no other. A host with no key of its own gets `CODEZAIKU_API_KEY`. |
 | `CODEZAIKU_CTX` | Force the context window when a server does not report one (`/v1/models` `context_length` is read automatically). On the Claude API the default is the model's own window, and at most 200,000 tokens. |
 
 A hosted drive is just `CODEZAIKU_DRIVE=https://api.anthropic.com` (no path) plus
 `CODEZAIKU_MODEL` and `CODEZAIKU_API_KEY`. Per-response token usage is logged (`usage ←` lines;
-`/cost` in chat totals them), and a failing endpoint stops the run after 8 consecutive errors.
+`/cost` in chat totals them), and a failing endpoint stops the run after 8 consecutive errors. Since 0.3.13 a hosted model is
+better kept as a saved model (`codezaiku model add …`, the rows `model.<name>.*` above) with its key kept for its host
+(`key.<host>`), and chosen per job with `--model <name>`; `codezaiku spend` says what the jobs cost. See
+[MODELS.md](MODELS.md), "Saved models, chosen per job".
+
+**OpenAI's own API.** `CODEZAIKU_DRIVE=https://api.openai.com` (or the host word `openai` in `codezaiku model add`) is spoken to
+through the Responses API, since its current models refuse tools on the chat-completions endpoint. `CODEZAIKU_REASONING_EFFORT`
+(or the saved model's `effort`) is the depth of reasoning (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; each model takes
+some of these); the context window is `CODEZAIKU_CTX` or 272,000 tokens, the standard-price tier.
 
 **The Claude API.** `CODEZAIKU_DRIVE=https://api.anthropic.com` is spoken to in Claude's own format (the Messages API), with
 the key in `CODEZAIKU_API_KEY` (`codezaiku config set api.key <your key>`) and a model such as `claude-opus-5-5` in

@@ -53,6 +53,15 @@ public final class Config {
      * came back 404. The pasted forms are accepted: a trailing {@code /v1}, {@code /v1/chat/completions} or
      * {@code /v1/models}, and trailing slashes. Anything that is not an http address ("off") is left as it is.
      */
+    /**
+     * The root the OpenAI-style endpoints hang off: the drive base with {@code /v1} added, except where the base already names the
+     * API's own root, as Gemini's does ({@code https://generativelanguage.googleapis.com/v1beta/openai}, which has no {@code /v1}).
+     */
+    public static String v1(String base) {
+        String b = base == null ? "" : base.strip().replaceAll("/+$", "");
+        return b.endsWith("/openai") ? b : b + "/v1";
+    }
+
     public static String driveBase(String url) {
         if (url == null) return null;
         String u = url.strip();
