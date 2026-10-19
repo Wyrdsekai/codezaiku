@@ -4,6 +4,10 @@ import org.codezaiku.Config;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import java.util.Set;
+import java.util.Map;
+import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
@@ -51,6 +55,34 @@ class AutoTest {
         List<Auto.Candidate> priv = List.of(cand(local, "A", true, null, 9, 0, true), cand(sonnet, "A", false, "the project is private", 3, 0.7, false));
         Auto.Pick pr = Auto.pick(priv, new Auto.Job("code", "A", true, 5, true));
         assertEquals("local-27b", pr.entry().name()); assertTrue(pr.why().contains("sonnet: the project is private"), pr.why());
+    }
+
+    @Test
+    void aFreeTwinIsTakenWhenNobodyIsWaitingAndTheListHasOne(@TempDir Path project) throws Exception {
+        SavedModels.put("glm", "openrouter", "z-ai/glm-5.3", "0.08/4.8", null, "10", null);
+        Config.set(DriveClient.hostKeySetting("openrouter.ai"), "sk-or");
+        DriveClient.OpenRouterModels.OVERRIDE = Map.of("z-ai/glm-5.3", new DriveClient.OpenRouterModels.Entry(false, Set.of("tools", "reasoning")),
+                "z-ai/glm-5.3:free", new DriveClient.OpenRouterModels.Entry(false, Set.of("tools", "reasoning")));
+        try {
+            SavedModels.Entry glm = SavedModels.get("glm");
+            assertEquals("z-ai/glm-5.3:free", SavedModels.freeTwin(glm, new Auto.Job("code", "A", false, 0, false)), "a batch job takes the twin");
+            assertNull(SavedModels.freeTwin(glm, new Auto.Job("code", "A", true, 5, false)), "somebody waiting keeps the paid one");
+            SavedModels.Choice c = SavedModels.choose(new Auto.Job("code", "A", false, 0, false));
+            assertEquals("z-ai/glm-5.3:free", c.model()); assertTrue(c.why().contains("its free twin"), c.why());
+        } finally { DriveClient.OpenRouterModels.OVERRIDE = null; }
+    }
+
+    /** The overseer is the strongest saved model above the worker; none when the worker is the strongest; a private project keeps it local. */
+    @Test
+    void theOverseerIsTheStrongestSavedModelAboveTheWorker(@TempDir Path project) throws Exception {
+        SavedModels.put("local", "http://127.0.0.1:1", "qwen3.8-27b", "0/0", null, "1", null);
+        SavedModels.put("glm", "openrouter", "z-ai/glm-5.3", "0.08/4.8", null, "10", null);
+        Config.set(DriveClient.hostKeySetting("openrouter.ai"), "sk-or");
+        Auto.Job job = new Auto.Job("code", "B", true, 5, false);
+        Auto.Pick p = Auto.chooseOverseer(job, SavedModels.get("local"));
+        assertNotNull(p, "a tier-A model is saved above the tier-B worker"); assertEquals("glm", p.entry().name()); assertTrue(p.why().contains("writes the plan and reviews"), p.why());
+        assertNull(Auto.chooseOverseer(job, SavedModels.get("glm")), "the worker is the strongest: it plans for itself, as before");
+        assertNull(Auto.chooseOverseer(new Auto.Job("code", "B", true, 5, true), SavedModels.get("local")), "a private project: no hosted overseer");
     }
 
     @Test

@@ -67,6 +67,19 @@ class ContextOverflowTest {
         assertEquals("size not reported", detail(null));
     }
 
+    /** OpenRouter names the window, the input and the output asked for; when the input fits, the output budget is what to shrink. */
+    @Test
+    void anOutputBudgetTooBigForTheProviderIsReadAsSuch() throws Exception {
+        Method f = FamiliarLoop.class.getDeclaredMethod("overflowOutput", String.class);
+        f.setAccessible(true);
+        String openRouter = "drive HTTP 400: {\"error\":{\"message\":\"This endpoint's maximum context length is 262144 tokens. However, you requested about "
+                + "500002 tokens (2 of text input, 500000 in the output). Please reduce the length of either one, or use the context-compression plugin to compress your prompt automatically.\",\"code\":400}}";
+        assertTrue(overflow(openRouter));
+        int[] lio = (int[]) f.invoke(null, openRouter);
+        assertEquals(262144, lio[0]); assertEquals(2, lio[1]); assertEquals(500000, lio[2]);
+        assertEquals(null, f.invoke(null, LLAMA_CPP), "llama.cpp's refusal names no output share: the input is what overflowed");
+    }
+
     /** The retry needs the server's own count; the loop learns its ratio from it. */
     @Test
     void theServersCountIsReadOutOfTheMessage() throws Exception {

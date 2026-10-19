@@ -96,7 +96,15 @@ class DriveHostedLimitsTest {
             assertFalse(or.has("reasoning_effort"), "OpenRouter's word is reasoning.effort");
             ObjectNode working = body.deepCopy(); working.remove("chat_template_kwargs");
             ObjectNode shapedWork = DriveClient.hostedShape(working, "https://openrouter.ai/api/v1");
-            assertEquals("medium", shapedWork.path("reasoning").path("effort").asText(), "the effort setting, in OpenRouter's field"); assertEquals(12, shapedWork.path("max_tokens").asInt());
+            assertEquals("medium", shapedWork.path("reasoning").path("effort").asText(), "the effort setting, in OpenRouter's field");
+            ObjectNode on = working.deepCopy(); on.put("reasoning_effort", "on");
+            JsonNode shapedOn = DriveClient.hostedShape(on, "https://openrouter.ai/api/v1");
+            assertTrue(shapedOn.path("reasoning").path("enabled").asBoolean(false), "effort on = OpenRouter's reasoning.enabled, the one setting that adds thinking");
+            assertFalse(shapedOn.path("reasoning").has("effort"));
+            ObjectNode off = working.deepCopy(); off.put("reasoning_effort", "off");
+            assertFalse(DriveClient.hostedShape(off, "https://openrouter.ai/api/v1").path("reasoning").path("enabled").asBoolean(true), "effort off = enabled false where the model allows it");
+            ObjectNode onElsewhere = working.deepCopy(); onElsewhere.put("reasoning_effort", "on");
+            assertFalse(DriveClient.hostedShape(onElsewhere, "https://api.studio.nebius.com/v1").has("reasoning_effort"), "a plain host takes an effort only: the switch is dropped there"); assertEquals(12, shapedWork.path("max_tokens").asInt());
             ObjectNode must = body.deepCopy(); must.put("model", "must");
             ObjectNode shaped = DriveClient.hostedShape(must, "https://openrouter.ai/api/v1");
             assertEquals("low", shaped.path("reasoning").path("effort").asText(), "little where it cannot be turned off");
@@ -125,4 +133,5 @@ class DriveHostedLimitsTest {
         assertEquals("https://generativelanguage.googleapis.com/v1beta/openai", Config.v1("https://generativelanguage.googleapis.com/v1beta/openai"), "Gemini's root has no /v1");
         assertEquals("https://openrouter.ai/api/v1", Config.v1("https://openrouter.ai/api")); assertEquals("http://localhost:8200/v1", Config.v1("http://localhost:8200/"));
     }
+
 }

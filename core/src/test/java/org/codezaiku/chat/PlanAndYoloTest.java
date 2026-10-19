@@ -33,6 +33,29 @@ class PlanAndYoloTest {
     }
 
     @Test
+    void thePlanNamesItsKindFirstAndABoundedChangeKeepsThreeLines() {
+        String i = ChatRepl.planInstruction(true);
+        assertTrue(i.contains("The FIRST line names the kind of change") && i.contains("SPIKE") && i.contains("BOUNDED") && i.contains("ARCHITECTURAL"), i);
+        assertTrue(i.contains("For a BOUNDED change write FILES, APPROACH and NOT DOING only."), i);
+        assertTrue(i.endsWith("NO PLAN") && ChatRepl.planInstruction(false).endsWith("Always write the plan."));
+    }
+
+    @Test
+    void aCorrectionIsRecognisedAndADoneLineCarriesTheCheck() {
+        assertTrue(ChatRepl.looksLikeCorrection("Do not use any third-party packages at all — no fastapi, no flask. Standard library only. Fix it if you have."), "Do not use any third-party packages at all — no fastapi, no flask. Standard library only. Fix it if you have.");
+        assertTrue(ChatRepl.looksLikeCorrection("no, the counter should be per code, not global"), "no, the counter should be per code, not global");
+        assertTrue(ChatRepl.looksLikeCorrection("use sqlite instead of a json file"), "use sqlite instead of a json file");
+        assertFalse(ChatRepl.looksLikeCorrection("what does this project do?"), "what does this project do?");
+        assertFalse(ChatRepl.looksLikeCorrection("add a hit counter and update the tests"), "add a hit counter and update the tests");
+        assertFalse(ChatRepl.looksLikeCorrection("Plan a URL shortener. Write the plan to PLAN.md. Write ONLY PLAN.md — no code."), "an ask that says ONLY is not a correction");
+        assertFalse(ChatRepl.looksLikeCorrection("Read PLAN.md and implement it. Use ONLY the Python standard library — http.server, no third-party packages."), "nor this one");
+        assertFalse(ChatRepl.looksLikeCorrection("thanks"), "thanks");
+        assertEquals("Done: the score is 5 — Done check, run by the harness: `sh scorer.sh` → exit 0; score 5 (needs >= 3: yes) — PASSES",
+                ChatRepl.doneLine("the score is 5\n\nmore words\nDone check, run by the harness: `sh scorer.sh` → exit 0; score 5 (needs >= 3: yes) — PASSES"));
+        assertEquals("Done: wrote the file", ChatRepl.doneLine("wrote the file"));
+    }
+
+    @Test
     void buildAsksGetAPlanAndQuestionsDoNot() {
         assertTrue(ChatRepl.looksLikeBuild("lets do all 7. html/js? make sure it can easily be viewed locally via browser."));
         assertTrue(ChatRepl.looksLikeBuild("can u do everything but 7 (so 1,2,3,4,5,6) maybe using html/js?"));

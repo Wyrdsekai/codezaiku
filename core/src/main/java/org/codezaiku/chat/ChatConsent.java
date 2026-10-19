@@ -121,6 +121,13 @@ public final class ChatConsent implements ToolRegistry.Listener {
         this(mode, prompter, null, null);
     }
 
+    /** Where a ruling goes: an act outside the approved plan that the person allowed, written down as "Ruling: … — … — cost if wrong: …". */
+    private java.util.function.Consumer<String> rulings = r -> { };
+    public ChatConsent rulings(java.util.function.Consumer<String> sink) { this.rulings = sink == null ? r -> { } : sink; return this; }
+    private void ruled(String tool, JsonNode args, String kind) {
+        rulings.accept("Ruling: allowed " + describe(tool, args) + " outside the plan (" + kind + ") — the person said yes — cost if wrong: the work is wider than the plan shown");
+    }
+
     /**
      * With {@code projectFile}/{@code globalFile}, standing answers can be PROMOTED to survive the
      * session — {@code /trust project} or {@code /trust global} — and are loaded back on start.
@@ -229,6 +236,13 @@ public final class ChatConsent implements ToolRegistry.Listener {
         return null;
     }
 
+    /** Tests set this to say which files exist; null asks the file system under the current directory. */
+    static volatile java.util.function.Predicate<String> FILE_EXISTS_FOR_TESTS;
+    private static boolean fileExists(String path) {
+        if (FILE_EXISTS_FOR_TESTS != null) return FILE_EXISTS_FOR_TESTS.test(path);
+        try { return java.nio.file.Files.exists(java.nio.file.Path.of(path)); } catch (Exception e) { return false; }
+    }
+
     /** Whether the approved plan names what the command does: any word of the command (3+ letters, not a flag) that the plan mentions. */
     static boolean inPlan(String plan, String cmd) {
         if (plan == null || plan.isBlank() || cmd == null) return false;
@@ -245,6 +259,22 @@ public final class ChatConsent implements ToolRegistry.Listener {
     public String permit(String tool, JsonNode args) {
         tool = canonical(tool);
         if (mode == Mode.YOLO) {
+            // What the person approved is the plan as shown: a NEW file the plan did not name is asked about once, even here. The
+            // dashboard ask on a test box grew a server nobody asked for, in files the plan never mentioned (2026-10-17).
+            if (("write_file".equals(tool)) && args != null && !approvedPlan.isEmpty()) {
+                String path = args.path("path").asText("");
+                if (!path.isBlank() && !inPlan(approvedPlan, path) && !fileExists(path)) {
+                    Boolean remembered = standing.get("yolo:newfile");
+                    if (remembered != null) return remembered ? null : denial(describe(tool, args));
+                    String what = describe(tool, args) + "   (a new file the plan did not name)";
+                    return switch (prompter.ask(what, ChatPreview.of(tool, args))) {
+                        case YES -> { ruled(tool, args, "a new file"); yield null; }
+                        case YES_ALWAYS, YES_ALL -> { standing.put("yolo:newfile", true); ruled(tool, args, "a new file, and every one after"); yield null; }
+                        case NO -> denial(describe(tool, args));
+                        case NO_ALWAYS -> { standing.put("yolo:newfile", false); yield denial(describe(tool, args)); }
+                    };
+                }
+            }
             String cmd = "shell".equals(tool) && args != null ? args.path("command").asText("") : null;
             String kind = riskyKind(cmd);
             if (kind == null || inPlan(approvedPlan, cmd)) return null;
@@ -253,8 +283,8 @@ public final class ChatConsent implements ToolRegistry.Listener {
             if (remembered != null) return remembered ? null : denial(describe(tool, args));
             String what = describe(tool, args) + "   (a " + kind + (approvedPlan.isEmpty() ? "; yolo still asks about these" : " that the plan did not mention") + ")";
             return switch (prompter.ask(what, ChatPreview.of(tool, args))) {
-                case YES -> null;
-                case YES_ALWAYS, YES_ALL -> { standing.put(key, true); yield null; }
+                case YES -> { if (!approvedPlan.isEmpty()) ruled(tool, args, kind); yield null; }
+                case YES_ALWAYS, YES_ALL -> { standing.put(key, true); if (!approvedPlan.isEmpty()) ruled(tool, args, kind + ", and every one after"); yield null; }
                 case NO -> denial(describe(tool, args));
                 case NO_ALWAYS -> { standing.put(key, false); yield denial(describe(tool, args)); }
             };

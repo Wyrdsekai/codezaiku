@@ -37,12 +37,25 @@ public final class Spend {
     public static synchronized void record(String kind, Path where, SavedModels.Entry entry, long[] usage, double cost) throws IOException { record(kind, where, entry, usage, cost, 0, null); }
 
     /** As above, with how long the job took and how it ended (success, untested, incomplete, failed), which best judgement reads back. */
-    public static synchronized void record(String kind, Path where, SavedModels.Entry entry, long[] usage, double cost, long secs, String status) throws IOException {
+    public static synchronized void record(String kind, Path where, SavedModels.Entry entry, long[] usage, double cost, long secs, String status) throws IOException { record(kind, where, entry, usage, cost, secs, status, null); }
+
+    /** As above, with what the effort tree did on the run ({@code raised}: "thinking switch raised at turn N: why"), kept for the record a later first pick reads. */
+    public static synchronized void record(String kind, Path where, SavedModels.Entry entry, long[] usage, double cost, long secs, String status, String raised) throws IOException {
+        record(kind, where, entry, usage, cost, secs, status, raised, entry.model(), null);
+    }
+
+    /**
+     * As above, naming the model the job actually ran on ({@code modelUsed}: the entry's, or its free twin) and a note on how that
+     * changed on the way, if it did (a free twin that stayed overloaded, swapped for the paid one).
+     */
+    public static synchronized void record(String kind, Path where, SavedModels.Entry entry, long[] usage, double cost, long secs, String status, String raised, String modelUsed, String note) throws IOException {
         ObjectNode o = M.createObjectNode();
+        if (note != null && !note.isBlank()) o.put("note", note);
+        if (raised != null && !raised.isBlank()) o.put("raised", raised);
         if (secs > 0) o.put("secs", secs);
         if (status != null && !status.isBlank()) o.put("status", status);
         o.put("t", Instant.now().toString()); o.put("kind", kind == null ? "" : kind); o.put("where", where == null ? "" : where.toAbsolutePath().normalize().toString());
-        o.put("entry", entry.name() == null ? "" : entry.name()); o.put("host", entry.host()); o.put("model", entry.model());
+        o.put("entry", entry.name() == null ? "" : entry.name()); o.put("host", entry.host()); o.put("model", modelUsed == null ? entry.model() : modelUsed);
         o.put("prompt", usage[0]); o.put("cached", usage[1]); o.put("written", usage[2]); o.put("completion", usage[3]);
         o.put("cost", Math.round(cost * 10000) / 10000.0); o.put("priced", entry.prices() != null);
         Files.createDirectories(file().getParent());

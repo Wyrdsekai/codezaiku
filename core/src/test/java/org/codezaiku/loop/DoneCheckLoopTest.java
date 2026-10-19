@@ -61,6 +61,41 @@ class DoneCheckLoopTest {
         return most;
     }
 
+    /**
+     * A task_done on the last turn is a claim the harness verifies, never bounces: with the declared check passing on what is on
+     * disk, the run is done at the limit; with it failing, the run stays stopped at the turn limit. Measured 2026-10-17: 33 of the
+     * hard set's 43 "incomplete" runs had declared done on the last turn with every check green.
+     */
+    @Test
+    void aTaskDoneOnTheLastTurnIsVerifiedNotBounced(@TempDir Path tmp) throws Exception {
+        Files.writeString(tmp.resolve("note.txt"), "hello");
+        int[] step = {0};
+        try (StubDrive stub = new StubDrive(req -> {
+            if (planningCall(req)) return plan();
+            if (toolNames(req).equals(List.of("task_done"))) return StubDrive.calls("task_done", "{\"summary\":\"done at the end\"}");
+            if (step[0] == 0) { step[0] = 1; return write("scorer.sh", "echo score: 5\n"); }
+            return StubDrive.waiting();
+        })) {
+            FamiliarLoop.Result r = new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 6, null, null).run();
+            assertTrue(r.done(), r.summary());
+            assertTrue(r.summary().startsWith(FamiliarLoop.DEADLINE_DONE_REPORT + " (6 turns), and the check passes."), r.summary());
+            assertTrue(r.summary().contains("done at the end"), r.summary());
+        }
+        Path tmp2 = Files.createTempDirectory(tmp, "red");
+        Files.writeString(tmp2.resolve("note.txt"), "hello");
+        int[] step2 = {0};
+        try (StubDrive stub = new StubDrive(req -> {
+            if (planningCall(req)) return plan();
+            if (toolNames(req).equals(List.of("task_done"))) return StubDrive.calls("task_done", "{\"summary\":\"done, I think\"}");
+            if (step2[0] == 0) { step2[0] = 1; return write("scorer.sh", "echo score: 1\n"); }
+            return StubDrive.waiting();
+        })) {
+            FamiliarLoop.Result r = new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp2), tmp2, GOAL, 6, null, null).run();
+            assertFalse(r.done(), r.summary());
+            assertTrue(r.summary().startsWith("Stopped at the turn limit (6 turns)."), r.summary());
+        }
+    }
+
     @Test
     void theHarnessRunsTheCheckAndThePassingRunHandsOver(@TempDir Path tmp) throws Exception {
         Files.writeString(tmp.resolve("note.txt"), "hello");

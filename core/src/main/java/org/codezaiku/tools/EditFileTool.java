@@ -82,7 +82,7 @@ public final class EditFileTool implements Tool {
             }
             EditTelemetry.record(rel, oldS, newS, content, "exact");
             writeBack(f, rel, content.substring(0, first) + newS + content.substring(first + oldS.length()));
-            return "edited " + rel + SyntaxCheck.check(scope, rel);
+            return "edited " + rel + SyntaxCheck.check(scope, rel) + WriteFileTool.NO_READ_BACK;
         }
 
         // A fuzzy match is a GUESS at where the model meant to edit. If applying it would newly unbalance
@@ -101,7 +101,7 @@ public final class EditFileTool implements Tool {
             else {
                 EditTelemetry.record(rel, oldS, newS, content, "whitespace");
                 writeBack(f, rel, result);
-                return "edited " + rel + " (matched ignoring whitespace)" + SyntaxCheck.check(scope, rel);
+                return "edited " + rel + " (matched ignoring whitespace)" + SyntaxCheck.check(scope, rel) + WriteFileTool.NO_READ_BACK;
             }
         }
 
@@ -114,7 +114,7 @@ public final class EditFileTool implements Tool {
             else {
                 EditTelemetry.record(rel, oldS, newS, content, "anchor");
                 writeBack(f, rel, result);
-                return "edited " + rel + " (matched by first/last-line anchors)" + SyntaxCheck.check(scope, rel);
+                return "edited " + rel + " (matched by first/last-line anchors)" + SyntaxCheck.check(scope, rel) + WriteFileTool.NO_READ_BACK;
             }
         }
 
@@ -129,7 +129,7 @@ public final class EditFileTool implements Tool {
             else {
                 EditTelemetry.record(rel, oldS, newS, content, "first_anchor");
                 writeBack(f, rel, result);
-                return "edited " + rel + " (matched by first-line anchor)" + SyntaxCheck.check(scope, rel);
+                return "edited " + rel + " (matched by first-line anchor)" + SyntaxCheck.check(scope, rel) + WriteFileTool.NO_READ_BACK;
             }
         }
 
@@ -143,7 +143,7 @@ public final class EditFileTool implements Tool {
             else {
                 EditTelemetry.record(rel, oldS, newS, content, "symbol");
                 writeBack(f, rel, bySymbol);
-                return "edited " + rel + " (matched whole symbol via the language server)" + SyntaxCheck.check(scope, rel);
+                return "edited " + rel + " (matched whole symbol via the language server)" + SyntaxCheck.check(scope, rel) + WriteFileTool.NO_READ_BACK;
             }
         }
 

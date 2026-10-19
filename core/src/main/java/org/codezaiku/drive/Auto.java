@@ -118,6 +118,24 @@ public final class Auto {
         return new Pick(c.entry(), why.toString());
     }
 
+    /**
+     * The overseer for a job whose worker is {@code worker}: the strongest saved model that can take the job, the cheapest among
+     * equals, and only when it stands above the worker; null otherwise (the worker is the strongest there is, and plans for itself as
+     * before). It writes the plan and reviews the work at the verify step, a few calls a job, so its cost is a small fraction of the
+     * worker's; a private project or {@code auto.local_only} keeps it local like the worker (decided 2026-10-18: the bigger model plans
+     * and oversees, the smaller does).
+     */
+    public static Pick chooseOverseer(Job job, SavedModels.Entry worker) {
+        if (worker == null) return null;
+        List<Candidate> able = new ArrayList<>();
+        for (SavedModels.Entry e : SavedModels.all().values()) { Candidate c = candidate(e, job); if (c.reachable()) able.add(c); }
+        int workerRank = rank(worker.tier());
+        Candidate best = able.stream().filter(c -> rank(c.tier()) > workerRank)
+                .min(java.util.Comparator.comparingInt((Candidate c) -> -rank(c.tier())).thenComparingDouble(Candidate::dollars)).orElse(null);
+        if (best == null || best.entry().name() != null && best.entry().name().equals(worker.name())) return null;
+        return new Pick(best.entry(), "overseer " + best.entry().name() + ": tier " + best.tier() + " above the worker's " + worker.tier() + "; it writes the plan and reviews the work, a few calls a job");
+    }
+
     static String tier(int rank) { return rank >= 3 ? "A" : rank == 2 ? "B" : "C"; }
     static String minutes(double m) { return m < 1 ? "under a minute" : m < 2 ? "a minute" : String.format(Locale.ROOT, "%.0f minutes", m); }
 }

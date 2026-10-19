@@ -9,6 +9,15 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
 public final class WriteFileTool implements Tool {
+    /**
+     * Said after a write or an edit, as a fact: the file holds what was sent. A read-back of what was just written costs a turn and
+     * tells the model nothing (ZCode and Kimi Code say the same), and the first wording said so as a prohibition ("no need to read it
+     * back"), which planted "read it back" in every write result: on the local 27B read-backs halved, and GLM-5.3 through OpenRouter
+     * read for sixty turns and finished nothing (2026-10-18, pinned by a request-for-request diff of the two builds). Positive
+     * directives only, never a "do not": the standing rule, which this note broke.
+     */
+    public static final String NO_READ_BACK = "; the file now holds exactly what you sent";
+
     // llama.cpp's tool-call parser CRASHES on a large/complex content arg — and the threshold is much
     // lower than the old 13KB assumption: battery42 saw a ~5KB sample.mbox write (heavily escaped, lots of
     // \n + quotes) fail to parse at column ~4760 (drive HTTP 500), repeatedly, burning the run. The crash
@@ -60,7 +69,7 @@ public final class WriteFileTool implements Tool {
         if (ContainerExec.active()) {                       // container-exec mode (env-gated); off by default
             ContainerExec.write(rel, content);
             scope.recordWrite(rel);
-            return "wrote " + content.length() + " chars to " + rel;
+            return "wrote " + content.length() + " chars to " + rel + NO_READ_BACK;
         }
         Path f = scope.resolve(rel);
         if (f.getParent() != null) Files.createDirectories(f.getParent());
@@ -68,7 +77,7 @@ public final class WriteFileTool implements Tool {
         String landed = scope.rel(f);
         scope.recordWrite(landed);
         String redirect = pathNote(rel, landed);
-        return "wrote " + content.length() + " chars to " + landed + redirect + SyntaxCheck.check(scope, landed);
+        return "wrote " + content.length() + " chars to " + landed + redirect + SyntaxCheck.check(scope, landed) + NO_READ_BACK;
     }
 
     /**

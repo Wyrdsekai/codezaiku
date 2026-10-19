@@ -26,6 +26,9 @@ import java.net.http.HttpConnectTimeoutException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.zip.CRC32;
@@ -176,6 +179,13 @@ public final class FamiliarLoop {
     // trims early turns. NO green-gate, NO auto-advance, NO step_done ("auto-advance leads to drift" —
     // smallcode). The model decides done; the harness measures externally.
     private List<String> planSteps = List.of();
+    /** From the planning call, beside the steps (Superpowers' plan shape, 2026-10-17): the files the plan touches, and the cases the
+     *  task implies that no test covers yet, each owed a test by the step that owns it. The local coder copies literals and garbles
+     *  templates; these two lists are the hand-off it can copy. */
+    private List<String> planFiles = List.of();
+    private boolean untestedFixBounced;
+    private boolean overseerBounced;
+    private List<String> reviewFocus = List.of();
     private final Set<Integer> completedSteps = new HashSet<>();
     // HARNESS-DRIVEN done gate: the model is the coder, the harness is the DRIVER. It does not accept the
     // model's word that it's done — at task_done it re-runs the tests itself and refuses while they're red
@@ -304,6 +314,8 @@ public final class FamiliarLoop {
      */
     private static final int CODING_DEADLINE_MIN_TURNS = 4;
     static final String TURN_LIMIT_REPORT = "Stopped at the turn limit";
+    /** A task_done on the last turn whose check passes: the run is done, at the limit; the result document carries a warning. */
+    public static final String DEADLINE_DONE_REPORT = "Done on the last turn";
     private boolean deadlineNoted = false;
     /** The files the goal names that this run has to write; looked at on disk once a turn. */
     private Deliverables deliverables = Deliverables.none();
@@ -1015,6 +1027,13 @@ public final class FamiliarLoop {
         return one;
     }
 
+    /** The project's own tests ran now and passed, with at least one counted when the runner counts: a suite that did not run
+     *  verifies nothing, which is what keeps a last-turn claim on a project without tests from reading as done. */
+    private boolean suiteRanAndPassed() {
+        ProjectTests.Verdict v = ProjectTests.verdict(projectRoot);
+        return v.ran() && v.passed() && (!v.counted() || (v.passedCount() != null && v.passedCount() > 0));
+    }
+
     private boolean codingDeadline(int turn) {
         return coding && maxTurns >= CODING_DEADLINE_MIN_TURNS && turn >= maxTurns;
     }
@@ -1088,6 +1107,101 @@ public final class FamiliarLoop {
      *  model's own work, never the project's pre-existing code. Measured 2026-10-16 on the maintenance battery: scanning the whole tree
      *  flagged the app's own placeholder modules ("for demo purposes") in 116 of 175 runs and sent every model off rewriting them. */
     private final Set<String> filesTouched = new LinkedHashSet<>();
+    /**
+     * THE OVERSEER: a stronger model that reviews the work, at a finish and once mid-run when the declared check has stayed red for
+     * two thirds of the turns, while the drive plans and does the work. Null means no review. Its calls are counted apart ({@link #overseerUsage()}) and restored to the
+     * worker's count after each. Decided 2026-10-18: the bigger model plans and oversees, the smaller does; the seat configuration
+     * of 2026-08-31 (the 27B drives, a bigger model is the judgement seat) wired into one job.
+     */
+    private DriveClient overseer;
+    private final long[] overseerUsage = new long[4];
+    private int overseerReviews;
+    private boolean overseerMidRunReviewed;
+    private String overseerLastReview = "";
+
+    /** The overseer seat: {@code o} plans and reviews; its tokens are counted into its own array, the worker's count restored after each call. */
+    public FamiliarLoop overseer(DriveClient o) { this.overseer = o; return this; }
+    public long[] overseerUsage() { return overseerUsage.clone(); }
+    public int overseerReviews() { return overseerReviews; }
+
+    /** A call on the overseer, counted apart. */
+    private <T> T overseeing(java.util.function.Supplier<T> call) {
+        long[] prev = DriveClient.counting();
+        DriveClient.countInto(overseerUsage);
+        try { return call.get(); } finally { DriveClient.countInto(prev); }
+    }
+
+    /**
+     * The overseer's review at the verify step: the task, the plan, the files the run changed as they are now, and the check's
+     * verdict; back comes the one thing that is wrong or missing, or DONE. The worker answers it as it answers the harness's own
+     * findings; the harness's findings come first, since they are computed, and the overseer's is a judgement.
+     */
+    private String overseerReview() {
+        if (overseer == null) return null;
+        StringBuilder files = new StringBuilder(); int n = 0;
+        for (String rel : filesChanged()) {
+            String low = rel.toLowerCase(Locale.ROOT);
+            if (!low.matches(".*\\.(py|js|ts|jsx|tsx|rs|go|java|kt|rb|md|txt|json|yaml|yml|toml|html|css|sh)$")) continue;
+            if (++n > 8) { files.append("\n(and more files)\n"); break; }
+            try {
+                String text = Files.readString(projectRoot.resolve(rel));
+                if (text.length() > 2_500) text = text.substring(0, 2_500) + "\n…(cut)";
+                files.append("\n--- ").append(rel).append(" ---\n").append(text);
+            } catch (IOException e) { files.append("\n--- ").append(rel).append(" --- (unreadable)\n"); }
+        }
+        String verdict = lastCheck == null ? "no declared check ran" : (lastCheck.passes() ? "the declared check passes" : "the declared check FAILS: " + (lastCheck.report() == null ? "" : lastCheck.report()));
+        String g = goal == null ? "" : goal.length() > 3_000 ? goal.substring(0, 3_000) + "…" : goal;
+        ArrayNode msgs = j.createArrayNode();
+        msgs.addObject().put("role", "system").put("content",
+                "You oversee a smaller model's work on a coding task. You see the task, the plan, the files the run changed as they are now, "
+                + "and the check's verdict. Name the ONE thing that is wrong or missing that the task requires: two sentences, the file and what to "
+                + "change. If the work meets the task, answer exactly DONE. Judge the work against the task, not against taste; a missing requirement "
+                + "or a wrong result counts, a style preference does not.");
+        msgs.addObject().put("role", "user").put("content", "THE TASK:\n" + g + "\n\nTHE PLAN:\n" + planSection() + "\n\nTHE CHECK: " + verdict
+                + "\n\nTHE FILES THE RUN CHANGED, AS THEY ARE NOW:" + (files.length() == 0 ? " (none)" : files) + "\n\nThe one thing wrong or missing, or DONE:");
+        String said;
+        try { said = overseeing(() -> overseer.classify(msgs, 400)).strip(); }
+        catch (RuntimeException e) { log.info("  ↳ overseer review failed ({}); the verify step goes on without it", e.getMessage()); return null; }
+        overseerReviews++;
+        if (said.isEmpty() || said.toUpperCase(Locale.ROOT).startsWith("DONE")) { log.info("  ↳ overseer review {}: done", overseerReviews); overseerLastReview = ""; return null; }
+        if (said.length() > 600) said = said.substring(0, 600) + "…";
+        log.info("  ↳ overseer review {}: {}", overseerReviews, said.replace("\n", " "));
+        overseerLastReview = said;
+        return said;
+    }
+    /** When the run began: a file on disk newer than this that the edit tools never saw was written through the shell. */
+    private final long runStartedAt = System.currentTimeMillis();
+    /** The most entries a scan of the project for changed files visits before it stops: a bound, never a walk of a whole home. */
+    static final int TOUCH_SCAN_CAP = 20_000;
+
+    /**
+     * The files the run changed: the edit tools' ledger together with what changed on disk since the run began. The ledger alone
+     * missed every file written through the shell (a heredoc, sed -i, a python one-liner), and a 27B writes that way often: in the
+     * 2026-10-17 battery one run wrote 13 files through the shell against 4 through the tools, so the fix finding, the off-plan
+     * finding and the plan's FILES check were blind to them. The scan is bounded and skips the usual trees.
+     */
+    Set<String> filesChanged() {
+        Set<String> out = new LinkedHashSet<>(filesTouched);
+        int[] seen = {0};
+        try {
+            Files.walkFileTree(projectRoot, new SimpleFileVisitor<>() {
+                @Override public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes a) {
+                    String n = dir.getFileName() == null ? "" : dir.getFileName().toString();
+                    if (dir.equals(projectRoot)) return FileVisitResult.CONTINUE;
+                    if (n.equals(".git") || n.equals("node_modules") || n.equals(".venv") || n.equals("venv") || n.equals("__pycache__")
+                            || n.equals("build") || n.equals("target") || n.equals(".gradle") || n.equals(".pytest_cache") || n.endsWith(".cp-checkpoints")) return FileVisitResult.SKIP_SUBTREE;
+                    return ++seen[0] > TOUCH_SCAN_CAP ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
+                }
+                @Override public FileVisitResult visitFile(Path f, BasicFileAttributes a) {
+                    if (++seen[0] > TOUCH_SCAN_CAP) return FileVisitResult.TERMINATE;
+                    if (a.isRegularFile() && a.lastModifiedTime().toMillis() >= runStartedAt - 1_000) out.add(projectRoot.relativize(f).toString().replace('\\', '/'));
+                    return FileVisitResult.CONTINUE;
+                }
+                @Override public FileVisitResult visitFileFailed(Path f, IOException e) { return FileVisitResult.CONTINUE; }
+            });
+        } catch (IOException e) { /* the ledger alone, then */ }
+        return out;
+    }
     private static final int MAX_SELFVERIFY = 3;
     private boolean editedSinceSelfVerify = false;
     // ESCALATION (research-backed #2 lever — route the hard link to a stronger model when retry-self isn't
@@ -1207,6 +1321,21 @@ public final class FamiliarLoop {
         return out.size() >= 2 ? cap(out) : List.of();
     }
 
+    /** The lines under a heading such as {@code FILES:} or {@code REVIEW FOCUS:} in a planning reply, up to the next blank line
+     *  before a heading; empty when the heading is absent. The same shape the requirements take. */
+    static List<String> headedList(String text, String heading) {
+        if (text == null || text.isBlank()) return List.of();
+        Matcher h = Pattern.compile("(?i)(?:^|\\n)" + Pattern.quote(heading) + ":?\\s*\\n([\\s\\S]+?)(?=\\n\\s*\\n[A-Z]|$)").matcher(text);
+        if (!h.find()) return List.of();
+        List<String> out = new ArrayList<>();
+        for (String l : h.group(1).split("\n")) {
+            Matcher m = Pattern.compile("^(?:\\d{1,2}[.)]|[-*•])\\s+(.+)$").matcher(l.strip());
+            if (m.find()) out.add(clip(m.group(1)));
+            if (out.size() >= 6) break;
+        }
+        return out;
+    }
+
     private static String clip(String s) {
         s = s.strip().replace("**", "");
         return s.length() > 110 ? s.substring(0, 110) + "…" : s;
@@ -1242,6 +1371,10 @@ public final class FamiliarLoop {
                 + "read or looked at, and the plan is written from the task's text and the folder listing below. Write the plan: a "
                 + "numbered list of vertical slices, each a real, runnable increment, in the order you will do them, ending with the "
                 + "files the task asks you to hand over. " + PlanReply.MAX_STEPS + " steps or fewer, one line each."
+                + " After the plan, write FILES: each file the plan creates or changes, one line each as the path, a dash, and what it will "
+                + "hold, the test files among them. Then REVIEW FOCUS: the inputs or cases the task implies and no test covers yet (an empty "
+                + "input, a malformed record, a boundary the task states, an order that matters), one line each, two to four; the step that "
+                + "owns each writes a test for it."
                 + (reqs ? " Before the plan, list REQUIREMENTS: every distinct thing the task demands (features, qualities, tests, "
                         + "delivery artifacts), in the task's own words." : "")
                 + " After the plan, write the DONE CHECK: the one command that judges the work against what the task asks, and what "
@@ -1256,7 +1389,7 @@ public final class FamiliarLoop {
                 + "program changes. Write `prepare: none` when the check has no such step."
                 + " Your whole reply is " + (reqs ? "the lists" : "the plan and the check") + ", in this format:\n\n"
                 + (reqs ? "REQUIREMENTS:\n1. <requirement>\n2. <requirement>\n\n" : "")
-                + "PLAN:\n1. <step>\n2. <step>\n3. <step>\n\nDONE CHECK:\nrun: <command>\npass: <name> <op> <number>\nprepare: <command, or none>";
+                + "PLAN:\n1. <step>\n2. <step>\n3. <step>\n\nFILES:\n- <path> — <what it holds>\n\nREVIEW FOCUS:\n- <a case the task implies>\n\nDONE CHECK:\nrun: <command>\npass: <name> <op> <number>\nprepare: <command, or none>";
     }
 
     /**
@@ -1277,16 +1410,19 @@ public final class FamiliarLoop {
                 + (researchNotes.isBlank() ? "" : "\n\nWhere the notes describe how a step is done — a library, a definition, a rule — the step "
                         + "says so in the notes' own terms, so that the work follows them.")
                 + "\n\nWrite the plan.");
-        String reply = drive.classify(pm, PLAN_MAX_TOKENS);
-        log.info("planning call without thinking: {} chars back ({} tokens); it began: {}", reply.length(), drive.lastCompletionTokens(), preview(reply));
+        // The worker writes its own plan, overseer or not: a plan the overseer wrote ran a quarter to a half longer than the worker's
+        // own, and on a long task the worker churned to the turn cap trying to meet it (dedup 1 of 3 against 5 of 5, 2026-10-18).
+        DriveClient planner = drive;
+        String reply = planner.classify(pm, PLAN_MAX_TOKENS);
+        log.info("planning call without thinking: {} chars back ({} tokens); it began: {}", reply.length(), planner.lastCompletionTokens(), preview(reply));
         // Nothing came back (the server ran out of time): the same call once more, which now waits twice as long. A plan without
         // thinking is the one that reads: of three runs started together at a high thinking effort, the one whose no-thinking call
         // finished (224 s) had its plan and check; the two that fell through to a thinking call got 15,000 characters of thinking
         // and no plan (2026-10-02).
         if (reply.isBlank()) {
             log.info("the planning call came back with nothing; asking once more");
-            reply = drive.classify(pm, PLAN_MAX_TOKENS);
-            log.info("planning call without thinking, asked once more: {} chars back ({} tokens); it began: {}", reply.length(), drive.lastCompletionTokens(), preview(reply));
+            reply = planner.classify(pm, PLAN_MAX_TOKENS);
+            log.info("planning call without thinking, asked once more: {} chars back ({} tokens); it began: {}", reply.length(), planner.lastCompletionTokens(), preview(reply));
         }
         String thinking = "";
         if (PlanReply.inReply(reply) == null) {
@@ -1294,7 +1430,7 @@ public final class FamiliarLoop {
             // fails is made once more: after a call that ran out of time the drive waits twice as long.
             for (int attempt = 1; ; attempt++) {
                 try {
-                    ObjectNode m = drive.chat(pm, null, Math.min(nctx / 4, PLAN_MAX_TOKENS * 4));
+                    ObjectNode m = planner.chat(pm, null, Math.min(nctx / 4, PLAN_MAX_TOKENS * 4));
                     reply = m.path("content").asText("");
                     thinking = m.path("reasoning_content").asText("");
                     break;
@@ -1317,6 +1453,9 @@ public final class FamiliarLoop {
             return;
         }
         planSteps = p;
+        planFiles = headedList(reply, "files");
+        reviewFocus = headedList(reply, "review focus");
+        if (!planFiles.isEmpty() || !reviewFocus.isEmpty()) log.info("plan: {} files named, {} review-focus cases", planFiles.size(), reviewFocus.size());
         StringBuilder steps = new StringBuilder();
         for (int i = 0; i < p.size(); i++) steps.append("\n  ").append(i + 1).append(". ").append(p.get(i));
         log.info("plan: {} steps{}{}", p.size(), fromThinking ? " (read from the model's thinking; the reply held none)" : "", steps);
@@ -2101,6 +2240,55 @@ public final class FamiliarLoop {
      *  completeness + format checks but did no real ML. GENERAL (phrase-based "the code says it's faking", NOT
      *  ML-call-specific, to avoid overfit) + OBJECTIVE (the model can't rationalize past its own source). Returns a
      *  finding or null. */
+    /** The goal reads as a fix: a bug, a crash, a wrong result, a regression. */
+    boolean goalIsAFix() {
+        return goal != null && Pattern.compile("(?i)\\b(fix|fixes|bug|crash|crashes|wrong|incorrect|regression|broken|fails?|error)\\b").matcher(goal).find();
+    }
+
+    /**
+     * A fix that ships with no test. Measured offline on 2026-10-17 over 144 passing runs of five fixing tasks: 77 shipped a test that
+     * fails without the fix, 2 one that passes without it, and 58 no test at all, two in five, every model among them. Objective, from
+     * the files this run wrote: source files edited, no test file touched. Said once, as a finding the model answers.
+     */
+    private String untestedFixFinding() {
+        if (!coding || !goalIsAFix()) return null;
+        List<String> sources = new ArrayList<>(); boolean testTouched = false;
+        for (String touched : filesChanged()) {
+            String rel = touched.replace('\\', '/').toLowerCase();
+            if (rel.contains("test")) { testTouched = true; continue; }
+            if (rel.matches(".*\\.(py|js|ts|jsx|tsx|rs|go|java|kt|rb)$")) sources.add(touched);
+        }
+        if (sources.isEmpty() || testTouched) return null;
+        String named = sources.size() <= 3 ? "`" + String.join("`, `", sources) + "`" : "`" + sources.get(0) + "` and " + (sources.size() - 1) + " more";
+        return "The fix in " + named + " ships with no test that shows it. Add the test that catches the bug: green on the fixed code, red with "
+                + "the fix reverted. Run it, then call task_done again.";
+    }
+
+    /**
+     * Source files the run changed that the plan's FILES block did not name. Change hygiene, from the Faros study of 4,000 graded
+     * failures (unrelated edits swept in) and our own count (2026-10-17: about one run in eight touched a file the task never named,
+     * two wrote a test into the app). Objective, from the files this run wrote against the plan it wrote; said once, as a finding the
+     * model answers: keep what the task needs and say which, put back what it does not.
+     */
+    private boolean offPlanSaid;
+    private String planFilesFinding() {
+        if (!coding || planFiles.isEmpty() || offPlanSaid) return null;
+        String plan = String.join("\n", planFiles).toLowerCase(Locale.ROOT);
+        List<String> extras = new ArrayList<>();
+        for (String touched : filesChanged()) {
+            String rel = touched.replace('\\', '/');
+            String low = rel.toLowerCase(Locale.ROOT);
+            if (low.contains("test") || !low.matches(".*\\.(py|js|ts|jsx|tsx|rs|go|java|kt|rb)$")) continue;
+            String base = low.substring(low.lastIndexOf('/') + 1);
+            if (!plan.contains(low) && !plan.contains(base)) extras.add(rel);
+        }
+        if (extras.isEmpty()) return null;
+        offPlanSaid = true;   // once: the model's answer is to keep or put back, and the disk does not change for a "keep"
+        return "The plan named " + planFiles.size() + " file" + (planFiles.size() == 1 ? "" : "s") + "; the run also changed `"
+                + String.join("`, `", extras.size() <= 4 ? extras : extras.subList(0, 4)) + "`" + (extras.size() > 4 ? " and " + (extras.size() - 4) + " more" : "")
+                + ". Keep each one the task needs and say which; the rest return to how they were.";
+    }
+
     private String fakeCoreFinding() {
         try {
             // STRONG: the code explicitly admits it isn't doing the real thing (very low false-positive).
@@ -2386,12 +2574,13 @@ public final class FamiliarLoop {
                 + "source; use EXACTLY this (do not reach for an older API):\n" + real;
     }
 
-    private static final String SUMMARIZE_PROMPT = """
+    public static final String SUMMARIZE_PROMPT = """
             You are compacting a coding session into a checkpoint that lets the work continue WITHOUT
             the full transcript. The session is paused while you write it, and your whole reply is the
             checkpoint text: the record you are given is material to summarise. Output ONLY the sections
             below, in this order, as terse bullets. PRESERVE EXACT file paths, commands, identifiers,
             numbers, and error strings verbatim. Measure progress against THE GOAL as it is given to you.
+            A result that no run, test or check showed is written as unverified, in those words.
             The goal and its rules stay in front of the worker word for word, so the checkpoint holds what
             the work has done and found, and Constraints holds only what was learned along the way (the
             environment, versions, limits met).
@@ -2405,6 +2594,7 @@ public final class FamiliarLoop {
             - In progress:
             - Blocked:
             ## Next steps
+            ## Open questions (what is not yet known, and what would settle it)
             ## Critical context (signatures, contracts, exact errors to remember)
             ## Key decisions
             ## Constraints
@@ -2578,6 +2768,17 @@ public final class FamiliarLoop {
                 || (m.contains("context") && m.contains("token") && m.contains("exceed"));
     }
 
+    /**
+     * A refusal that names the window, the input and the output asked for, in OpenRouter's words: "maximum context length is L tokens.
+     * However, you requested about T tokens (I of text input, O in the output)". {L, I, O}, or null when the message is not that.
+     * When the input fits on its own, the overflow is the output budget, and the cure is a smaller one, not a shorter prompt.
+     */
+    static int[] overflowOutput(String message) {
+        if (message == null) return null;
+        var m = Pattern.compile("maximum context length is (\\d+) tokens.*?\\((\\d+) of text input, (\\d+) in the output\\)", Pattern.DOTALL).matcher(message);
+        return m.find() ? new int[]{Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3))} : null;
+    }
+
     /** How many tokens the server counted in the refused request, or null when it did not say. */
     static Integer overflowUsed(String message) {
         if (message == null) return null;
@@ -2640,6 +2841,18 @@ public final class FamiliarLoop {
         try {
         for (int turn = 1; turn <= maxTurns + epilogueTurns; turn++) {
             turnNow = turn;
+            // THE OVERSEER'S MID-RUN LOOK: two thirds of the turns gone and the declared check still red. A review at a finish cannot
+            // help a run that never finishes (2026-10-18: every failed hard-set run with oversight ran to the turn cap unreviewed).
+            if (overseer != null && !overseerMidRunReviewed && turn == Math.max(2, (2 * maxTurns) / 3) && doneCheck != null) {
+                overseerMidRunReviewed = true;
+                if (lastCheck == null) lastCheck = runDoneCheck(turn);   // no run of the check yet: one now, so the look is on its verdict
+                String review = lastCheck.passes() ? null : overseerReview();
+                if (review != null) {
+                    log.info("  ↳ the overseer's mid-run look at turn {} (the check still red)", turn);
+                    history.addObject().put("role", "user").put("content", "REVIEW — the overseer, a stronger model that read the task, the plan, your files and the check, says: "
+                            + review + " Settle that first, then make the check pass.");
+                }
+            }
             deliverables.refresh();
             if (freshPrepare != null) {
                 Prepared p = freshPrepare;
@@ -2976,15 +3189,24 @@ public final class FamiliarLoop {
                     assistant = chatThroughRestarts(messages, turnTools, outBudget,
                             proseAnswerTurn ? "none" : "required");
                 } catch (RuntimeException first) {
-                    // The server counted more tokens than we did. It said how many: learn the real ratio from that,
-                    // shrink the older observations to fit, and send once more. Only a second refusal ends the turn.
-                    Integer counted = contextOverflow(first.getMessage()) ? overflowUsed(first.getMessage()) : null;
-                    if (counted == null) throw first;
-                    calibrate(requestChars(messages) + turnTools.toString().length(), counted);
-                    schemaTokens = (int) (turnTools.toString().length() / charsPerToken);
-                    int again = fitToWindow(messages);
-                    log.warn("turn {}: the server counted {} tokens where the estimate said less; ratio now {} chars/token, trimmed {} more chars, sending again",
-                            turn, counted, String.format("%.2f", charsPerToken), again);
+                    int[] lio = contextOverflow(first.getMessage()) ? overflowOutput(first.getMessage()) : null;
+                    if (lio != null && lio[1] + 512 < lio[0]) {
+                        // The input fits; the output budget asked for is what overflowed (a hosted provider's window is smaller than
+                        // the model's listed one). The budget is capped to what fits for the rest of the run, and the turn is sent again.
+                        outCapFromServer = Math.max(512, lio[0] - lio[1] - 256);
+                        log.warn("turn {}: the provider takes {} tokens in all and the request asked for {} of output on {} of input; the output budget is {} from here, sending again",
+                                turn, lio[0], lio[2], lio[1], outCapFromServer);
+                    } else {
+                        // The server counted more tokens than we did. It said how many: learn the real ratio from that,
+                        // shrink the older observations to fit, and send once more. Only a second refusal ends the turn.
+                        Integer counted = contextOverflow(first.getMessage()) ? overflowUsed(first.getMessage()) : null;
+                        if (counted == null) throw first;
+                        calibrate(requestChars(messages) + turnTools.toString().length(), counted);
+                        schemaTokens = (int) (turnTools.toString().length() / charsPerToken);
+                        int again = fitToWindow(messages);
+                        log.warn("turn {}: the server counted {} tokens where the estimate said less; ratio now {} chars/token, trimmed {} more chars, sending again",
+                                turn, counted, String.format("%.2f", charsPerToken), again);
+                    }
                     outBudget = outputBudget(messages);
                     assistant = chatThroughRestarts(messages, turnTools, outBudget,
                             proseAnswerTurn ? "none" : "required");
@@ -3039,9 +3261,17 @@ public final class FamiliarLoop {
                         + "newlines or quotes inside a value.");
                 continue;
             }
+            // On a hosted API none of the model's reasoning goes back on the next request, the shape of 2026-10-16 (GLM-5.3 through
+            // OpenRouter: 34 of 40 at eight cents a run). Kept whole it rode along in every request, five times the cost (10-17); kept
+            // for the latest reply only, the model collapsed (10-17 evening). A local drive keeps it while there is room (the window is
+            // the only cost there, and the oldest is shed by room below, 2026-09-30).
             history.add(assistant);
-            int thought = assistant.path("reasoning_content").asText("").length();
-            if (thought > 0) log.info("  ↳ thinking: {} chars this turn", thought);
+            if (drive.hostedApi()) ((ObjectNode) assistant).remove(List.of("reasoning_details", "reasoning", "reasoning_content"));
+            // llama.cpp and DeepSeek say reasoning_content; OpenRouter says reasoning and reasoning_details, which go back on the next
+            // request with the rest of this node (measured 2026-10-17: the second step's prompt counts them)
+            int thought = assistant.path("reasoning_content").asText("").length() + assistant.path("reasoning").asText("").length()
+                    + (assistant.has("reasoning_details") ? assistant.path("reasoning_details").toString().length() : 0);
+            if (thought > 0) log.info("  ↳ thinking: {} chars this turn{}", thought, assistant.has("reasoning_details") ? " (reasoning_details kept for the next request)" : "");
             consecutiveDriveFailures = 0;
             observePlan(assistant.path("content").asText(""), assistant.path("reasoning_content").asText("")); // the plan's steps said done (orientation only)
             if (chatMode) {
@@ -3650,7 +3880,17 @@ public final class FamiliarLoop {
                     if (codingDeadline(turn)) {
                         restoreBestGreen();
                         restoreBestArtifact();
-                        log.info("task_done on the deadline turn {}: {}", turn, observation);
+                        // The claim is verified, never bounced: the declared check, run once on what is on disk now (the best green
+                        // version, when one was kept), or the project's tests when no check was declared. Green means done at the
+                        // limit, which the result document reports with a warning; otherwise the run stays what running out of turns
+                        // has always given. Measured 2026-10-17: 33 of the hard set's 43 "incomplete" runs had declared done on the
+                        // last turn with the grader, the suite and the boot check all green, and were read as runs that never finished.
+                        boolean verified = coding && !chatMode && (doneCheck != null
+                                ? (lastCheck = runDoneCheck(turn)).passes()
+                                : devAnswersPath == null && suiteRanAndPassed());
+                        log.info("task_done on the deadline turn {}{}: {}", turn, verified ? ", and the check passes" : "", observation);
+                        if (verified) return new Result(true, DEADLINE_DONE_REPORT + " (" + maxTurns + " turns), and the check passes. Where "
+                                + "the work stands, in the model's words:\n" + withDraft(observation) + unwrittenLine() + checkLine(), turn);
                         return new Result(false, TURN_LIMIT_REPORT + " (" + maxTurns + " turns). Where the work stands, in the "
                                 + "model's words:\n" + withDraft(observation) + unwrittenLine() + checkLine(), turn);
                     }
@@ -3678,6 +3918,26 @@ public final class FamiliarLoop {
                     // 2026-10-02 passed its check at turn 70, called task_done at turn 71, and was then sent back by those checks
                     // for the 29 turns it had left and reported as failed.
                     if (coding && !chatMode && doneCheck != null && lastCheck != null && lastCheck.passes()) {
+                        // A fix whose check passes but that changed no test is sent back once with the finding, as the reflection does on
+                        // the path without a check: on the local 27B the two security runs that wrote no test both finished here
+                        // (2026-10-17), past the reflection. Once; the next task_done is the finish.
+                        String untested = selfVerifyOn && !untestedFixBounced && turn < maxTurns ? untestedFixFinding() : null;
+                        if (untested != null) {
+                            untestedFixBounced = true;
+                            log.info("  ↳ task_done with the check passing, but the fix changed no test → one bounce");
+                            history.addObject().put("role", "user").put("content", "Before finishing: " + untested);
+                            continue;
+                        }
+                        // The overseer's one look at a finish the check already passed: a run that passes its check at its first finish never
+                        // reaches the verify step below, and that was every maintenance run of the smoke test (2026-10-18). Once.
+                        String review = overseer != null && selfVerifyOn && !overseerBounced && turn < maxTurns ? overseerReview() : null;
+                        if (review != null) {
+                            overseerBounced = true;
+                            log.info("  ↳ task_done with the check passing, and the overseer names something → one bounce");
+                            history.addObject().put("role", "user").put("content", "Before finishing: REVIEW — the overseer, a stronger model that read the task, the plan, your files and the check, says: "
+                                    + review + " Settle that, run the check, then call task_done again.");
+                            continue;
+                        }
                         log.info("task_done at turn {} with the done check passing: {}", turn, observation);
                         return new Result(true, withDraft(observation) + unwrittenLine() + checkLine(), turn);
                     }
@@ -3703,13 +3963,18 @@ public final class FamiliarLoop {
                     String artifactFinding = selfVerifyOn ? deliverableArtifactFinding() : null; // AutoMind filesystem check (objective)
                     String fakeCore = selfVerifyOn ? fakeCoreFinding() : null;                    // anti reward-hacking: real work, not stub (objective)
                     String metricFinding = selfVerifyOn ? validationMetricFinding() : null;       // AIDE val-metric check (objective)
+                    String untestedFix = selfVerifyOn ? untestedFixFinding() : null;             // a fix that changed no test (objective)
+                    String offPlan = selfVerifyOn ? planFilesFinding() : null;                   // files the plan did not name (objective)
                     // Priority: completeness (is there output) → realness (is the core real) → quality (beats baseline).
                     // NB: the harness-computed DEV-METRIC check is a separate hard gate BELOW (own bounce budget) so it
                     // isn't starved by these soft rounds sharing one cap (sv13 bug: 3× artifact-gap consumed the cap).
                     String harnessFinding = artifactFinding != null ? artifactFinding
-                            : (fakeCore != null ? fakeCore : metricFinding);
+                            : (fakeCore != null ? fakeCore : (metricFinding != null ? metricFinding : (untestedFix != null ? untestedFix : offPlan)));
+                    // THE OVERSEER'S REVIEW: a judgement finding from the stronger model, after the harness's computed ones; asked only
+                    // when a round would run anyway, or when the work changed since its last look
+                    String review = selfVerifyOn && selfVerifyCount < MAX_SELFVERIFY && (selfVerifyCount == 0 || editedSinceSelfVerify) ? overseerReview() : null;
                     if (selfVerifyOn && selfVerifyCount < MAX_SELFVERIFY
-                            && (selfVerifyCount == 0 || editedSinceSelfVerify || harnessFinding != null)) {
+                            && (selfVerifyCount == 0 || editedSinceSelfVerify || harnessFinding != null || review != null)) {
                         selfVerifyCount++;
                         editedSinceSelfVerify = false;
                         String cp = snapshotCheckpoint(selfVerifyCount); // lever-3: protect this pass from a later thrash
@@ -3718,7 +3983,8 @@ public final class FamiliarLoop {
                         log.info("  ↳ self-verify reflection (round {}/{}){}{}", selfVerifyCount, MAX_SELFVERIFY,
                                 cp != null ? " [checkpoint saved]" : "", tag);
                         // Objective harness finding FIRST (the model can't rationalize past a missing file / unmeasured metric).
-                        String harness = harnessFinding != null ? "HARNESS CHECK — " + harnessFinding + " " : "";
+                        String harness = (harnessFinding != null ? "HARNESS CHECK — " + harnessFinding + " " : "")
+                                + (review != null ? "REVIEW — the overseer, a stronger model that read the task, the plan, your files and the check, says: " + review + " Settle that first. " : "");
                         // Anti-thrash (rounds 2+): a mid model asked to "re-run everything" tends to re-edit a link
                         // that already works and break it (observed: docs-rag fixed the LLM call but broke retrieval).
                         // Keep verified links; fix only the still-hollow ones.
@@ -4263,6 +4529,7 @@ public final class FamiliarLoop {
                   directory (e.g. "write everything to output/<dir>/"), put every file under THAT one
                   directory and run your build/test commands from inside it. One tree.
                 - Make ONE concrete change or check per step, then observe the result before the next.
+                - Every change ships with the test that shows it works.
                 - Write real, runnable code. Resolve dependencies via the build tool (network is on).
                 - Read a file before editing it. Prefer edit_file for small changes; write_file for new files.
                 - If unsure of a library's real API, call read_dep_source and implement against the exact
@@ -4365,6 +4632,8 @@ public final class FamiliarLoop {
             String mark = completedSteps.contains(i) ? "✓" : (marked && !allDone && i == cur ? "→" : " ");
             sb.append("\n").append(mark).append(' ').append(i + 1).append(". ").append(planSteps.get(i));
         }
+        if (!planFiles.isEmpty()) { sb.append("\nFILES:"); for (String f : planFiles) sb.append("\n  - ").append(f); }
+        if (!reviewFocus.isEmpty()) { sb.append("\nREVIEW FOCUS (each gets a test in the step that owns it):"); for (String c : reviewFocus) sb.append("\n  - ").append(c); }
         return sb.append('\n').toString();
     }
 
@@ -4557,9 +4826,13 @@ public final class FamiliarLoop {
     }
 
     /** Reserve ~half the window for output, but never let input+output overflow n_ctx. */
+    /** The most output a provider said it takes on one request, learned from a refusal mid-run; 0 until one says. */
+    private int outCapFromServer;
+
     private int outputBudget(ArrayNode messages) {
         int inputTokens = estimateTokens(messages);
         int budget = Math.min(nctx / 2, nctx - inputTokens - 256);
+        if (outCapFromServer > 0) budget = Math.min(budget, outCapFromServer);
         return Math.max(512, budget);
     }
 
@@ -4839,8 +5112,9 @@ public final class FamiliarLoop {
         history.addAll(tail);
         log.info("compacted: {} old msgs → {} ({} chars), kept {} recent msgs",
                 oldSpan.size(), fromRecord ? "checkpoint written by the harness from its record" : "structured checkpoint", summary.length(), tail.size());
-        log.info("=== CHECKPOINT ===\n{}{}", summary.length() > 1400 ? summary.substring(0, 1400) + "…" : summary,
-                filesBlock);
+        // The whole checkpoint, not its first 1,400 characters: it is what a reader of the log has to judge the compaction by, and
+        // the sections that matter most (open questions, what was never verified) come last (2026-10-17).
+        log.info("=== CHECKPOINT ===\n{}{}", summary, filesBlock);
     }
 
     /**

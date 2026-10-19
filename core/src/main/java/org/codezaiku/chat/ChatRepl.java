@@ -164,7 +164,8 @@ public final class ChatRepl {
         // the terminal this REPL opens.
         this.consent = new ChatConsent(mode, this::askUser,
                 ChatSession.storeDir(this.root).resolve("consent"),
-                Path.of(System.getProperty("user.home"), ".codezaiku", "chat", "consent"));
+                Path.of(System.getProperty("user.home"), ".codezaiku", "chat", "consent"))
+                .rulings(r -> { if (session != null) session.decided(r); });   // a ruling rides every later turn in the restate
         if (fromId != null) {
             // --from <id>: onboard before the first message, so even turn one knows the history.
             ChatSession.load(this.root, fromId).ifPresent(old ->
@@ -407,6 +408,25 @@ public final class ChatRepl {
      * FAMILIAR.md, CLAUDE.md, AGENTS.md, capped — working agreements ride every turn without the
      * person restating them. A colleague knows the house rules.
      */
+    /** A message that corrects earlier work: a prohibition, a "not that, this", a "wrong". */
+    static boolean looksLikeCorrection(String text) {
+        if (text == null || text.length() < 8) return false;
+        String t = text.toLowerCase(Locale.ROOT);
+        // "only" is not here: "Write ONLY PLAN.md" and "Use ONLY the standard library" are asks, and with it three of a battery's five
+        // messages were taken for corrections (2026-10-17)
+        return (Pattern.compile("\\b(do not|don'?t|never|stop (using|doing)|not .{1,40}\\binstead|instead of|that'?s wrong|wrong|should (be|have been|use))\\b").matcher(t).find()
+                || Pattern.compile("(^|\\s)no,").matcher(t).find())
+                && !Pattern.compile("^(what|why|how|when|where|which|is|are|does|can|could)\\b|^do (you|we|i|they|it)\\b").matcher(t).find();   // a question, not an order: "do not" stays
+    }
+
+    /** "Done: <the first line> — check: <what the harness's own check said>", the line a later turn reads first. */
+    static String doneLine(String summary) {
+        String first = firstLine(summary);
+        int at = summary.indexOf("Done check, run by the harness:");
+        String check = at >= 0 ? firstLine(summary.substring(at)) : "";
+        return "Done: " + first + (check.isEmpty() ? "" : " — " + check);
+    }
+
     /** A message that will create or change things, as opposed to a question or a small edit. Cheap, and the plan call can still say NO PLAN. */
     static boolean looksLikeBuild(String text) {
         if (text == null) return false;
@@ -430,14 +450,7 @@ public final class ChatRepl {
             try {
                 var json = new ObjectMapper();
                 var msgs = json.createArrayNode();
-                msgs.addObject().put("role", "system").put("content",
-                        "You plan work for a coding assistant that runs in the project directory named below. Write a SHORT plan the person can approve: "
-                        + "under 14 lines. Sections, each one line or a few bullets: FILES (each file you will create or change, with its path); "
-                        + "APPROACH (how, in plain words); INSTALLS (packages or tools you would install, or 'none'); NOT DOING (what you will leave out). "
-                        + "Prefer the simplest thing that meets the ask: no server, framework or extra tool unless the ask needs one. "
-                        // With /plan on the step runs for every message, so the model may wave a question through. For a message
-                        // that already looks like a build there is no such door: the model declined a plain "do all 6" once.
-                        + (mayDecline ? "If the message is a question, an opinion, or a change small enough to just do, reply with exactly: NO PLAN" : "Always write the plan."));
+                msgs.addObject().put("role", "system").put("content", planInstruction(mayDecline));
                 msgs.addObject().put("role", "user").put("content", context + "\n\nTHE MESSAGE TO PLAN FOR:\n" + ask
                         + (changes.isEmpty() ? "" : "\n\nTHE PERSON'S CHANGES TO YOUR LAST PLAN (apply them):\n" + changes));
                 plan = drive.classify(msgs, 700).strip();
@@ -463,6 +476,25 @@ public final class ChatRepl {
         return "";
     }
 
+    /**
+     * The plan call's instruction. The first line names the kind of change, so the ceremony fits it and the person sees what they are
+     * approving (Superpowers' approval-scope rule, taken 2026-10-17 after a dashboard ask on a test box grew a server nobody asked for):
+     * a SPIKE builds a throwaway and reports; a BOUNDED change stays within the files it names, three lines; an ARCHITECTURAL change
+     * adds parts, a server, a schema, a framework, and gets the full plan. What the person approves is the plan as shown.
+     */
+    static String planInstruction(boolean mayDecline) {
+        return "You plan work for a coding assistant that runs in the project directory named below. Write a SHORT plan the person can approve: "
+                + "under 14 lines. The FIRST line names the kind of change and why in a few words: SPIKE (a throwaway to learn something, reported and "
+                + "discarded), BOUNDED (a change within the files you name), or ARCHITECTURAL (new parts: a server, a schema, a framework, a new "
+                + "service). Then the sections, each one line or a few bullets: FILES (each file you will create or change, with its path); "
+                + "APPROACH (how, in plain words); INSTALLS (packages or tools you would install, or 'none'); NOT DOING (what you will leave out). "
+                + "For a BOUNDED change write FILES, APPROACH and NOT DOING only. "
+                + "Prefer the simplest thing that meets the ask: no server, framework or extra tool unless the ask needs one. "
+                // With /plan on the step runs for every message, so the model may wave a question through. For a message
+                // that already looks like a build there is no such door: the model declined a plain "do all 6" once.
+                + (mayDecline ? "If the message is a question, an opinion, or a change small enough to just do, reply with exactly: NO PLAN" : "Always write the plan.");
+    }
+
     private String workingAgreements() {
         for (String name : new String[]{"FAMILIAR.md", "CLAUDE.md", "AGENTS.md"}) {
             Path f = root.resolve(name);
@@ -471,7 +503,9 @@ public final class ChatRepl {
                     String t = Files.readString(f);
                     if (t.length() > 3_000) t = t.substring(0, 3_000) + "\n…(truncated — read "
                             + name + " for the rest)";
-                    return "[working agreements — this project's " + name + "]\n" + t + "\n\n";
+                    // reference data, not an instruction channel: the project's file says how its code is done; the person's message says
+                    // what to do, and the harness's rules stand (Kimi Code frames AGENTS.md the same way, 2026-10-17)
+                    return "[working agreements — this project's " + name + ": how its code is done, reference for the work; the person's message says what to do]\n" + t + "\n\n";
                 } catch (IOException e) {
                     return "";
                 }
@@ -983,8 +1017,15 @@ public final class ChatRepl {
         // fifth of the fixed cost on a 32k one
         int window = drive.contextWindow();
         int exchangeChars = Math.max(2_000, (int) (window / 16 * 2.5));
+        // A correction is verified before it is applied (Superpowers' receiving-feedback rule, 2026-10-17): both tested models obeyed
+        // corrections and neither looked first. Said as what to do; and the correction itself is written down so it sticks.
+        String correction = looksLikeCorrection(text)
+                ? "THIS MESSAGE CORRECTS EARLIER WORK. First read the files it concerns and say in one line what you found there; "
+                  + "apply the correction where the code shows it applies, and only there; where the correction is unclear or the code "
+                  + "does not show what it means, ask one question and change nothing.\n\n" : "";
+        if (!correction.isEmpty()) session.decided("Correction from the person: " + firstLine(text));
         String goal = session.restate() + session.lastExchange(exchangeChars) + memory.recall() + workingAgreements()
-                + stacks + mapBlock + digest + attachments + text;
+                + stacks + mapBlock + digest + attachments + correction + text;
         abandoned.set(false);
         // THE PLAN STEP. Before a build starts, the model says what it will do and the person says go or changes
         // it. Decided 2026-09-18 after a build ask installed FastAPI and set out to write a server nobody wanted.
@@ -1111,7 +1152,9 @@ public final class ChatRepl {
                     + "\nKeep what is already done and fits; redo only what the change touches.");
             return;
         }
-        if (result.done() && result.summary() != null) session.decided(firstLine(result.summary()));
+        // the ledger line of a finished turn: what was done, and what the harness's own check said (Superpowers' "Task N: complete
+        // (tests: command → result)", 2026-10-17); a resumed session reads it in the restate before anything else
+        if (result.done() && result.summary() != null) session.decided(doneLine(result.summary()));
         session.save();
 
         // Refine-mode harvest: ONE classify call proposes how the turn changes the brief; the

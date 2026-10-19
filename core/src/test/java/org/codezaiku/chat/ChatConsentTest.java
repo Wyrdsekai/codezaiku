@@ -1,6 +1,9 @@
 package org.codezaiku.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -43,6 +46,7 @@ class ChatConsentTest {
         }
     }
 
+    private static JsonNode node(String json) { try { return new com.fasterxml.jackson.databind.ObjectMapper().readTree(json); } catch (Exception e) { throw new IllegalArgumentException(e); } }
     private static JsonNode shell(String cmd) {
         return J.createObjectNode().put("command", cmd);
     }
@@ -52,6 +56,35 @@ class ChatConsentTest {
     }
 
     // ---- what is never asked about --------------------------------------------------------------
+
+    // ---- what the person approved is the plan as shown, even in yolo ----------------------------
+    @Test
+    void inYoloANewFileThePlanDidNotNameIsAskedAboutOnceAndAPlannedOneIsNot() {
+        ChatConsent.FILE_EXISTS_FOR_TESTS = p -> p.equals("app/routes.py");
+        try {
+            var s = new Script(Answer.YES);
+            var c = new ChatConsent(Mode.YOLO, s);
+            c.plan("FILES: app/routes.py (change), app/views.py (create)\nAPPROACH: add the view\nNOT DOING: no server");
+            assertNull(c.permit("write_file", node("{\"path\":\"app/views.py\",\"content\":\"x\"}")), "named in the plan");
+            assertNull(c.permit("edit_file", node("{\"path\":\"app/routes.py\",\"old_string\":\"a\",\"new_string\":\"b\"}")), "an edit of an existing file");
+            assertEquals(0, s.asked.size());
+            assertNull(c.permit("write_file", node("{\"path\":\"server.py\",\"content\":\"import uvicorn\"}")), "asked and allowed");
+            assertEquals(1, s.asked.size()); assertTrue(s.asked.get(0).contains("a new file the plan did not name"), s.asked.get(0));
+        } finally { ChatConsent.FILE_EXISTS_FOR_TESTS = null; }
+    }
+
+    @Test
+    void anActOutsideThePlanThePersonAllowsIsWrittenDownAsARuling() {
+        ChatConsent.FILE_EXISTS_FOR_TESTS = p -> false;
+        try {
+            var s = new Script(Answer.YES);
+            List<String> rulings = new ArrayList<>();
+            var c = new ChatConsent(Mode.YOLO, s).rulings(rulings::add);
+            c.plan("FILES: app/routes.py\nAPPROACH: add the view\nNOT DOING: no server");
+            assertNull(c.permit("write_file", node("{\"path\":\"server.py\",\"content\":\"x\"}")));
+            assertEquals(1, rulings.size()); assertTrue(rulings.get(0).startsWith("Ruling: allowed") && rulings.get(0).contains("cost if wrong"), rulings.get(0));
+        } finally { ChatConsent.FILE_EXISTS_FOR_TESTS = null; }
+    }
 
     @Test
     void readingIsNeverInterrupted() {

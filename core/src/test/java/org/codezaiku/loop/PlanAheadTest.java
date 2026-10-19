@@ -4,8 +4,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.codezaiku.drive.DriveClient;
 import org.codezaiku.tools.ToolRegistry;
 import org.junit.jupiter.api.Test;
+import java.util.List;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -23,6 +25,43 @@ class PlanAheadTest {
 
     private static boolean planningCall(JsonNode req) {
         return req.path("messages").get(0).path("content").asText().startsWith("You are about to carry out a coding task");
+    }
+
+    /** The plan's FILES and REVIEW FOCUS blocks are read and pinned beside the steps; a reply without them pins the steps alone. */
+    @Test
+    void theFilesAndTheReviewFocusArePinnedBesideTheSteps(@TempDir Path tmp) throws Exception {
+        assertEquals(List.of("app/parser.py — the parser and its error", "tests/test_parser.py — the cases below"), FamiliarLoop.headedList(
+                "PLAN:\n1. a\n2. b\n\nFILES:\n- app/parser.py — the parser and its error\n- tests/test_parser.py — the cases below\n\nREVIEW FOCUS:\n- an empty file\n\nDONE CHECK:\nrun: none\n", "files"));
+        assertEquals(List.of("an empty file"), FamiliarLoop.headedList("REVIEW FOCUS:\n- an empty file\n\nDONE CHECK:\nrun: none\n", "review focus"));
+        assertEquals(List.of(), FamiliarLoop.headedList("PLAN:\n1. a\n2. b\n", "files"));
+        try (StubDrive stub = new StubDrive(req -> planningCall(req)
+                ? StubDrive.says("PLAN:\n1. Read the rows.\n2. Add them up.\n3. Write the totals and the tests.\n\nFILES:\n- app/sum.py — the adder\n- tests/test_sum.py — the cases\n\nREVIEW FOCUS:\n- a row with no number\n- an empty file\n\nDONE CHECK:\nrun: none\n")
+                : StubDrive.calls("task_done", "{\"summary\":\"done\"}"))) {
+            new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.readOnly(tmp, null), tmp, GOAL, 8, null, null).run();
+            String text = stub.requests.get(1).path("messages").get(0).path("content").asText();
+            assertTrue(text.contains("FILES:\n  - app/sum.py — the adder"), "the files are pinned with the plan: " + text.substring(Math.max(0, text.indexOf("PLAN ("))));
+            assertTrue(text.contains("REVIEW FOCUS (each gets a test in the step that owns it):") && text.contains("a row with no number"), "and the cases owed a test");
+        }
+    }
+
+    /** A source file the run changed that the plan's FILES did not name is said once at the verify step; a planned file is not. */
+    @Test
+    void aFileThePlanDidNotNameIsNamedAtTheVerifyStep(@TempDir Path tmp) throws Exception {
+        Files.createDirectories(tmp.resolve("app"));
+        int[] step = {0};
+        try (StubDrive stub = new StubDrive(req -> {
+            if (planningCall(req)) return StubDrive.says("PLAN:\n1. Read the rows.\n2. Add them up.\n3. Write the totals and the tests.\n\nFILES:\n- app/sum.py — the adder\n\nREVIEW FOCUS:\n- an empty file\n\nDONE CHECK:\nrun: none\n");
+            if (!req.has("tools")) return StubDrive.says("DONE CHECK:\nrun: none\n");
+            if (step[0] == 0) { step[0] = 1; return StubDrive.calls("write_file", "{\"path\":\"app/sum.py\",\"content\":\"def add(a, b):\\n    return a + b\\n\"}"); }
+            if (step[0] == 1) { step[0] = 2; return StubDrive.calls("write_file", "{\"path\":\"app/extra.py\",\"content\":\"x = 1\\n\"}"); }
+            return StubDrive.calls("task_done", "{\"summary\":\"done\"}");
+        })) {
+            new FamiliarLoop(new DriveClient(stub.url(), "t"), ToolRegistry.standard(tmp), tmp, GOAL, 12, null, null).run();
+            JsonNode last = stub.requests.get(stub.requests.size() - 1);
+            int said = 0;
+            for (JsonNode m : last.path("messages")) if ("user".equals(m.path("role").asText()) && m.path("content").asText("").contains("the run also changed `app/extra.py`")) said++;
+            assertEquals(1, said, "said once, naming the file the plan did not");
+        }
     }
 
     @Test

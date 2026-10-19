@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.14
+
+What's new: a stronger model can check a cheaper model's work, the chat remembers what you decided, and bug fixes.
+
+### Added
+
+- `--overseer <model>`: one model does the work, a stronger one checks it and says what is wrong. Off by default; in our tests
+  it did not help much.
+- A coding run's plan now lists the files it will change and what needs a test.
+- When a fix is finished without a test, the model is asked to add one.
+- The chat says what kind of change it is about to make: a quick try, a small change, or a big one.
+- The chat remembers your corrections and decisions from earlier turns.
+- `--effort on|off` turns a model's thinking on or off (OpenRouter models).
+- `--model auto` uses a model's free version on OpenRouter when nobody is waiting for the job. `codezaiku run --wait 0` says
+  nobody is waiting.
+- When a run changes a file its plan did not mention, it says so.
+- A file read that was cut off tells the model how to read the rest.
+
+### Fixed
+
+- A run that finished on its last turn with passing tests was reported as unfinished.
+- Files written with shell commands were not seen by the checks.
+- A message with the word "only" in it was taken as a correction.
+- On hosted models the model's reasoning was sent back with every request, which cost five times as much.
+- One instruction made GLM read for sixty turns without writing anything.
+
 ## 0.3.13
 
 You can now keep several models, on your own card or from a service, pick one for each coding job or let

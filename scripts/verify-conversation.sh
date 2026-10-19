@@ -69,9 +69,12 @@ bad() { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m  %s\n' "$1"
 # (measured 2026-08-29 — the 35B answered by paraphrasing the system prompt, and the 27B's
 # artifact shows no answer at all; file-based checks still passed because the PROJECT carries
 # state even when the conversation does not).
+# A build ask gets a plan first and waits for "go" (plan-then-approve, 2026-09-18); the second argument says a turn is one, and
+# "go" is fed before /quit. Without it the prompt ate /quit and the session left before building (measured 2026-10-17: 5 of 11).
 SID=""
 say() {
-    printf '%s\n/quit\n' "$1" \
+    printf '%s\n%s/quit\n' "$1" "${2:+$2
+}" \
         | ( cd "$PROJ" && t_out "${CONV_TURN_TIMEOUT:-900}" "$CZ" chat . --drive "$DRIVE" \
               --mode yolo --max-turns "$MAXTURNS" ${SID:+--from "$SID"} ) >"$WORK/turn.txt" 2>&1
     cat "$WORK/turn.txt" >> "$WORK/all.txt"
@@ -82,7 +85,7 @@ say() {
 
 echo
 echo "== 1. plan"
-say "Plan a small URL-shortener web service in Python: POST /shorten takes a JSON url and returns a short code; GET /<code> redirects to it. In-memory storage. Write the plan to PLAN.md as numbered steps naming the files to create. Write ONLY PLAN.md — no code."
+say "Plan a small URL-shortener web service in Python: POST /shorten takes a JSON url and returns a short code; GET /<code> redirects to it. In-memory storage. Write the plan to PLAN.md as numbered steps naming the files to create. Write ONLY PLAN.md — no code." go
 [ -f "$PROJ/PLAN.md" ] && ok "wrote PLAN.md" || bad "wrote PLAN.md" "$(ls "$PROJ")"
 grep -qi 'shorten' "$PROJ/PLAN.md" 2>/dev/null && grep -qi 'redirect' "$PROJ/PLAN.md" 2>/dev/null \
     && ok "the plan covers both endpoints" || bad "the plan covers both endpoints"
@@ -98,7 +101,7 @@ PYFILES() { find "$PROJ" -name '*.py' -not -path '*/__pycache__/*' -not -path '*
 
 echo
 echo "== 2. implement from the plan"
-say "Read PLAN.md and implement it. Use ONLY the Python standard library — http.server, no third-party packages. Write the service and a test file that runs under pytest."
+say "Read PLAN.md and implement it. Use ONLY the Python standard library — http.server, no third-party packages. Write the service and a test file that runs under pytest." go
 [ -n "$(PYFILES)" ] && ok "wrote Python files" || bad "wrote Python files" "$(ls "$PROJ")"
 PYFILES | xargs grep -qi 'shorten' 2>/dev/null && ok "the code implements /shorten" \
     || bad "the code implements /shorten"
@@ -117,7 +120,7 @@ fi
 
 echo
 echo "== 4. extend its own work"
-say "Now add a hit counter: every successful redirect increments a count for that code, and GET /stats/<code> returns it as JSON. Update the tests."
+say "Now add a hit counter: every successful redirect increments a count for that code, and GET /stats/<code> returns it as JSON. Update the tests." go
 PYFILES | xargs grep -q 'stats' 2>/dev/null && ok "the extension landed" \
     || bad "the extension landed" "no /stats anywhere in the tree"
 
@@ -146,7 +149,9 @@ fi
 
 echo
 echo "== the session held together"
-STATE=$(find "$CODEZAIKU_CHAT_DIR" -name '*.md' 2>/dev/null | head -1)
+# The session's own file, not a copy the undo step keeps under undo/ (measured 2026-10-17: the first .md found was undo/…/PLAN.md,
+# which has no turns line, and a session that recorded every turn read as "turns were not recorded").
+STATE=$(find "$CODEZAIKU_CHAT_DIR" -name '*.md' -not -path '*/undo/*' 2>/dev/null | head -1)
 [ -n "$STATE" ] && ok "a session state file exists" || bad "a session state file exists"
 [ -n "$STATE" ] && grep -qE 'turns: [1-9]' "$STATE" && ok "turns were recorded" || bad "turns were recorded"
 

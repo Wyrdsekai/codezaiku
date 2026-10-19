@@ -91,6 +91,10 @@ public final class RunVerb {
 
         int exit;
         try {
+            // Nobody waiting (--wait 0) lets best judgement take a model's free twin; the flag was read for the other verbs only,
+            // and a host's batch job, the one job nobody waits for, could never say so (found 2026-10-17 by the free-twin check).
+            if (a.wait >= 0) FamiliarMain.waitFor(a.wait);
+            FamiliarMain.overseeWith(a.overseer);
             FamiliarMain.Tracked t = FamiliarMain.runLoopTracked(
                     workspace, a.text, a.drive, a.maxTurns, "none", a.mode, a.model);
             state.tracked = t;
@@ -171,6 +175,7 @@ public final class RunVerb {
                     .interrupted(interrupted)
                     .error(error)
                     .model(t != null && t.run() != null ? t.run().model() : a.model == null ? Config.get("CODEZAIKU_MODEL", "local-model") : a.model)
+                    .overseer(t != null && t.overseer() != null ? t.overseer().model() : null)
                     .provider(a.provider)
                     .savedModel(t != null && t.run() != null ? t.run().name() : null)
                     .host(t != null && t.run() != null ? t.run().host() : null)
@@ -216,6 +221,10 @@ public final class RunVerb {
         int maxTurns = Config.getInt("CODEZAIKU_RUN_MAX_TURNS", 40);
         boolean json;
         boolean quiet;
+        /** --wait <minutes>: how long somebody will wait for this job; 0 = nobody is, and best judgement may take a slower or free model. -1 = not given. */
+        double wait = -1;
+        /** --overseer <saved name>: the model that plans and reviews while --model does the work. */
+        String overseer;
 
         static Args parse(String[] argv) {
             Args a = new Args();
@@ -230,6 +239,8 @@ public final class RunVerb {
                     case "--drive" -> a.drive = need(argv, ++i, "--drive");
                     case "--workspace", "-C" -> a.workspace = Path.of(need(argv, ++i, "--workspace"));
                     case "--max-turns" -> a.maxTurns = Integer.parseInt(need(argv, ++i, "--max-turns"));
+                    case "--wait" -> a.wait = Double.parseDouble(need(argv, ++i, "--wait"));
+                    case "--overseer" -> a.overseer = need(argv, ++i, "--overseer");
                     case "--output-format" -> a.json = "json".equalsIgnoreCase(need(argv, ++i, "--output-format"));
                     case "-q", "--quiet" -> a.quiet = true;
                     // Accepted and ignored: we hold no session state, so there is nothing to disable.

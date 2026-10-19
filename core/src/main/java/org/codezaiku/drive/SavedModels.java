@@ -217,8 +217,23 @@ public final class SavedModels {
     }
 
     /** Best judgement for a job: the pick and its reasoning as a choice. */
+    /**
+     * The free twin of a model on OpenRouter ({@code <id>:free}, rate-limited, the same weights), when nobody is waiting: opencode
+     * shows the free models beside their paid twins; best judgement takes one when the job can wait (2026-10-17). Null when there is
+     * none, the job is interactive, or the entry is not on OpenRouter.
+     */
+    static String freeTwin(Entry e, Auto.Job job) {
+        if (e == null || job == null || job.interactive() || e.model() == null || e.model().endsWith(":free")) return null;
+        String host = e.host();
+        if (host == null || !host.endsWith("openrouter.ai")) return null;
+        String twin = e.model() + ":free";
+        return DriveClient.OpenRouterModels.knows(twin) ? twin : null;
+    }
+
     public static Choice choose(Auto.Job job) {
         Auto.Pick p = Auto.choose(job);
+        String twin = freeTwin(p.entry(), job);
+        if (twin != null) return new Choice(p.entry(), p.entry().drive(), twin, p.why() + "; its free twin " + twin + ", since nobody is waiting (rate-limited, the same model)");
         return new Choice(p.entry(), p.entry().drive(), p.entry().model(), p.why());
     }
 

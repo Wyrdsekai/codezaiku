@@ -32,6 +32,21 @@ class RunVerbArgsTest {
         assertEquals("coder-9b", a.model);
     }
 
+    /** A host's batch job is the one job nobody waits for; --wait 0 says so, and best judgement may then take a free twin. */
+    @Test void waitIsReadAndNotGivenMeansMinusOne() {
+        var a = RunVerb.Args.parse(new String[]{"--text", "t", "--model", "auto", "--wait", "0"});
+        assertEquals(0.0, a.wait);
+        assertEquals("auto", a.model);
+        assertEquals(-1.0, RunVerb.Args.parse(new String[]{"--text", "t"}).wait, "no --wait: the setting decides");
+    }
+
+    /** --overseer names the model that plans and reviews while --model does the work. */
+    @Test void overseerIsRead() {
+        var a = RunVerb.Args.parse(new String[]{"--text", "t", "--model", "local", "--overseer", "glm"});
+        assertEquals("glm", a.overseer); assertEquals("local", a.model);
+        assertEquals(null, RunVerb.Args.parse(new String[]{"--text", "t"}).overseer);
+    }
+
     @Test void requiresText() {
         var e = assertThrows(IllegalArgumentException.class,
                 () -> RunVerb.Args.parse(new String[]{"--output-format", "json"}));

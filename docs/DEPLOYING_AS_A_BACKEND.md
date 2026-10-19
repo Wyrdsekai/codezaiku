@@ -103,11 +103,16 @@ You should get a single JSON document on stdout and exit 0.
 
 ```
 codezaiku run --text <TASK|@FILE|-> --output-format json --no-session -q \
-              [--provider <p>] [--model <m>] [--task-id <id>] [--max-turns <n>]
+              [--provider <p>] [--model <m>] [--overseer <saved name>] [--task-id <id>] [--max-turns <n>] [--wait <minutes>]
 ```
 
 - **`--model <m>`** is a saved model's name or a model id on the drive; a saved model's monthly cap, when reached, ends the run
   at once with `status: failed` and the figures in `error`, before anything is sent.
+- **`--wait <minutes>`** says how long somebody is waiting for this job; `0` means nobody is, which lets
+  `--model auto` take a slower or free model (on OpenRouter, a saved model's free twin, priced at nothing).
+  Without it the setting applies (5 minutes).
+- **`--overseer <saved name>`** names a stronger saved model that reviews the work while `--model` plans and does it; with
+  `--model auto` one is picked only when the setting `auto.overseer` is on. The document's `overseer` field says which model oversaw.
 - **The subprocess working directory is the workspace.** There is no workspace flag; set the child
   process's CWD. All paths in the result are relative to it.
 - **stdout carries exactly one JSON document.** Narration goes to stderr, so you can log it for humans
@@ -188,6 +193,10 @@ adds up.
 
 Treat `2` as "ran out of room", not "went wrong". It used to be reported as `failed` with exit `1`,
 which is why a caller reading only the exit code would conclude a completed task had failed.
+
+**`warning`** is present only when the run declared done on its last turn and the harness's check passed on what
+is on disk: the status is what the oracle says, `success` when it ran green, and the field says the finish came at the
+turn limit. A run that reached its last turn without a passing check stays `incomplete`.
 
 **`status` is deliberately not flattering.** `success` requires that a real test oracle *ran and
 passed*, with genuine counts. `untested` means the agent finished and nothing verified its claim —

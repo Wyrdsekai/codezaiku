@@ -131,7 +131,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.13";
+    public static final String VERSION = "0.3.14";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -161,6 +161,8 @@ public final class FamiliarMain {
                 modelFlag = flag(args, "--model", null);
                 String wait = flag(args, "--wait", null);   // --wait <minutes>: how long the person will wait for this job (0 = any); best judgement reads it
                 if (wait != null) { waitFlag = Double.parseDouble(wait); args = withoutFlag(args, "--wait"); }
+                String over = flag(args, "--overseer", null);   // --overseer <saved name>: the model that plans and reviews while --model does the work
+                if (over != null) { overseerFlag = over; args = withoutFlag(args, "--overseer"); }
             } catch (IllegalArgumentException e) { System.err.println("codezaiku: " + e.getMessage()); System.exit(2); }
             if (modelFlag != null) args = withoutFlag(args, "--model");
         }
@@ -943,6 +945,8 @@ public final class FamiliarMain {
                                                 so a one-file task grows a test suite to satisfy them
                 --model <saved name|id>         the model for this run: a saved model (its own address,
                                                 id and prices) or an id on the drive; --provider is recorded only
+                --overseer <saved name>         a stronger model that writes the plan and reviews the work,
+                                                while --model does it; auto picks one when a stronger model is saved
                 -q                              silence narration entirely
                 --text @FILE  (or -)            read the task from a file (or stdin). Windows needs
                                                 this for a task over ~8K: cmd.exe refuses a longer
@@ -974,6 +978,7 @@ public final class FamiliarMain {
             Every job that drives a model takes --model <saved name|model id|auto>: code, loop, decompose, review, research, chat, run.
             With a second model saved, auto is the default: best judgement picks by tier, wait and price, and says why.
             --wait <minutes> says how long you will wait for this job (0 = as long as it takes); auto.wait_minutes is the setting.
+            --overseer <saved name> has a stronger model review the work; auto.overseer on makes auto pair one.
             Configuration is by environment variable; see docs/CONFIGURATION.md.
             """.formatted(DEFAULT_DRIVE));
     }
@@ -2325,6 +2330,29 @@ public final class FamiliarMain {
     /** The wait a person accepts for a job somebody is waiting for: --wait <minutes> (0 = any), else the setting (5). */
     private static volatile double waitFlag = -1;
     static double waitMinutes() { return waitFlag >= 0 ? waitFlag : Config.getInt("CODEZAIKU_AUTO_WAIT_MINUTES", 5); }
+    /** The wait a caller declared for the job it is about to run (the run verb reads its own flags). */
+    public static void waitFor(double minutes) { waitFlag = minutes; }
+
+    /** The overseer a caller named for the job it is about to run (--overseer <saved name>); null = best judgement's, when auto picks, else none. */
+    private static volatile String overseerFlag;
+    public static void overseeWith(String savedName) { overseerFlag = savedName; }
+
+    /**
+     * The overseer seat for a job: the saved model named with --overseer, or best judgement's pick (the strongest saved model above the
+     * worker) when the job's model was auto's choice; null when there is none, and the worker plans for itself as before.
+     */
+    static SavedModels.Choice overseerFor(SavedModels.Choice worker, boolean auto, Auto.Job job) {
+        if (overseerFlag != null && !overseerFlag.isBlank()) {
+            SavedModels.Choice c = SavedModels.choose(null, overseerFlag);
+            return new SavedModels.Choice(c.entry(), c.drive(), c.model(), "overseer " + overseerFlag + ": named for this job");
+        }
+        // Measured 2026-10-18 (local 27B working, GLM overseeing): maintenance 18 of 18 against 17 alone, the hard set 15 of 24 against
+        // 29 of 40 alone; no lift on judgement work, a loss where the overseer's longer plan sent the worker churning. So auto pairs one
+        // only when asked: `codezaiku config set auto.overseer on`.
+        if (!auto || !Config.isOn("CODEZAIKU_AUTO_OVERSEER", false)) return null;
+        Auto.Pick p = Auto.chooseOverseer(job, worker.entry());
+        return p == null ? null : new SavedModels.Choice(p.entry(), p.entry().drive(), p.entry().model(), p.why());
+    }
 
     /** The same for the command line: the refusal is printed, and the command ends. */
     static SavedModels.Choice chosenOrExit(String driveArg, String model) { return chosenOrExit(driveArg, model, Auto.Job.of("code", "B", true, null)); }
@@ -2337,11 +2365,22 @@ public final class FamiliarMain {
     /** The job's tokens and cost on the ledger, and the line a person reads about them. */
     static ModelRun settle(String kind, Path where, SavedModels.Choice c, long[] usage) { return settle(kind, where, c, usage, 0, null); }
 
-    static ModelRun settle(String kind, Path where, SavedModels.Choice c, long[] usage, long secs, String status) {
-        double cost = c.entry().cost(usage);
-        ModelRun run = new ModelRun(c.entry().name() == null ? "" : c.entry().name(), c.model(), c.entry().host(), usage, cost, c.entry().prices() != null);
+    static ModelRun settle(String kind, Path where, SavedModels.Choice c, long[] usage, long secs, String status) { return settle(kind, where, c, usage, secs, status, null); }
+
+    /** As above, with what the effort tree did on the run, if anything: on the model line and in the ledger. */
+    static ModelRun settle(String kind, Path where, SavedModels.Choice c, long[] usage, long secs, String status, String raised) { return settle(kind, where, c, usage, secs, status, raised, null); }
+
+    /**
+     * As above, with a note on how the model changed on the way, if it did: a free twin that stayed overloaded was swapped for the paid
+     * one. {@code c.model()} is the model the job ended on; a run that ended on the paid one is priced whole at the paid rate, which
+     * counts the twin's few tokens as paid, never the other way round.
+     */
+    static ModelRun settle(String kind, Path where, SavedModels.Choice c, long[] usage, long secs, String status, String raised, String note) {
+        double cost = c.model() != null && c.model().endsWith(":free") ? 0 : c.entry().cost(usage);   // the free twin is priced at nothing
+        String onLine = raised == null ? note : note == null ? raised : raised + "; " + note;
+        ModelRun run = new ModelRun(c.entry().name() == null ? "" : c.entry().name(), c.model(), c.entry().host(), usage, cost, c.entry().prices() != null, onLine);
         if (usage[0] + usage[3] > 0) {
-            try { Spend.record(kind, where, c.entry(), usage, cost, secs, status); }
+            try { Spend.record(kind, where, c.entry(), usage, cost, secs, status, raised, c.model(), note); }
             catch (IOException e) { System.err.println("the spend ledger could not be written: " + e.getMessage()); }
         }
         return run;
@@ -2373,13 +2412,15 @@ public final class FamiliarMain {
      * unscoped shell command that could modify files also ran, in which case the list is a lower bound
      * and the caller should reconcile against git rather than present it as the whole set.
      */
-    public record Tracked(FamiliarLoop.Result result, List<String> files, boolean filesComplete, ModelRun run) {
+    public record Tracked(FamiliarLoop.Result result, List<String> files, boolean filesComplete, ModelRun run, ModelRun overseer) {
+        public Tracked(FamiliarLoop.Result result, List<String> files, boolean filesComplete, ModelRun run) { this(result, files, filesComplete, run, null); }
         public Tracked(FamiliarLoop.Result result, List<String> files, boolean filesComplete) { this(result, files, filesComplete, null); }
     }
 
     /** What a job ran on and what it cost: the saved model's name (blank when none), the model id, the host, the tokens, the dollars. */
-    public record ModelRun(String name, String model, String host, long[] usage, double cost, boolean priced) {
-        public String line() { return "model: " + (name.isBlank() ? model + " via " + host : name + " (" + model + " via " + host + ")") + " — " + Spend.usageLine(usage, cost, priced); }
+    public record ModelRun(String name, String model, String host, long[] usage, double cost, boolean priced, String raised) {
+        public ModelRun(String name, String model, String host, long[] usage, double cost, boolean priced) { this(name, model, host, usage, cost, priced, null); }
+        public String line() { return "model: " + (name.isBlank() ? model + " via " + host : name + " (" + model + " via " + host + ")") + " — " + Spend.usageLine(usage, cost, priced) + (raised == null ? "" : " — " + raised); }
     }
 
     /** As {@link #runLoop}, also returning which files the run wrote. */
@@ -2427,9 +2468,15 @@ public final class FamiliarMain {
         String conventions = ProjectConventions.promptBlock(root);
         if (!conventions.isEmpty()) System.out.println("project conventions: loaded");
         goal = mode.preamble() + "\n\n" + conventions + "TASK:\n" + goal;
-        SavedModels.Choice chosenModel = chosen(baseUrl, model, Auto.Job.of("code", Auto.tierForCoding(goal, mode == CodeMode.CREATE), true, root));
+        Auto.Job job = Auto.Job.of("code", Auto.tierForCoding(goal, mode == CodeMode.CREATE), true, root);
+        boolean autoPick = model != null && model.strip().equalsIgnoreCase(Auto.NAME) || ((model == null || model.isBlank()) && Auto.isDefault());
+        SavedModels.Choice chosenModel = chosen(baseUrl, model, job);
         System.out.println("model: " + chosenModel.entry().describe());
         var drive = new DriveClient(chosenModel.drive(), chosenModel.model()).effort(chosenModel.entry().effort());
+        // The overseer seat: a stronger model that writes the plan and reviews the work, while the drive does it (2026-10-18)
+        SavedModels.Choice overseerChoice = overseerFor(chosenModel, autoPick, job);
+        DriveClient overseer = overseerChoice == null ? null : new DriveClient(overseerChoice.drive(), overseerChoice.model()).effort(overseerChoice.entry().effort());
+        if (overseerChoice != null) System.out.println(overseerChoice.why());
         long[] usage = new long[4];
         long startedAt = System.currentTimeMillis();
         DriveClient.countInto(usage);
@@ -2439,30 +2486,40 @@ public final class FamiliarMain {
         // Tools the host brought: the MCP servers an ACP client named in session/new, already started and listed.
         if (hooks != null && hooks.extraTools() != null) for (var extra : hooks.extraTools()) tools.add(extra);
         BooleanSupplier cancel = hooks == null ? null : hooks.cancelled();
+        FamiliarLoop loop = null;
         FamiliarLoop.Result result;
         try {
         // LIBRARY A/B (CODEZAIKU_LIB_OFF=1): OFF arm passes null library+index -> no idioms, no error-grounding
         // injection, no worked-examples. ProjectShape (project-shape snapshot) stays ON either way (always-on).
         if ("1".equals(Config.get("CODEZAIKU_LIB_OFF")) || "off".equalsIgnoreCase(Config.get("CODEZAIKU_LIB_OFF"))) {
             System.out.println("library: OFF (A/B baseline -- idioms + error-grounding + worked-examples disabled; project-shape still on)");
-            result = forMode(new FamiliarLoop(drive, tools, root, goal, maxTurns, null, null), mode)
-                    .lsp(lsp).cancelIf(cancel).run();
+            loop = forMode(new FamiliarLoop(drive, tools, root, goal, maxTurns, null, null), mode).lsp(lsp).cancelIf(cancel).overseer(overseer);
+            result = loop.run();
         } else {
             try (var index = new LibraryIndex(libraryIndexDir())) {
                 if (index.available()) {
                     System.out.println("library: " + index.size() + " chunks indexed at " + libraryIndexDir());
                 }
-                result = forMode(new FamiliarLoop(drive, tools, root, goal, maxTurns, new Library(), index), mode)
-                        .lsp(lsp).cancelIf(cancel).run();
+                loop = forMode(new FamiliarLoop(drive, tools, root, goal, maxTurns, new Library(), index), mode).lsp(lsp).cancelIf(cancel).overseer(overseer);
+                result = loop.run();
             }
         }
         } finally { DriveClient.stopCounting(); }
         var scope = tools.scope();
-        ModelRun run = settle("code", root, chosenModel, usage, (System.currentTimeMillis() - startedAt) / 1000, result.done() ? "success" : "incomplete");
+        String raised = null;   // the note on the model line: the overseer's part, when there is one
+        // The overseer's own line and ledger entry: its calls were counted apart
+        ModelRun oversaw = null;
+        if (overseer != null && loop != null) {
+            long[] ou = loop.overseerUsage();
+            oversaw = settle("oversee", root, overseerChoice, ou, (System.currentTimeMillis() - startedAt) / 1000, result.done() ? "success" : "incomplete", null);
+            raised = "overseer " + (overseerChoice.entry().name() == null ? overseerChoice.model() : overseerChoice.entry().name())
+                    + ": " + loop.overseerReviews() + " review" + (loop.overseerReviews() == 1 ? "" : "s") + ", " + Spend.usageLine(ou, oversaw.cost(), oversaw.priced());
+        }
+        ModelRun run = settle("code", root, chosenModel, usage, (System.currentTimeMillis() - startedAt) / 1000, result.done() ? "success" : "incomplete", raised);
         System.out.println(run.line());
         return new Tracked(result,
                 scope == null ? List.of() : scope.written(),
-                scope != null && !scope.mayBeIncomplete(), run);
+                scope != null && !scope.mayBeIncomplete(), run, oversaw);
     }
 
     /** Read-only code REVIEW → structured findings (no edits). Reuses the familiar's navigation with the

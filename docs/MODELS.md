@@ -275,7 +275,7 @@ codezaiku model list
 The address is an `http(s)://` base or a host word: `anthropic`, `openai`, `openrouter`, `gemini`, `nebius`, `huggingface`,
 `deepseek`, `moonshot`. The model id is the one the server selects by (a local llama.cpp ignores it; leave it out). Prices are
 dollars per million tokens, `in/out` or `in/out/cache` where the host charges less for the part of the prompt it read from its
-cache; they are what you write down, and `codezaiku spend` does arithmetic on them. The effort is the model's own levels
+cache; they are what you write down, and `codezaiku spend` does arithmetic on them. The effort is `on` or `off` for the thinking switch through OpenRouter (measured 17 October 2026: an effort level there is not more thinking than the default, `on` is), or the model's own levels
 (`low`, `medium`, `high` …) and wins over `CODEZAIKU_REASONING_EFFORT` for that model. The cap is dollars a month: once the month's
 jobs on that saved model add up to it, the next one is refused before it starts, with the figures.
 
@@ -318,6 +318,14 @@ ML judgement), or one you set, `codezaiku model set
 mimo --tier B`. The tier a coding job needs comes from its goal: a build from nothing, a migration, security, a refactor or anything
 with machine learning in it needs A; ordinary maintenance B; a typo or wording change C. A review needs B, a research run A.
 
+**A job nobody is waiting for runs on the free twin when there is one.** OpenRouter lists some models twice, the
+second as `<id>:free`, the same weights rate-limited at no charge; a batch job on such a model takes the twin, the pick
+says so, and the ledger prices it at nothing. A job somebody is waiting for keeps the paid one. A `run` job says nobody is
+waiting with `--wait 0`.
+
+**How hard a model thinks is set on the saved model.** `--effort on|off` on a saved model turns its thinking on or off through
+OpenRouter (GLM, Kimi and DeepSeek have the switch); a run starts at that setting and keeps it.
+
 Minutes and dollars are estimated from the saved model's prices and typical tokens at first; once a model has run three jobs of a
 kind here, from the ledger's own record of what it took and cost, which beats any list price.
 
@@ -327,6 +335,14 @@ are waiting for, `--wait 0` on a job means as long as it takes; `auto.max_dollar
 `auto.local_only` keeps every job on local models; and `codezaiku model private <project> on` marks one project so that only local
 models may read it, for code that must not leave the machine. `codezaiku model auto --kind code --tier A --project <dir>` shows the
 pick for such a job without running anything.
+
+**The overseer.** `--overseer <saved name>` beside `--model` has a stronger model look over the cheaper model's work: once when
+it finishes, and once mid-run if the check has stayed red for most of the turns. It reads the task, the plan, the changed files and
+the check's verdict, and names the one thing wrong or missing, which the worker then settles. A few short calls a job, shown on the
+cost line. It is off unless you ask for it: measured on 18 October 2026 with the local 27B working and GLM-5.3 overseeing, it did
+not lift the local model on hard work (15 of 24 against 29 of 40 alone, and 5 of 12 against 9 of 20 in a second shape), and a
+plan the stronger model wrote made a long task worse, so the worker keeps its own plan. `codezaiku config set auto.overseer on`
+makes auto pair one. For hard work, the lever is which model does the work, which auto's tier choice already decides.
 
 ## What a job cost
 

@@ -82,7 +82,7 @@ public final class ReadFileTool implements Tool {
             int start = Math.max(0, offset > 0 ? offset - 1 : 0);
             if (start >= total) return "ERROR: offset " + offset + " is past end of file (" + total + " lines)";
             int end = limit > 0 ? Math.min(total, start + limit) : total;
-            return "(lines " + (start + 1) + "-" + end + " of " + total + ")\n" + cap(String.join("\n", lines.subList(start, end)));
+            return "(lines " + (start + 1) + "-" + end + " of " + total + ")\n" + cap(String.join("\n", lines.subList(start, end)), rel, start + 1);
         }
 
         String whole = String.join("\n", lines);
@@ -90,13 +90,21 @@ public final class ReadFileTool implements Tool {
         if (whole.length() <= CAP) return whole;
 
         int head = Math.min(HEAD_LINES, total);
+        // The next call written out whole: a small model copies a literal and garbles a template (Kimi Code's read result carries the
+        // same, 2026-10-17).
         return "FILE IS LARGE (" + total + " lines, " + whole.length() + " chars) — showing the first "
                 + head + " lines for structure. grep -n for what you need, then read the range with "
-                + "read_file(path, offset, limit). Do NOT read the whole file.\n\n"
+                + "read_file(path, offset, limit), for example read_file(path=\"" + rel + "\", offset=" + (head + 1) + ", limit=200). "
+                + "Read it in ranges.\n\n"
                 + String.join("\n", lines.subList(0, head));
     }
 
-    private static String cap(String s) {
-        return s.length() <= CAP ? s : s.substring(0, CAP) + "\n...[truncated; narrow the offset/limit range]";
+    /** A range cut at the cap says where it stopped and the call that continues it, written out whole. */
+    private static String cap(String s, String rel, int firstLine) {
+        if (s.length() <= CAP) return s;
+        String kept = s.substring(0, CAP);
+        int linesKept = (int) kept.chars().filter(c -> c == '\n').count();
+        int next = firstLine + linesKept;
+        return kept + "\n...[cut after line " + (next - 1) + "; the range continues: read_file(path=\"" + rel + "\", offset=" + next + ", limit=200)]";
     }
 }

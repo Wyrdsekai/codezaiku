@@ -126,6 +126,21 @@ public final class DriveClient {
     private volatile String effort;
     /** A saved model's own effort, which wins over the setting. Blank or null: the setting. */
     public DriveClient effort(String e) { this.effort = e == null || e.isBlank() ? null : e.strip(); return this; }
+    /** The effort this drive sends, or null when the model's own default is left alone. */
+    public String effort() { return effort; }
+    /** Tests set this to say whether the drive has a thinking switch; null asks the host. */
+    public static volatile Boolean THINKING_SWITCH_FOR_TESTS;
+    /**
+     * Whether this drive's model has a thinking switch the harness may turn on: through OpenRouter, a model whose list entry takes
+     * {@code reasoning} (measured 2026-10-17 on GLM-5.3 and Kimi K3: the switch is the one setting that adds thinking there). Other
+     * hosts take an effort level, which is not the same lever, so the answer is no until measured.
+     */
+    public boolean hasThinkingSwitch() {
+        if (THINKING_SWITCH_FOR_TESTS != null) return THINKING_SWITCH_FOR_TESTS;
+        if (!openRouter()) return false;
+        Set<String> ok = OpenRouterModels.supportedParameters(model);
+        return ok == null || ok.contains("reasoning");
+    }
 
     /**
      * Bearer credential for the endpoint, or null when none is configured.
@@ -247,6 +262,8 @@ public final class DriveClient {
     private static final ThreadLocal<long[]> COUNT = new ThreadLocal<>();
     public static void countInto(long[] acc) { if (acc == null) COUNT.remove(); else COUNT.set(acc); }
     public static void stopCounting() { COUNT.remove(); }
+    /** The array this thread's tokens are counted into now, or null: for a caller that counts a second drive's calls apart and then restores this. */
+    public static long[] counting() { return COUNT.get(); }
 
     /** Per-request HTTP timeout. Five minutes suits every drive we had — until a 744B with
      *  CPU-resident experts needed 10-20 min per long generation and every call "failed" at
@@ -833,7 +850,10 @@ public final class DriveClient {
     boolean openRouter() { String h = hostOf(baseUrl); return h != null && h.endsWith("openrouter.ai"); }
 
     /** Whether this drive is a hosted API on the OpenAI-style path (not Claude's, OpenAI's own or Bedrock, which have clients of their own). */
-    boolean hostedApi() { return hostedApi(baseUrl); }
+    /** Tests set this; null reads the address. */
+    public static volatile Boolean HOSTED_FOR_TESTS;
+    /** Whether this drive is a hosted API: a model's reasoning is not sent back there (FamiliarLoop), and the request takes the host's shape. */
+    public boolean hostedApi() { return HOSTED_FOR_TESTS != null ? HOSTED_FOR_TESTS : hostedApi(baseUrl); }
 
     /** OpenRouter, Gemini, Nebius, Hugging Face's router, DeepSeek, Mistral, Groq, xAI, Together, Fireworks, Moonshot: metered APIs that speak the OpenAI chat format. */
     public static boolean hostedApi(String url) {
@@ -864,12 +884,23 @@ public final class DriveClient {
             ObjectNode t = body.putObject("chat_template_kwargs"); t.put("enable_thinking", false); t.put("thinking", false);
         }
         if (quick && h.endsWith("api.deepseek.com")) body.putObject("thinking").put("type", "disabled");   // DeepSeek's own API has its own field
+        if (!h.endsWith("openrouter.ai") && body.has("reasoning_effort")) {
+            String e = body.path("reasoning_effort").asText("");
+            if (e.equals("on") || e.equals("off")) body.remove("reasoning_effort");   // the switch is OpenRouter's reasoning.enabled; other hosts take an effort only
+        }
         if (h.endsWith("openrouter.ai")) {
             Set<String> ok = OpenRouterModels.supportedParameters(body.path("model").asText(""));
             // OpenRouter's word for the effort is reasoning.effort; reasoning_effort is dropped where the model takes neither
             if (body.has("reasoning_effort")) {
                 String e = body.remove("reasoning_effort").asText("");
-                if ((ok == null || ok.contains("reasoning")) && !e.isBlank()) body.putObject("reasoning").put("effort", e);
+                // "on" and "off" are the switch (Kimi Code's words): through OpenRouter, reasoning.enabled. Measured 2026-10-17 on a
+                // question that needs thought: GLM-5.3 reasoned 1,824 tokens with no field, 229 at effort high, 3,420 enabled;
+                // Kimi K3 735, 502, 1,167. An effort is not more thinking on this wire; enabled is.
+                if (ok == null || ok.contains("reasoning")) {
+                    if (e.equals("on")) body.putObject("reasoning").put("enabled", true);
+                    else if (e.equals("off")) { if (OpenRouterModels.reasoningMandatory(body.path("model").asText(""))) body.putObject("reasoning").put("effort", "low"); else body.putObject("reasoning").put("enabled", false); }
+                    else if (!e.isBlank()) body.putObject("reasoning").put("effort", e);
+                }
             }
             if (ok != null) for (String f : new String[]{"temperature", "top_p", "stop", "parallel_tool_calls", "seed", "frequency_penalty", "presence_penalty", "logit_bias", "logprobs", "response_format", "min_p", "top_k", "repetition_penalty"})
                 if (body.has(f) && !ok.contains(f)) body.remove(f);
@@ -916,6 +947,8 @@ public final class DriveClient {
             entries = m;
             return m;
         }
+        /** Whether the list carries this id at all: a model's free twin is {@code <id>:free}, listed beside it when the provider offers one. */
+        public static boolean knows(String model) { return model != null && list().containsKey(model); }
         /** Unknown: ask for little, which every model takes. */
         static boolean reasoningMandatory(String model) { Entry e = list().get(model); return e == null || e.reasoningMandatory(); }
         /** The request fields the model's endpoints take, or null for a model the list does not know. */
@@ -982,6 +1015,10 @@ public final class DriveClient {
             JsonNode parsed = json.readTree(resp.body());
             JsonNode msg = parsed.path("choices").path(0).path("message");
             lastCompletionTokens = parsed.path("usage").path("completion_tokens").asInt(0);
+            // A decision's tokens are the job's tokens too: counted like a turn's (they were not, so an overseer's plan and reviews, all
+            // decisions, had no cost on the model line or in the ledger, 2026-10-18)
+            { JsonNode u = parsed.path("usage"); long[] acc = COUNT.get();
+              if (acc != null && u.isObject()) { acc[0] += u.path("prompt_tokens").asLong(0); acc[1] += u.path("prompt_tokens_details").path("cached_tokens").asLong(0); acc[3] += u.path("completion_tokens").asLong(0); } }
             noteSpeed(parsed, System.nanoTime() - sentAt);
             String content = msg.path("content").asText("");
             if (content.isBlank()) content = msg.path("reasoning_content").asText("");

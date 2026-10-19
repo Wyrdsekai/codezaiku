@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.nio.file.Path;
 import java.util.List;
+import org.codezaiku.loop.FamiliarLoop;
 import org.codezaiku.verify.ProjectTests;
 
 /**
@@ -126,6 +127,8 @@ public final class ResultDocument {
     private boolean interrupted;
     private String error;
     private String model;
+    /** The overseer's model id when a stronger model planned and reviewed the work, else absent. */
+    private String overseer;
     private String provider;
     private String savedModel;
     private String host;
@@ -152,6 +155,7 @@ public final class ResultDocument {
     public ResultDocument interrupted(boolean v) { this.interrupted = v; return this; }
     public ResultDocument error(String v) { this.error = v; return this; }
     public ResultDocument model(String v) { this.model = v; return this; }
+    public ResultDocument overseer(String v) { this.overseer = v; return this; }
     public ResultDocument provider(String v) { this.provider = v; return this; }
     /** The saved model the run used, by name, when it was chosen by one. */
     public ResultDocument savedModel(String v) { this.savedModel = v == null || v.isBlank() ? null : v; return this; }
@@ -200,9 +204,13 @@ public final class ResultDocument {
         if (filesExcluded > 0) d.put("filesExcluded", filesExcluded);
         if (turns != null) d.put("turns", turns);
         if (summary != null) d.put("summary", summary);
+        // Done on the last turn with the check passing: a success a host may want to know came at the limit (open-code-review
+        // reads the same case as completed with a warning). The status values are unchanged; this field is added.
+        if (summary != null && summary.startsWith(FamiliarLoop.DEADLINE_DONE_REPORT)) d.put("warning", "turn limit: the model declared done on its last turn, and the check passed");
         if (interrupted) d.put("interrupted", true);
         if (error != null) d.put("error", error);
         if (model != null) d.put("model", model);
+        if (overseer != null) d.put("overseer", overseer);
         if (provider != null) d.put("provider", provider);
         if (savedModel != null) d.put("savedModel", savedModel);
         if (host != null) d.put("host", host);
