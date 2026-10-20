@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.15
+
+What's new: the model on this machine runs on AMD and Intel graphics too, and a bug fix.
+
+### Added
+
+- `codezaiku model serve install` works on a Linux machine with an AMD graphics chip (a Radeon, a Ryzen AI or an Instinct) or an
+  Intel one, not only an NVIDIA card.
+
+### Fixed
+
+- A machine with a stand-in `nvidia-smi` that only prints a message was taken for an NVIDIA machine.
+
 ## 0.3.14
 
 What's new: a stronger model can check a cheaper model's work, the chat remembers what you decided, and bug fixes.

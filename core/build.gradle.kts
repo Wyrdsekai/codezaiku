@@ -78,6 +78,12 @@ tasks.test {
     // real ~/.codezaiku/envs: the first full run after ProjectEnv made seven, 86 MB (2026-09-29). ProjectEnvTest switches it on itself.
     environment("CODEZAIKU_PROJECT_ENV", "off")
     environment("CODEZAIKU_ENRICH", "both")
+    // The GPU readers (Gpu) look at an empty kernel tree under the build folder, never this box's /sys and /dev: the build box has an
+    // Intel iGPU beside its NVIDIA card, and a test faking "no card" went on to serve on it (2026-10-20). SuiteGpuTest pins it.
+    val noSys = layout.buildDirectory.dir("tmp/no-sys").get().asFile
+    doFirst { noSys.mkdirs() }
+    systemProperty("codezaiku.sys", noSys.path)
+    systemProperty("codezaiku.dev", noSys.path)
 }
 
 application {

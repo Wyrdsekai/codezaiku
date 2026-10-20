@@ -7,9 +7,10 @@ first, and then the hosted models by what they passed, how long a job took and w
 **The server, on demand.** `codezaiku model serve install` sets a model server up on this machine for the
 card it finds: it picks the measured row for the card's memory (the table below), downloads the file once and
 checks it against a recorded sha256, and puts llama.cpp behind a small proxy that starts the model when
-something asks and stops it after twenty idle minutes. Linux uses llama.cpp's CUDA container, macOS its Metal
-build as a launchd agent, Windows its Vulkan build as a logon task. `codezaiku setup` offers it when it finds
-no server. Everything else stays yours: the servers you already run, kept under names, switched between.
+something asks and stops it after twenty idle minutes. Linux uses llama.cpp's container for the GPU it finds:
+CUDA on an NVIDIA card, ROCm on an AMD Instinct card, Vulkan on a Radeon, a Ryzen AI chip or an Intel GPU (Docker
+with the kernel's render devices passed through; no NVIDIA runtime needed). macOS uses its Metal build as a
+launchd agent, Windows its Vulkan build as a logon task. `codezaiku setup` offers it when it finds no server. Everything else stays yours: the servers you already run, kept under names, switched between.
 
 ```bash
 codezaiku setup                   # the first ten minutes: finds a server, or serves one, or takes a key
@@ -37,7 +38,8 @@ failure in your next command.
 ## By VRAM
 
 What `model serve install` picks, best first. VRAM is the memory on the graphics card, not the computer's
-RAM; `nvidia-smi` shows it, and on a Mac with Apple silicon read the tiers against about two thirds of the
+RAM; `nvidia-smi` shows it on an NVIDIA card, and on an AMD GPU it is what the BIOS set aside for it (a Ryzen AI
+MAX with 32 GB set aside reads as 32 GB). On a Mac with Apple silicon read the tiers against about two thirds of the
 unified memory. The rows come from ResearchZosho's measurement of eleven
 models on the same research questions (the facts right, claims made, citations the checker could read, time
 per question) and from CodeZaiku's own coding probes on the two we drive with. A row marked *research* was

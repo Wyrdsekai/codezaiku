@@ -118,9 +118,11 @@ public final class Models {
             System.out.println("  ollama serve && ollama pull <a tool-calling model>");
             System.out.println("  codezaiku model use http://localhost:11434\n");
             System.out.println("Or llama.cpp, which our reference numbers used:");
-            System.out.println("  docker run -d -p 8200:8200 -v /path/to/models:/models \\");
+            System.out.println("  docker run -d --gpus all -p 8200:8200 -v /path/to/models:/models \\");
             System.out.println("    ghcr.io/ggml-org/llama.cpp:server-cuda \\");
             System.out.println("    -m /models/<model>.gguf --port 8200 --host 0.0.0.0 --jinja --ctx-size 32768");
+            System.out.println("  On an AMD or Intel GPU: --device /dev/dri in place of --gpus all, and the image server-vulkan;");
+            System.out.println("  an AMD Instinct card takes --device /dev/kfd --device /dev/dri and the image server-rocm.");
             System.out.println("\n(--jinja is required, or tool calls come back as prose)");
             return 1;
         }
