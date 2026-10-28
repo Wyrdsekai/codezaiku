@@ -1,4 +1,4 @@
-# CodeZaiku platform pass, Windows. Args: -Dist <dir with tarballs, SHA256SUMS, install.ps1> -Ver 0.3.5
+# CodeZaiku platform pass, Windows. Args: -Dist <dir with the tarballs, SHA256SUMS, install.ps1 AND scripts/stub-drive.py (the run check's model)> -Ver 0.3.16
 param([string]$Dist, [string]$Ver)
 $ErrorActionPreference = 'Continue'
 $script:P = 0; $script:F = 0   # PowerShell names ignore case: no other variable here may be called $p or $f

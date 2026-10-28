@@ -132,7 +132,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.16";
+    public static final String VERSION = "0.3.17";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -378,9 +378,16 @@ public final class FamiliarMain {
                                                  // small enough that + epilogue cannot overflow
             try {
                 SavedModels.Choice onModel = chosenOrExit(flag(args, "--drive", DEFAULT_DRIVE), modelFlag, Auto.Job.of("chat", "B", true, root));
-                System.exit(new ChatRepl(
-                        root, onModel.drive(), onModel.model(), mode, turns,
-                        flag(args, "--from", null)).entry(onModel.entry()).run());
+                ChatRepl chat = new ChatRepl(root, onModel.drive(), onModel.model(), mode, turns, flag(args, "--from", null)).entry(onModel.entry());
+                int rc = chat.run();
+                while (chat.switchTo() != null) {   // /switch: the same terminal, the other project, where this one got to carried over
+                    Path next = chat.switchTo(); String note = chat.switchNote();
+                    System.out.println();
+                    chat = new ChatRepl(next, onModel.drive(), onModel.model(), mode, turns, null).entry(onModel.entry());
+                    chat.carry(note);
+                    rc = chat.run();
+                }
+                System.exit(rc);
             } catch (IOException e) {
                 System.err.println("chat: could not open a terminal: " + e.getMessage());
                 System.exit(1);
@@ -464,7 +471,7 @@ public final class FamiliarMain {
                 String token = flag(args, "--token", Config.get("CODEZAIKU_WEB_TOKEN", ""));
                 Path tokenFile = webDir.resolve("token");
                 if (onNetwork && token.isBlank()) token = WebChat.tokenKept(tokenFile);   // the network asks for a token; one is kept so it stays the same
-                web.token(token.isBlank() ? null : token);
+                web.token(token.isBlank() ? null : token).accounts(webDir);
                 web.start(host, port);
                 System.out.println("web: the chat in the browser at http://" + host + ":" + port + "/  —  " + web.projects().size() + " project(s); the list is kept in " + registry);
                 for (String gone : web.skipped()) System.out.println("     left off the list, its folder is gone: " + gone);

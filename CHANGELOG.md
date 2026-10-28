@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.17
+
+What's new: you can move the chat from one project to another, the chat's answers are easier to read
+in the browser, and you can let other people watch or use the chat in the browser.
+
+### Added
+
+**Moving to another project.** In the chat, type `/switch` and the folder of another project. The chat
+ends in the project you are in and starts in the other one, and it is told what you were just doing, so
+you can carry on there. The projects you added in the browser can be named by their folder name alone,
+and `/switch` on its own lists them. This works in a terminal window and in the browser alike.
+
+**Other people.** When the chat in the browser is open to your network, its menu has a People page. There
+you can add someone with a name, a password and one of two roles. A viewer can open every page and watch
+every chat as it happens, and sees who typed each line, but cannot type anything. An owner can do
+everything you can. Each person signs in with their name and password. The token the program printed
+when it started still lets you in, as before.
+
+### Changed
+
+**Answers that read like text.** In the browser, the chat's answers used to look like a printout from a
+terminal window, every letter the same width. Now they read like a web page: paragraphs, bold words,
+lists, tables, quotes, headings and links. Code, and changes to code, keep their printout shape, and in a
+change the added lines are green and the removed lines red.
+
 ## 0.3.16
 
 What's new: you can talk to CodeZaiku in your browser, for more than one project at a time, and move between projects without losing your place.

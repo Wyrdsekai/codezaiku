@@ -57,6 +57,8 @@ public final class WebChat {
     public List<String> skipped() { return skipped; }
     /** The token a request must carry (as the cookie {@code cz}), or null when none is asked for. */
     private volatile String token;
+    /** The people who may use it and as what; the owner's master key is the token. */
+    private volatile WebAccounts accounts;
 
     /** {@code registry}: the file the project list is kept in (null keeps it in memory only). */
     public WebChat(List<Path> projects, String driveUrl, String model, SavedModels.Entry entry, ChatConsent.Mode mode, int maxTurns, Path registry) throws IOException {
@@ -72,6 +74,9 @@ public final class WebChat {
 
     /** Ask every request for this token, given once on the sign-in page; null asks for none. */
     public WebChat token(String token) { this.token = token == null || token.isBlank() ? null : token.strip(); return this; }
+    /** The people file and the session secret live in {@code dir}; without it, whoever reaches the port is the owner. */
+    public WebChat accounts(Path dir) throws IOException { this.accounts = dir == null ? null : new WebAccounts(dir); return this; }
+    public WebAccounts accounts() { return accounts; }
     public String token() { return token; }
 
     /** A fresh token: letters and digits a person can type, from a secure source. */
@@ -90,16 +95,27 @@ public final class WebChat {
         return t;
     }
 
-    private boolean signedIn(HttpExchange x) {
-        String t = token; if (t == null) return true;
-        for (String h : x.getRequestHeaders().getOrDefault("Cookie", List.of())) for (String c : h.split(";")) { String[] kv = c.strip().split("=", 2); if (kv.length == 2 && kv[0].equals("cz") && MessageDigest.isEqual(kv[1].getBytes(StandardCharsets.UTF_8), t.getBytes(StandardCharsets.UTF_8))) return true; }
-        return false;
+    static String cookie(HttpExchange x, String name) {
+        for (String h : x.getRequestHeaders().getOrDefault("Cookie", List.of())) for (String c : h.split(";")) { String[] kv = c.strip().split("=", 2); if (kv.length == 2 && kv[0].equals(name)) return kv[1]; }
+        return null;
     }
 
-    static String loginPage(boolean wrong) {
+    /** Who this request is from: with no token (this machine only) whoever reaches it is the owner; else the token's owner or a signed session's person; else null. */
+    WebAccounts.Person who(HttpExchange x) throws IOException {
+        String t = token;
+        if (t == null) return new WebAccounts.Person("you", WebAccounts.OWNER);   // this machine only: whoever reaches it is the owner
+        String c = cookie(x, "cz");
+        if (c != null && MessageDigest.isEqual(c.getBytes(StandardCharsets.UTF_8), t.getBytes(StandardCharsets.UTF_8))) return new WebAccounts.Person("owner", WebAccounts.OWNER);
+        if (c != null && accounts != null) return accounts.check(c);
+        return null;
+    }
+
+    String loginPage(boolean wrong) throws IOException {
+        boolean named = accounts != null && accounts.any();
+        String in = "style=\"font:inherit;padding:.5em .7em;border:1px solid var(--line);border-radius:.5em;background:var(--bg);color:var(--ink)\"";
         return head("CodeZaiku") + "<nav id=\"side\"><p class=\"brand\">CodeZaiku</p></nav><main><header><b>Sign in</b></header><div class=\"home\">"
-                + "<p>This chat can change files and run commands in your projects, so it asks who you are: the token it printed when it started" + (wrong ? ". <b>That was not it.</b>" : ".") + "</p>"
-                + "<form method=\"post\" action=\"/login\" style=\"display:flex;gap:.6em;max-width:30em\"><input name=\"token\" type=\"password\" placeholder=\"the token\" autofocus required style=\"flex:1;font:inherit;padding:.5em .7em;border:1px solid var(--line);border-radius:.5em;background:var(--bg);color:var(--ink)\"><button>Enter</button></form>"
+                + "<p>This chat can change files and run commands in your projects, so it asks who you are" + (named ? ": your name and password, or the owner's token alone" : ": the token it printed when it started") + (wrong ? ". <b>That was not it.</b>" : ".") + "</p>"
+                + "<form method=\"post\" action=\"/login\" style=\"display:flex;gap:.6em;max-width:36em;flex-wrap:wrap\">" + (named ? "<input name=\"name\" placeholder=\"name (blank for the owner's token)\" " + in + ">" : "") + "<input name=\"token\" type=\"password\" placeholder=\"" + (named ? "password or token" : "the token") + "\" autofocus required " + in + "><button>Enter</button></form>"
                 + "<p class=\"note\">The token travels once, over this network, and the browser keeps it as a cookie for a month. On a network you do not trust, reach this machine over a tunnel such as Tailscale instead.</p></div></main></body></html>";
     }
     /** The project list, as the page shows it. */
@@ -149,7 +165,14 @@ public final class WebChat {
             ChatRepl repl = new ChatRepl(l.root, driveUrl, model, mode, maxTurns, null).entry(entry).io(l.io);
             l.repl = repl;
             Thread t = new Thread(() -> {
-                try { repl.run(); l.died = "the chat ended"; }
+                try {
+                    repl.run();
+                    Path to = repl.switchTo();
+                    if (to != null) {   // typed /switch: the other project gets the place, this chat ends here with a word
+                        try { Loop other = add(to, true); other.io.say("/carry " + repl.switchNote()); l.io.notifyLine("switched to " + other.name() + ": open it from the menu; this chat ended here, start it again when you are back"); l.died = "switched to " + other.name(); }
+                        catch (IllegalArgumentException | IOException e) { l.io.notifyLine("! could not switch: " + e.getMessage()); l.died = "the chat ended"; }
+                    } else l.died = "the chat ended";
+                }
                 catch (Throwable e) { l.died = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage()); l.io.notifyLine("! the chat ended: " + l.died); }
             }, "codezaiku-web-" + id);
             t.setDaemon(true); l.thread = t; t.start();
@@ -187,29 +210,49 @@ public final class WebChat {
             String path = x.getRequestURI().getPath(), method = x.getRequestMethod();
             Map<String, String> q = query(x.getRequestURI().getRawQuery());
             Map<String, String> form = "POST".equals(method) ? query(new String(x.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)) : Map.of();
-            if (path.equals("/login")) {   // the token, once; the browser keeps it
+            if (path.equals("/login")) {   // the owner's token, or a named person's password; the browser keeps a session for a month
                 if ("POST".equals(method)) {
-                    String given = form.getOrDefault("token", "").strip();
-                    if (token != null && MessageDigest.isEqual(given.getBytes(StandardCharsets.UTF_8), token.getBytes(StandardCharsets.UTF_8))) { x.getResponseHeaders().add("Set-Cookie", "cz=" + token + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"); redirect(x, "/"); }
+                    String given = form.getOrDefault("token", "").strip(), name = form.getOrDefault("name", "").strip();
+                    if (name.isEmpty() && token != null && MessageDigest.isEqual(given.getBytes(StandardCharsets.UTF_8), token.getBytes(StandardCharsets.UTF_8))) { x.getResponseHeaders().add("Set-Cookie", "cz=" + token + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"); redirect(x, "/"); return; }
+                    WebAccounts.Person p = accounts == null || name.isEmpty() ? null : accounts.signIn(name, given);
+                    if (p != null) { x.getResponseHeaders().add("Set-Cookie", "cz=" + accounts.session(p, 30) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"); redirect(x, "/"); }
                     else send(x, 403, "text/html; charset=utf-8", loginPage(true));
                 } else send(x, 200, "text/html; charset=utf-8", loginPage(false));
                 return;
             }
-            if (!path.equals("/health") && !signedIn(x)) {
-                if (path.startsWith("/chat/") && !path.equals("/chat")) send(x, 401, "application/json", "{\"error\":\"sign in first\"}");
+            if (path.equals("/logout")) { x.getResponseHeaders().add("Set-Cookie", "cz=; Path=/; HttpOnly; Max-Age=0"); redirect(x, "/login"); return; }
+            WebAccounts.Person me = path.equals("/health") ? new WebAccounts.Person("", "") : who(x);
+            if (me == null) {
+                if (path.startsWith("/chat/") && !path.equals("/chat") || path.equals("/projects")) send(x, 401, "application/json", "{\"error\":\"sign in first\"}");
                 else redirect(x, "/login");
                 return;
+            }
+            boolean acts = me.owner();
+            if (!acts && "POST".equals(method)) {   // a viewer watches
+                if (path.startsWith("/chat/")) send(x, 403, "application/json", "{\"error\":\"you are watching; an owner can type\"}");
+                else send(x, 403, "text/html; charset=utf-8", head("CodeZaiku") + "<main><header><b>Not yours to do</b></header><div class=\"home\"><p>You are signed in as a viewer: you can read every page and watch the chats, and an owner can type, answer and change the projects. <a href=\"/\">Back</a></p></div></main></body></html>");
+                return;
+            }
+            if (path.equals("/people") || path.startsWith("/people/")) {   // the owner names people
+                if (accounts == null || token == null) { send(x, 200, "text/html; charset=utf-8", head("People · CodeZaiku") + side(null, me) + "<main><header><b>People</b></header><div class=\"home\"><p>This chat is on this machine only, with no token, so whoever reaches it is you. Start it with <code>--host 0.0.0.0</code> or <code>--token</code> to name other people.</p></div></main>" + SHELL_JS + "</body></html>"); return; }
+                if (path.equals("/people/add") && "POST".equals(method)) {
+                    try { accounts.put(form.getOrDefault("name", ""), form.getOrDefault("password", ""), form.getOrDefault("role", WebAccounts.VIEWER)); redirect(x, "/people"); }
+                    catch (IllegalArgumentException e) { send(x, 400, "text/html; charset=utf-8", peoplePage(me, e.getMessage())); }
+                    return;
+                }
+                if (path.equals("/people/remove") && "POST".equals(method)) { accounts.remove(form.getOrDefault("name", "")); redirect(x, "/people"); return; }
+                send(x, 200, "text/html; charset=utf-8", peoplePage(me, null)); return;
             }
             switch (path) {
                 case "/health" -> send(x, 200, "application/json", "{\"ok\":true}");
                 case "/favicon.ico" -> { x.sendResponseHeaders(204, -1); x.close(); }
-                case "/" -> send(x, 200, "text/html; charset=utf-8", home());
+                case "/" -> send(x, 200, "text/html; charset=utf-8", home(me));
                 case "/projects" -> { ArrayNode a = M.createArrayNode(); for (Loop l : projects()) { ObjectNode o = a.addObject(); o.put("id", l.id); o.put("name", l.name()); o.put("state", l.state()); o.put("dot", dotClass(l.state())); } send(x, 200, "application/json", a.toString()); }
                 case "/projects/remove" -> { remove(form.getOrDefault("project", "")); redirect(x, "/"); }
                 case "/projects/add" -> { try { Loop l = add(Path.of(form.getOrDefault("path", "").strip()), true); redirect(x, "/chat?project=" + enc(l.id)); } catch (IllegalArgumentException e) { send(x, 400, "text/plain; charset=utf-8", e.getMessage()); } }
-                case "/chat" -> { Loop l = loop(q.getOrDefault("project", "")); if (l == null) redirect(x, "/"); else send(x, 200, "text/html; charset=utf-8", chatPage(l)); }
+                case "/chat" -> { Loop l = loop(q.getOrDefault("project", "")); if (l == null) redirect(x, "/"); else send(x, 200, "text/html; charset=utf-8", chatPage(l, me)); }
                 case "/chat/log" -> { Loop l = loops.get(q.getOrDefault("project", "")); if (l == null) { send(x, 404, "application/json", "{\"error\":\"no such project\"}"); break; } long since = 0; try { since = Long.parseLong(q.getOrDefault("since", "0")); } catch (NumberFormatException ignored) { } send(x, 200, "application/json", log(l, since)); }
-                case "/chat/say" -> { Loop l = loop(form.getOrDefault("project", "")); if (l == null) { send(x, 404, "text/plain", "no such project"); break; } l.io.say(form.getOrDefault("say", "")); send(x, 200, "application/json", "{\"ok\":true}"); }
+                case "/chat/say" -> { Loop l = loop(form.getOrDefault("project", "")); if (l == null) { send(x, 404, "text/plain", "no such project"); break; } l.io.say(form.getOrDefault("say", ""), me.name()); send(x, 200, "application/json", "{\"ok\":true}"); }
                 case "/chat/restart" -> {   // a chat that ended (its model gone, an error) starts again on the same transcript
                     Loop l = loops.get(form.getOrDefault("project", ""));
                     if (l != null && !l.running()) { l.died = null; l.thread = null; loop(l.id); }
@@ -230,7 +273,7 @@ public final class WebChat {
     private String log(Loop l, long since) {
         WebIo.Snapshot s = l.io.snapshot(since);
         ObjectNode o = M.createObjectNode();
-        ArrayNode a = o.putArray("entries"); for (WebIo.Entry e : s.entries()) { ObjectNode n = a.addObject(); n.put("seq", e.seq()); n.put("kind", e.kind()); n.put("text", e.text()); }
+        ArrayNode a = o.putArray("entries"); for (WebIo.Entry e : s.entries()) { ObjectNode n = a.addObject(); n.put("seq", e.seq()); n.put("kind", e.kind()); n.put("text", e.text()); if (!e.who().isEmpty()) n.put("who", e.who()); }
         o.put("partial", s.partial()); o.put("thinking", s.thinking()); if (s.pending() != null) o.put("pending", s.pending()); o.put("status", s.status()); o.put("last", s.last()); o.put("state", l.state()); o.put("loop", Long.toString(l.started));
         return o.toString();
     }
@@ -251,7 +294,8 @@ public final class WebChat {
             + "#log{flex:1;min-height:0;overflow:auto;padding:1em 1.2em;display:flex;flex-direction:column;gap:.5em}"
             + ".say{max-width:52em;padding:.55em .9em;border-radius:.7em;white-space:pre-wrap;word-break:break-word;border:1px solid var(--line);background:var(--card)}"
             + ".say.me{align-self:flex-end;background:var(--me);border-color:transparent}.say.me b,.say.chat b{display:block;font-size:.78em;color:var(--k);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.2em;font-weight:normal}"
-            + ".say.chat{align-self:flex-start}.say.chat p{margin:.3em 0}.say.chat code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--bg);padding:0 .25em;border-radius:.25em}.say.chat pre{font-family:ui-monospace,monospace;font-size:.88em;background:var(--bg);padding:.6em .8em;border-radius:.4em;overflow:auto;margin:.4em 0}"
+            + ".say.chat{align-self:flex-start;white-space:normal}.say.chat p{margin:.4em 0}.say.chat pre.diff{white-space:pre}.say.chat pre.diff .add{color:#5bb46a}.say.chat pre.diff .del{color:#e0654f}.say.chat pre.diff .hunk{color:var(--k)}"
+            + ".say.chat table{border-collapse:collapse;margin:.4em 0;font-size:.95em}.say.chat td,.say.chat th{border:1px solid var(--line);padding:.2em .5em;text-align:left}.say.chat blockquote{margin:.4em 0;padding-left:.8em;border-left:3px solid var(--line);color:var(--k)}.say.chat hr{border:0;border-top:1px solid var(--line);margin:.6em 0}.say.chat ol{margin:.3em 0 .3em 1.4em;padding:0}.say.chat a{word-break:break-all}.say.chat p{margin:.4em 0}.say.chat code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--bg);padding:0 .25em;border-radius:.25em}.say.chat pre{font-family:ui-monospace,monospace;font-size:.88em;background:var(--bg);padding:.6em .8em;border-radius:.4em;overflow:auto;margin:.4em 0}"
             + ".say.chat ul{margin:.3em 0 .3em 1.2em;padding:0}.say.chat h3{margin:.5em 0 .2em;font-size:1em}"
             + "details.steps{align-self:flex-start;max-width:52em;color:var(--k);font-size:.85em;font-family:ui-monospace,monospace;border-left:2px solid var(--line);padding-left:.8em}details.steps summary{cursor:pointer;font-family:Georgia,serif;color:var(--k)}details.steps div{white-space:pre-wrap;word-break:break-word}"
             + ".say.think{align-self:flex-start;color:var(--k);font-style:italic;font-size:.9em;border:0;background:transparent;padding:.2em .9em}.say.notify{align-self:flex-start;color:var(--k);font-size:.9em;border:0;background:transparent;padding:.2em .9em}.say.notify:before{content:'\\25C6  '}"
@@ -272,13 +316,16 @@ public final class WebChat {
     static String dotClass(String state) { return state.startsWith("asking") ? "asking" : state.startsWith("working") ? "working" : state.startsWith("ready") ? "ready" : state.startsWith("ended") ? "ended" : ""; }
 
     /** The side menu: the projects with their state, each a link; the chat's own controls; the switch that carries the place. */
-    String side(Loop here) {
+    String side(Loop here) throws IOException { return side(here, new WebAccounts.Person("you", WebAccounts.OWNER)); }
+
+    String side(Loop here, WebAccounts.Person me) throws IOException {
         StringBuilder b = new StringBuilder("<nav id=\"side\"><p class=\"brand\"><a href=\"/\">CodeZaiku</a></p>");
         b.append("<button type=\"button\" id=\"more\" title=\"the rest of the menu\">menu</button><div class=\"nav-group projects\"><b>Projects</b>");
         for (Loop l : projects()) b.append("<a href=\"/chat?project=").append(enc(l.id)).append("\"").append(l == here ? " class=\"here\"" : "").append(" title=\"").append(esc(l.root.toString())).append("\"><span class=\"dot ").append(dotClass(l.state())).append("\" data-project=\"").append(esc(l.id)).append("\"></span><span>").append(esc(l.name())).append("</span></a>");
-        b.append("<form method=\"post\" action=\"/projects/add\" class=\"add\"><input name=\"path\" placeholder=\"add a project by its folder\" required></form></div><div class=\"more\">");
-        b.append("<div class=\"nav-group\"><b>Add a project</b><form method=\"post\" action=\"/projects/add\" class=\"add\"><input name=\"path\" placeholder=\"by its folder\" required></form></div>");
-        if (here != null) {
+        if (me.owner()) b.append("<form method=\"post\" action=\"/projects/add\" class=\"add\"><input name=\"path\" placeholder=\"add a project by its folder\" required></form>");
+        b.append("</div><div class=\"more\">");
+        if (me.owner()) b.append("<div class=\"nav-group\"><b>Add a project</b><form method=\"post\" action=\"/projects/add\" class=\"add\"><input name=\"path\" placeholder=\"by its folder\" required></form></div>");
+        if (here != null && me.owner()) {
             b.append("<div class=\"nav-group\"><b>This chat</b>");
             b.append("<div class=\"row small\">mode: <span id=\"mode\">\u2026</span></div>");
             for (String[] m : new String[][]{{"ask", "ask before each change"}, {"auto-edit", "edit without asking, ask to run"}, {"yolo", "never ask"}}) b.append("<button class=\"lnk\" data-say=\"/mode ").append(m[0]).append("\" title=\"").append(m[1]).append("\"><span class=\"dot\"></span>").append(m[0]).append("</button>");
@@ -294,13 +341,20 @@ public final class WebChat {
             }
         }
         b.append("<div class=\"nav-group\"><b>Look</b><button class=\"lnk\" id=\"theme\"><span class=\"dot\"></span><span id=\"theme-label\">light</span></button></div>");
+        if (token != null) {
+            b.append("<div class=\"nav-group\"><b>You</b><div class=\"row small\">").append(esc(me.name())).append(" · ").append(esc(me.role())).append("</div>");
+            if (me.owner() && accounts != null) b.append("<a href=\"/people\"><span class=\"dot\"></span>people</a>");
+            b.append("<a href=\"/logout\"><span class=\"dot\"></span>sign out</a></div>");
+        }
         return b.append("</div></nav>").toString();
     }
 
     static String head(String title) { return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + esc(title) + "</title>" + THEME_JS + CSS + "</head><body>"; }
 
-    String home() {
-        StringBuilder b = new StringBuilder(head("CodeZaiku")).append(side(null));
+    String home() throws IOException { return home(new WebAccounts.Person("you", WebAccounts.OWNER)); }
+
+    String home(WebAccounts.Person me) throws IOException {
+        StringBuilder b = new StringBuilder(head("CodeZaiku")).append(side(null, me));
         b.append("<main><header><b>Your projects</b><span class=\"k\">each with its own conversation, kept while this server runs</span></header><div class=\"home\">");
         List<Loop> all = projects();
         if (all.isEmpty()) b.append("<p>No project yet. Add one by its folder, in the menu.</p>");
@@ -309,7 +363,7 @@ public final class WebChat {
             for (Loop l : all) {
                 String was = l.repl == null ? "" : l.repl.lastExchange(240);
                 b.append("<tr><td><a href=\"/chat?project=").append(enc(l.id)).append("\">").append(esc(l.name())).append("</a></td><td class=\"k\">").append(esc(l.root.toString())).append("</td><td><span class=\"dot ").append(dotClass(l.state())).append("\"></span> ").append(esc(l.state())).append("</td><td class=\"note\">").append(esc(was.replace("\n", " "))).append("</td>")
-                 .append("<td><form method=\"post\" action=\"/projects/remove\" onsubmit=\"return confirm('Take ").append(esc(l.name()).replace("'", "\\'")).append(" off the list? Its conversations stay on disk.')\"><input type=\"hidden\" name=\"project\" value=\"").append(esc(l.id)).append("\"><button class=\"lnk\" title=\"take it off the list; its conversations stay on disk\">remove</button></form></td></tr>");
+                 .append(me.owner() ? "<td><form method=\"post\" action=\"/projects/remove\" onsubmit=\"return confirm('Take " + esc(l.name()).replace("'", "\\'") + " off the list? Its conversations stay on disk.')\"><input type=\"hidden\" name=\"project\" value=\"" + esc(l.id) + "\"><button class=\"lnk\" title=\"take it off the list; its conversations stay on disk\">remove</button></form></td></tr>" : "<td></td></tr>");
             }
             b.append("</table>");
             if (!skipped.isEmpty()) { b.append("<p class=\"note\">Left off the list, their folders being gone: "); for (String g : skipped) b.append(esc(g)).append(" "); b.append("</p>"); }
@@ -318,13 +372,29 @@ public final class WebChat {
         return b.append("</div></main>").append(SHELL_JS).append("</body></html>").toString();
     }
 
-    String chatPage(Loop l) {
-        StringBuilder b = new StringBuilder(head(l.name() + " · CodeZaiku")).append(side(l));
+    String chatPage(Loop l) throws IOException { return chatPage(l, new WebAccounts.Person("you", WebAccounts.OWNER)); }
+
+    String chatPage(Loop l, WebAccounts.Person me) throws IOException {
+        StringBuilder b = new StringBuilder(head(l.name() + " · CodeZaiku")).append(side(l, me));
         b.append("<main><header><b>").append(esc(l.name())).append("</b><span class=\"k\">").append(esc(l.root.toString())).append("</span><span class=\"k\" id=\"state\"></span></header>");
-        b.append("<div id=\"log\" data-project=\"").append(esc(l.id)).append("\"></div><button type=\"button\" id=\"news\" hidden>new messages \u2193</button><div id=\"ask\" hidden></div><div id=\"status\"></div>");
-        b.append("<form id=\"composer\"><textarea name=\"say\" rows=\"1\" placeholder=\"Say something. Enter sends, Shift+Enter is a new line; @path attaches a file\" autofocus></textarea><button>Send</button><button type=\"button\" id=\"stop\" title=\"stop the running turn, as ctrl-C does\">Stop</button></form>");
+        b.append("<div id=\"log\" data-project=\"").append(esc(l.id)).append("\" data-who=\"").append(esc(me.name())).append("\"></div><button type=\"button\" id=\"news\" hidden>new messages \u2193</button><div id=\"ask\" hidden></div><div id=\"status\"></div>");
+        if (me.owner()) b.append("<form id=\"composer\"><textarea name=\"say\" rows=\"1\" placeholder=\"Say something. Enter sends, Shift+Enter is a new line; @path attaches a file\" autofocus></textarea><button>Send</button><button type=\"button\" id=\"stop\" title=\"stop the running turn, as ctrl-C does\">Stop</button></form>");
+        else b.append("<form id=\"composer\" data-viewer=\"1\"><textarea name=\"say\" rows=\"1\" disabled placeholder=\"You are watching this chat; an owner can type and answer.\"></textarea><button disabled>Send</button><button type=\"button\" id=\"stop\" disabled>Stop</button></form>");
         b.append("</main>").append(SHELL_JS).append("<script>").append(JS).append("</script></body></html>");
         return b.toString();
+    }
+
+    String peoplePage(WebAccounts.Person me, String said) throws IOException {
+        StringBuilder b = new StringBuilder(head("People · CodeZaiku")).append(side(null, me));
+        b.append("<main><header><b>People</b><span class=\"k\">who may use this chat, and as what</span></header><div class=\"home\">");
+        if (said != null) b.append("<p><b>").append(esc(said)).append("</b></p>");
+        b.append("<table><tr><th>Name</th><th>Role</th><th></th></tr>");
+        for (WebAccounts.Person p : accounts.people()) b.append("<tr><td>").append(esc(p.name())).append("</td><td>").append(esc(p.role())).append("</td><td><form method=\"post\" action=\"/people/remove\" onsubmit=\"return confirm('Remove ").append(esc(p.name()).replace("'", "\\'")).append("?')\"><input type=\"hidden\" name=\"name\" value=\"").append(esc(p.name())).append("\"><button class=\"lnk\">remove</button></form></td></tr>");
+        b.append("</table>");
+        String in = "style=\"font:inherit;padding:.4em .6em;border:1px solid var(--line);border-radius:.5em;background:var(--bg);color:var(--ink)\"";
+        b.append("<h2>Add a person</h2><form method=\"post\" action=\"/people/add\" style=\"display:flex;gap:.6em;flex-wrap:wrap;align-items:center;max-width:50em\"><input name=\"name\" placeholder=\"name\" required ").append(in).append("><input name=\"password\" type=\"password\" placeholder=\"password, eight or more\" required ").append(in).append("><select name=\"role\" ").append(in).append("><option value=\"viewer\">viewer: reads and watches</option><option value=\"owner\">owner: types, answers, changes projects</option></select><button>Add</button></form>");
+        b.append("<p class=\"note\">A viewer sees every page and every chat as it runs, and can type nothing. An owner can do all you can. The token the server printed stays the owner's master key. Passwords are kept salted and hashed in the web folder; a sign-in lasts a month in that browser.</p>");
+        return b.append("</div></main>").append(SHELL_JS).append("</body></html>").toString();
     }
 
     /** The menu's own script: the theme toggle, the buttons that send a line, the dots refreshed from the server. */
@@ -339,8 +409,23 @@ public final class WebChat {
             + "window.addEventListener('error',function(ev){st.textContent='the page hit an error: '+(ev.message||ev.type)+' — reload, and tell the developer';st.style.color='var(--accent)'});"
             + "news.addEventListener('click',function(){wantBottom=true;bottom();news.hidden=true});log.addEventListener('scroll',function(){if(atBottom())news.hidden=true});"
             + "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}"
-            + "function md(s){var h=esc(s);h=h.replace(/```([\\s\\S]*?)```/g,function(m,c){return '<pre>'+c.replace(/^\\n/,'')+'</pre>'});h=h.replace(/`([^`\\n]+)`/g,'<code>$1</code>');h=h.replace(/\\*\\*([^*\\n]+)\\*\\*/g,'<b>$1</b>');"
-            + "h=h.replace(/^#{1,3} (.+)$/gm,'<h3>$1</h3>');h=h.replace(/^(?:[-*] .+(?:\\n|$))+/gm,function(m){return '<ul>'+m.trim().split('\\n').map(function(l){return '<li>'+l.replace(/^[-*] /,'')+'</li>'}).join('')+'</ul>'});return h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<)/,'<p>').replace(/(?!>)$/,'</p>')}"
+            + "function dedent(s){var ls=s.split('\\n'),m=null;ls.forEach(function(l){if(!l.trim())return;var n=l.match(/^ */)[0].length;if(m===null||n<m)m=n});return m?ls.map(function(l){return l.slice(m)}).join('\\n'):s}"
+            + "function inline(h){h=h.replace(/`([^`\\n]+)`/g,function(m,c){return '<code>'+c+'</code>'});h=h.replace(/\\*\\*([^*\\n]+)\\*\\*/g,'<b>$1</b>').replace(/(^|[^*\\w])\\*([^*\\n]+)\\*(?!\\w)/g,'$1<i>$2</i>');"
+            + "h=h.replace(/\\[([^\\]\\n]+)\\]\\((https?:[^)\\s]+)\\)/g,'<a href=\"$2\" target=\"_blank\" rel=\"noopener\">$1</a>');h=h.replace(/(^|[\\s(])(https?:\\/\\/[^\\s<)]+)/g,'$1<a href=\"$2\" target=\"_blank\" rel=\"noopener\">$2</a>');return h}"
+            + "function isDiff(l){return /^(\\+\\+\\+ |--- |@@ |[+-](?![+-\\s])|diff --git|index [0-9a-f]+\\.\\.)/.test(l)}function inDiff(l){return /^([+-]|@@ |diff --git|index [0-9a-f]+\\.\\.| )/.test(l)}"
+            + "function md(src){var s=dedent(src),lines=s.split('\\n'),out=[],i=0;"
+            + "function para(buf){if(buf.length)out.push('<p>'+inline(esc(buf.join(' ')))+'</p>');return[]}var buf=[];"
+            + "while(i<lines.length){var l=lines[i];"
+            + "if(/^```/.test(l)){buf=para(buf);var code=[];i++;while(i<lines.length&&!/^```/.test(lines[i])){code.push(lines[i]);i++}i++;out.push('<pre>'+esc(code.join('\\n'))+'</pre>');continue}"
+            + "if(isDiff(l)){buf=para(buf);var d=[];while(i<lines.length&&(inDiff(lines[i])||!lines[i].trim()&&i+1<lines.length&&inDiff(lines[i+1]))){var x=lines[i],c=/^\\+/.test(x)?'add':/^-/.test(x)?'del':/^@@/.test(x)?'hunk':'';d.push(c?'<span class=\"'+c+'\">'+esc(x)+'</span>':esc(x));i++}out.push('<pre class=\"diff\">'+d.join('\\n')+'</pre>');continue}"
+            + "var h=l.match(/^(#{1,3}) (.+)$/);if(h){buf=para(buf);out.push('<h3>'+inline(esc(h[2]))+'</h3>');i++;continue}"
+            + "if(/^(-{3,}|\\*{3,}|_{3,})\\s*$/.test(l)){buf=para(buf);out.push('<hr>');i++;continue}"
+            + "if(/^>/.test(l)){buf=para(buf);var q=[];while(i<lines.length&&/^>/.test(lines[i])){q.push(lines[i].replace(/^>\\s?/,''));i++}out.push('<blockquote>'+inline(esc(q.join(' ')))+'</blockquote>');continue}"
+            + "if(/^\\|.*\\|\\s*$/.test(l)&&i+1<lines.length&&/^\\|?\\s*:?-{2,}/.test(lines[i+1])){buf=para(buf);var rows=[];while(i<lines.length&&/^\\|.*\\|\\s*$/.test(lines[i])){rows.push(lines[i]);i++}var t='<table>';rows.forEach(function(r,ri){if(ri===1)return;var cells=r.replace(/^\\||\\|$/g,'').split('|');t+='<tr>'+cells.map(function(c){return(ri===0?'<th>':'<td>')+inline(esc(c.trim()))+(ri===0?'</th>':'</td>')}).join('')+'</tr>'});out.push(t+'</table>');continue}"
+            + "var li=l.match(/^(\\s*)([-*\\u2022]|\\d+[.)])\\s+(.+)$/);if(li){buf=para(buf);var ordered=/\\d/.test(li[2]),items=[];while(i<lines.length){var m2=lines[i].match(/^(\\s*)([-*\\u2022]|\\d+[.)])\\s+(.+)$/);if(m2&&/\\d/.test(m2[2])===ordered){items.push(m2[3]);i++}else if(/^\\s{2,}\\S/.test(lines[i])&&items.length){items[items.length-1]+=' '+lines[i].trim();i++}else break}out.push((ordered?'<ol>':'<ul>')+items.map(function(it){return '<li>'+inline(esc(it))+'</li>'}).join('')+(ordered?'</ol>':'</ul>'));continue}"
+            + "if(/^ {4,}\\S/.test(l)){buf=para(buf);var ind=[];while(i<lines.length&&(/^ {4,}\\S/.test(lines[i])||!lines[i].trim()&&i+1<lines.length&&/^ {4,}\\S/.test(lines[i+1]))){ind.push(lines[i].slice(4));i++}out.push('<pre>'+esc(ind.join('\\n'))+'</pre>');continue}"
+            + "if(!l.trim()){buf=para(buf);i++;continue}"
+            + "buf.push(l.trim());i++}para(buf);return out.join('')}window.czmd=md;"
             + "function isStep(t){return /^\\s*(\\|\\s*\\u00b7|\\u21b3|\\u2192 \\d+ lines|\\u00b7 |planning\\u2026|done \\u00b7|\\[thinking\\])/.test(t)||/^\\s{2,}\\u2192/.test(t)}"
             + "function atBottom(){return log.scrollHeight-log.scrollTop-log.clientHeight<80}function bottom(){log.scrollTop=log.scrollHeight}"
             + "function el(cls,html){var d=document.createElement('div');d.className='say '+cls;d.innerHTML=html;log.appendChild(d);return d}"
@@ -352,7 +437,7 @@ public final class WebChat {
             + "if(/^\\s*\\[session so far/.test(text)||(memoOn&&/^\\s+\\S/.test(text))){if(!memo){memo=document.createElement('details');memo.className='steps memo';memo.innerHTML='<summary>what the chat remembers of it</summary><div></div>';log.appendChild(memo)}var md2=memo.querySelector('div');md2.textContent+=(md2.textContent?'\\n':'')+text.trim();memoOn=true;return}memoOn=false;"
             + "if(isStep(text)){if(!steps){steps=document.createElement('details');steps.className='steps';steps.innerHTML='<summary></summary><div></div>';log.appendChild(steps);steps.n=0}steps.n++;steps.querySelector('summary').textContent=steps.n+' step'+(steps.n>1?'s':'')+' (what it looked at and ran)';var dv=steps.querySelector('div');dv.textContent+=(dv.textContent?'\\n':'')+text.trim();bubble=null;return}"
             + "if(!text.trim())return;if(!bubble){lib=null;memo=null;bubble=el('chat','<b>CodeZaiku</b><div></div>');bubble.raw=''}bubble.raw+=(bubble.raw?'\\n':'')+text;bubble.querySelector('div').innerHTML=md(bubble.raw)}"
-            + "function add(e){if(e.kind==='me'){closeBubble();lib=null;libOn=false;memoOn=false;if(/^\\/carry /.test(e.text)){el('notify','').textContent='carried here: '+e.text.replace(/^\\/carry /,'');return}if(e.text==='/resume'){el('notify','').textContent='continuing the earlier conversation';return}el('me','<b>You</b>'+esc(e.text))}else if(e.kind==='out')out(e.text);else if(e.kind==='think'){closeBubble();el('think','').textContent=e.text}else if(e.kind==='notify'){closeBubble();el('notify','').textContent=e.text}}"
+            + "var meName=log.dataset.who||'you';function add(e){if(e.kind==='me'){closeBubble();lib=null;libOn=false;memoOn=false;if(/^\\/carry /.test(e.text)){el('notify','').textContent='carried here: '+e.text.replace(/^\\/carry /,'');return}if(e.text==='/resume'){el('notify','').textContent='continuing the earlier conversation';return}var label=(e.who&&e.who!==meName)?e.who:'You';el('me','<b>'+esc(label)+'</b>'+esc(e.text))}else if(e.kind==='out')out(e.text);else if(e.kind==='think'){closeBubble();el('think','').textContent=e.text}else if(e.kind==='notify'){closeBubble();el('notify','').textContent=e.text}}"
             + "function buttons(p){var out=[],seen={};var m,re=/\\[([a-zA-Z])\\]([a-zA-Z]*)/g;while((m=re.exec(p))){var k=m[1].toLowerCase();if(!seen[k]){seen[k]=1;out.push([k,m[1]+m[2]])}}"
             + "if(/\\ball=stop asking\\b/.test(p)&&!seen['all']){seen['all']=1;out.push(['all','all: stop asking'])}"
             + "var words=['go','skip','stop'];for(var i=0;i<words.length;i++){var w=words[i];if(new RegExp('(^|[\\\\s/])'+w+'(\\\\b)').test(p)&&!seen[w]){seen[w]=1;out.push([w,w])}}return out}"
@@ -373,7 +458,7 @@ public final class WebChat {
             + "var sentAt=0,sentSeq=0;function said(msg){st.textContent=msg;st.style.color='var(--accent)';setTimeout(function(){st.style.color=''},6000)}"
             + "function send(text){wantBottom=true;news.hidden=true;sentAt=Date.now();sentSeq=last;var fd=new URLSearchParams();fd.append('project',proj);fd.append('say',text);"
             + "fetch('/chat/say',{method:'POST',body:fd,headers:{'Content-Type':'application/x-www-form-urlencoded'}}).then(function(r){if(r.status===401){location.href='/login';return}if(!r.ok){said('the chat did not take that ('+r.status+'); reload the page and try again')}}).catch(function(){said('could not reach the server; is it still running?')})}"
-            + "form.addEventListener('submit',function(ev){ev.preventDefault();var t=inp.value.trim();if(!t)return;inp.value='';inp.style.height='';try{sessionStorage.removeItem(dkey)}catch(e){}send(t)});"
+            + "var viewer=!!form.dataset.viewer;form.addEventListener('submit',function(ev){ev.preventDefault();if(viewer)return;var t=inp.value.trim();if(!t)return;inp.value='';inp.style.height='';try{sessionStorage.removeItem(dkey)}catch(e){}send(t)});"
             + "inp.addEventListener('keydown',function(ev){if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();form.requestSubmit()}});inp.addEventListener('input',function(){inp.style.height='';inp.style.height=Math.min(inp.scrollHeight,190)+'px';try{sessionStorage.setItem(dkey,inp.value)}catch(e){}});"
             + "try{var d0=sessionStorage.getItem(dkey);if(d0)inp.value=d0}catch(e){}"
             + "document.querySelectorAll('button[data-say]').forEach(function(b){b.addEventListener('click',function(){send(b.dataset.say)})});"

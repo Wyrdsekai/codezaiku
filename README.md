@@ -229,7 +229,8 @@ runs commands, or searches the web, then reports back. You steer it turn by turn
 By default it asks before changing or running anything, and shows you the exact change first.
 You answer once, or "always" for that command. `/undo` reverses what it did, step by step.
 Conversations are saved and can be resumed later, and `/remember` keeps a fact available in
-every future conversation in that project. `/help` inside the chat lists everything else —
+every future conversation in that project. `/switch <project>` moves the chat to another project in the same terminal and tells it where you
+were. `/help` inside the chat lists everything else —
 background tasks, delegating work to a second agent, switching models, cost tracking.
 
 `codezaiku v1 ~/myproject` serves the same assistant as an OpenAI-compatible API
@@ -243,7 +244,9 @@ the terminal's, so it asks before it writes or runs anything, and you answer wit
 page. Each project keeps its own conversation. Moving to another project is a click, and "switch"
 also carries where you were, so the next thing you say there starts from it. It listens on this
 machine only unless you say `--host 0.0.0.0`, which opens it to your network; it then prints a token
-and the addresses to type, and the browser asks for the token once.
+and the addresses to type, and the browser asks for the token once. From the menu's People page you
+can name others: a viewer sees every page and every chat as it runs and can type nothing, an owner can
+do all you can. Each signs in with a name and a password.
 
 **Research a question**
 

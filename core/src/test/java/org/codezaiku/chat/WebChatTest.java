@@ -74,6 +74,12 @@ class WebChatTest {
             until(port, "beta", "carried into your next message");
             String beta = get(port, "/chat/log?project=beta&since=0");
             assertTrue(beta.contains("Switched here from the project alpha"), beta);
+            // /switch typed into beta: beta ends with a word, alpha is carried the place
+            assertTrue(post(port, "/chat/say", "project=beta&say=" + enc("/switch " + a)).body().contains("true"));
+            until(port, "beta", "switched to alpha");
+            until(port, "alpha", "carried into your next message");
+            assertTrue(get(port, "/chat/log?project=alpha&since=0").contains("Switched here from the project beta"));
+            assertTrue(get(port, "/projects").contains("switched to alpha"), "beta's state says where it went");
             // the home page says where each one is
             String home2 = get(port, "/");
             assertTrue(home2.contains("ready") || home2.contains("asking you"), home2);
@@ -117,6 +123,22 @@ class WebChatTest {
             var home = plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/")).header("Cookie", "cz=open-sesame").GET().build(), HttpResponse.BodyHandlers.ofString());
             assertEquals(200, home.statusCode()); assertTrue(home.body().contains("alpha") && home.body().contains("Signed in with the token"), home.body());
             assertEquals(200, plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/chat/log?project=alpha")).header("Cookie", "cz=open-sesame").GET().build(), HttpResponse.BodyHandlers.ofString()).statusCode());
+            // named people: a viewer watches, an owner acts; the owner names them from the page
+            web.accounts(tmp.resolve("web"));
+            var ownerAdd = plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/people/add")).header("Cookie", "cz=open-sesame").header("Content-Type", "application/x-www-form-urlencoded").POST(HttpRequest.BodyPublishers.ofString("name=ada&password=correct+horse&role=viewer")).build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(303, ownerAdd.statusCode());
+            var adaIn = plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/login")).header("Content-Type", "application/x-www-form-urlencoded").POST(HttpRequest.BodyPublishers.ofString("name=ada&token=correct+horse")).build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(303, adaIn.statusCode()); String ada = adaIn.headers().firstValue("Set-Cookie").orElse("").split(";")[0].substring(3);
+            assertTrue(ada.contains(".viewer."), ada);
+            var adaHome = plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/")).header("Cookie", "cz=" + ada).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, adaHome.statusCode()); assertTrue(adaHome.body().contains("ada · viewer") && !adaHome.body().contains("/projects/remove"), "a viewer sees the pages and no way to change them");
+            var adaChat = plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/chat?project=alpha")).header("Cookie", "cz=" + ada).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertTrue(adaChat.body().contains("data-viewer=\"1\"") && adaChat.body().contains("You are watching"), "the viewer's page has no box to type");
+            assertEquals(403, plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/chat/say")).header("Cookie", "cz=" + ada).header("Content-Type", "application/x-www-form-urlencoded").POST(HttpRequest.BodyPublishers.ofString("project=alpha&say=hello")).build(), HttpResponse.BodyHandlers.ofString()).statusCode(), "a viewer cannot type");
+            assertEquals(200, plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/chat/log?project=alpha")).header("Cookie", "cz=" + ada).GET().build(), HttpResponse.BodyHandlers.ofString()).statusCode(), "but can watch");
+            assertEquals(403, plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/people/add")).header("Cookie", "cz=" + ada).header("Content-Type", "application/x-www-form-urlencoded").POST(HttpRequest.BodyPublishers.ofString("name=eve&password=longenough&role=owner")).build(), HttpResponse.BodyHandlers.ofString()).statusCode(), "nor name people");
+            var out = plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/logout")).header("Cookie", "cz=" + ada).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertTrue(out.headers().firstValue("Set-Cookie").orElse("").contains("Max-Age=0"));
             String kept = WebChat.tokenKept(tmp.resolve("home/.codezaiku/web/token")); assertEquals(kept, WebChat.tokenKept(tmp.resolve("home/.codezaiku/web/token")), "a kept token stays the same"); assertTrue(kept.matches("[a-z0-9-]{23}"), kept);
         } finally { web.stop(); }
     }

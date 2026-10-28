@@ -152,6 +152,8 @@ public final class ChatRepl {
     private ChatIo givenIo;
     /** A note carried into the next message once, from {@code /carry}: what to keep in mind, for example where the person just came from. */
     private volatile String carried;
+    /** The project {@code /switch} named: the loop ends and whoever runs it starts the chat there, carrying where this one got to. */
+    private volatile Path switchTo;
 
     public ChatRepl(Path root, String driveUrl, String model, ChatConsent.Mode mode, int maxTurns) {
         this(root, driveUrl, model, mode, maxTurns, null);
@@ -168,6 +170,32 @@ public final class ChatRepl {
 
     /** A note for the next message, once: the web page uses it when the person switches here from another project. */
     public void carry(String note) { this.carried = note == null || note.isBlank() ? null : note.strip(); }
+
+    /** The project {@code /switch} named, once the loop has ended; null when it ended for another reason. */
+    public Path switchTo() { return switchTo; }
+
+    /** The note a switch carries: where this chat got to, for the next message in the other project. */
+    public String switchNote() {
+        String was = lastExchange(700);
+        return "Switched here from the project " + (root.getFileName() == null ? root : root.getFileName()) + " (" + root + ")" + (was.isBlank() ? ", where nothing had been said yet." : ", where the last exchange was: " + was.replace("\n", " ").strip());
+    }
+
+    /** The projects the web chat keeps a list of (CODEZAIKU_WEB_DIR/projects, the home by default): a name there is enough for {@code /switch}. */
+    static List<Path> knownProjects() {
+        List<Path> out = new ArrayList<>();
+        Path f = Path.of(Config.get("CODEZAIKU_WEB_DIR", System.getProperty("user.home") + "/.codezaiku/web")).resolve("projects");
+        try { if (Files.isRegularFile(f)) for (String l : Files.readAllLines(f, StandardCharsets.UTF_8)) if (!l.isBlank()) out.add(Path.of(l.strip())); } catch (IOException ignored) { }
+        return out;
+    }
+
+    /** A project as {@code /switch} names it: a folder, else the name of one on the web chat's list; null when neither. */
+    static Path resolveProject(String arg) {
+        if (arg == null || arg.isBlank()) return null;
+        Path p = Path.of(arg.strip());
+        if (Files.isDirectory(p)) return p.toAbsolutePath().normalize();
+        for (Path k : knownProjects()) if (k.getFileName() != null && k.getFileName().toString().equalsIgnoreCase(arg.strip()) && Files.isDirectory(k)) return k;
+        return null;
+    }
 
     public ChatRepl(Path root, String driveUrl, String model, ChatConsent.Mode mode, int maxTurns,
                     String fromId) {
@@ -542,6 +570,7 @@ public final class ChatRepl {
                 io.println("    just type — it asks before writing or running anything, showing the change first");
                 io.println("    @path in a message attaches that file (project files only)");
                 io.println("    /carry <note>  keep a note in mind for your next message, once (a switch from another project uses it)");
+                io.println("    /switch <folder|name>  move to another project, carrying where this chat got to (/switch alone lists the web chat's projects)");
                 io.println("    at a question:  y  ·  a always for THIS command  ·  all stop asking (session)");
                 io.println("                    n  ·  e never for this command   ·  s abandon the turn");
                 io.println("    ctrl-C stops a running turn (twice quits) · ctrl-D leaves");
@@ -748,6 +777,20 @@ public final class ChatRepl {
                     io.println("  new session, seeded from " + old.id());
                     io.println("  " + session.restate().replace("\n", "\n  "));
                 }, () -> io.println("  could not read " + matches.get(0)[0]));
+            }
+            case "/switch" -> {
+                if (arg.isEmpty()) {
+                    io.println("  /switch <folder or project name> — move to another project, carrying where this chat got to");
+                    List<Path> known = knownProjects();
+                    if (!known.isEmpty()) { io.println("  on the list:"); for (Path k : known) io.println("    " + k.getFileName() + "   " + k); }
+                    break;
+                }
+                Path to = resolveProject(arg);
+                if (to == null) { io.println("  no such folder, and no project of that name on the list (/switch alone lists them)"); break; }
+                if (to.equals(root)) { io.println("  that is this project"); break; }
+                switchTo = to;
+                io.println("  switching to " + to + "; where this chat got to goes with you");
+                return false;
             }
             case "/carry" -> {
                 if (arg.isEmpty()) { io.println("  /carry <what to keep in mind> — carried into your next message, once"); break; }

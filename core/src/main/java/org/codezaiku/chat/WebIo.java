@@ -12,14 +12,16 @@ import java.util.regex.Pattern;
  */
 public final class WebIo implements ChatIo {
     /** One line of the transcript: {@code out} the chat's words, {@code think} its thinking, {@code notify} a background line, {@code me} what the person sent, {@code prompt} a question the chat asked. */
-    public record Entry(long seq, String kind, String text) { }
+    public record Entry(long seq, String kind, String text, String who) { public Entry(long seq, String kind, String text) { this(seq, kind, text, ""); } }
     /** What the page sees: the lines after {@code since}, the line being written, the thinking being written, the prompt waiting for an answer (null while the chat works), the status line. */
     public record Snapshot(List<Entry> entries, String partial, String thinking, String pending, String status, long last) { }
 
     private final List<Entry> entries = new ArrayList<>();
     private long seq = 0;
     private final StringBuilder partial = new StringBuilder(), thinking = new StringBuilder();
-    private final LinkedBlockingQueue<String> in = new LinkedBlockingQueue<>();
+    /** A line from the page and who sent it, for the transcript: the page says it when several people share a chat. */
+    private record Said(String line, String who) { }
+    private final LinkedBlockingQueue<Said> in = new LinkedBlockingQueue<>();
     private volatile String pending, status = "";
     private volatile Runnable interrupt;
 
@@ -38,9 +40,11 @@ public final class WebIo implements ChatIo {
         pending = prompt;
         add("prompt", prompt);
         String line;
-        try { line = in.take(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); pending = null; return null; }
+        Said said;
+        try { said = in.take(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); pending = null; return null; }
+        line = said.line();
         pending = null;
-        add("me", line);
+        synchronized (this) { entries.add(new Entry(++seq, "me", line, said.who())); }
         return line;
     }
     @Override public void println(String s) { synchronized (this) { if (thinking.length() > 0) { entries.add(new Entry(++seq, "think", thinking.toString())); thinking.setLength(0); } entries.add(new Entry(++seq, "out", plain(partial + s))); partial.setLength(0); } }
@@ -57,7 +61,9 @@ public final class WebIo implements ChatIo {
     public void history(String kind, String text) { add(kind, text); }
 
     /** What the page sends: the next message, or the answer to the prompt that waits. */
-    public void say(String line) { in.offer(line == null ? "" : line); }
+    public void say(String line) { say(line, ""); }
+    /** What the page sends, with who sent it. */
+    public void say(String line, String who) { in.offer(new Said(line == null ? "" : line, who == null ? "" : who)); }
     /** The page's Stop button: what ctrl-C does in the terminal, when a turn is running. */
     public boolean stop() { Runnable r = interrupt; if (r == null) return false; r.run(); return true; }
     /** The prompt waiting for an answer, or null while the chat works. */

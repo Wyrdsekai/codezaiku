@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copy scripts/stub-drive.py beside this script on the box you run it on: the setup check starts it as the model to save; without
+# it that check fails as "the saved model did not answer" (2026-10-27, the Mac and the Windows box).
 # Platform acceptance for CodeZaiku: does an installed build actually work on THIS machine?
 #
 # Written because macOS was documented as supported for a year without anyone running it, and the
@@ -204,7 +206,9 @@ fi
 head_ "setup"
 SETUP_CFG="$WORK/setup-home/config"; mkdir -p "$WORK/setup-home"; printf 'drive = %s\n' "$DRIVE" > "$SETUP_CFG"
 setup_out="$(printf '\n\n\n\n\n\n' | CODEZAIKU_CONFIG="$SETUP_CFG" $CP setup --no-programs --no-library 2>/dev/null)"
-if printf '%s' "$setup_out" | grep -q 'Found a model server'; then
+if printf '%s' "$setup_out" | grep -q 'did not list its models'; then
+    skip "setup: a server answered but lists no model, so there is nothing to save or ask (an Ollama with no model pulled, on the Mac mini 2026-10-27)"
+elif printf '%s' "$setup_out" | grep -q 'Found a model server'; then
     saved_model="$(grep -E '^model *=' "$SETUP_CFG" | head -1 | sed 's/^model *= *//')"
     printf '%s' "$setup_out" | grep -q 'it answered' && ok "setup: the model it saved answered ($saved_model)" \
         || bad "setup: the saved model did not answer" "$(printf '%s' "$setup_out" | grep -E 'Asking|no:|Saved' | head -3)"
