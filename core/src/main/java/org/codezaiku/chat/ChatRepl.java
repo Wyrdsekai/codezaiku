@@ -148,10 +148,26 @@ public final class ChatRepl {
     private ChatIo io;
     /** Set when the person abandons a turn at an approval prompt; read by the loop's cancel hook. */
     private final AtomicBoolean abandoned = new AtomicBoolean();
+    /** An io given from outside (the web page's); null means the terminal's own. */
+    private ChatIo givenIo;
+    /** A note carried into the next message once, from {@code /carry}: what to keep in mind, for example where the person just came from. */
+    private volatile String carried;
 
     public ChatRepl(Path root, String driveUrl, String model, ChatConsent.Mode mode, int maxTurns) {
         this(root, driveUrl, model, mode, maxTurns, null);
     }
+
+    /** Talk through this io instead of the terminal: the web page's. */
+    public ChatRepl io(ChatIo io) { this.givenIo = io; return this; }
+
+    /** The project this chat works in. */
+    public Path projectRoot() { return root; }
+
+    /** The last exchange of the conversation so far, for a page that shows where this chat got to; "" before the first turn. */
+    public String lastExchange(int maxChars) { ChatSession s = session; return s == null ? "" : s.lastExchange(maxChars); }
+
+    /** A note for the next message, once: the web page uses it when the person switches here from another project. */
+    public void carry(String note) { this.carried = note == null || note.isBlank() ? null : note.strip(); }
 
     public ChatRepl(Path root, String driveUrl, String model, ChatConsent.Mode mode, int maxTurns,
                     String fromId) {
@@ -232,7 +248,7 @@ public final class ChatRepl {
         if ("info".equalsIgnoreCase(Config.get("CODEZAIKU_CHAT_LOG", ""))) {
             logs.console("info");
         }
-        io = ChatIo.open();
+        io = givenIo != null ? givenIo : ChatIo.open();
         // The rewind covers the budget: a REAL cap (not the unlimited sentinel) becomes the undo
         // depth, so granting 100 turns means being able to take all 100 back. The undo unit is the
         // USER turn — one journal record per message, first-touch pre-image per path — so /undo 1
@@ -270,6 +286,8 @@ public final class ChatRepl {
                     if (!command(io, line)) break;
                     continue;
                 }
+                String note = carried;
+                if (note != null) { carried = null; line = "[Carried over, for context: " + note + "]\n\n" + line; }   // once, into this message
                 turn(io, drive, lsp, library, index, line);   // drive is a field: /model swaps it
             }
         } finally {
@@ -523,6 +541,7 @@ public final class ChatRepl {
                 io.println("  TALKING");
                 io.println("    just type — it asks before writing or running anything, showing the change first");
                 io.println("    @path in a message attaches that file (project files only)");
+                io.println("    /carry <note>  keep a note in mind for your next message, once (a switch from another project uses it)");
                 io.println("    at a question:  y  ·  a always for THIS command  ·  all stop asking (session)");
                 io.println("                    n  ·  e never for this command   ·  s abandon the turn");
                 io.println("    ctrl-C stops a running turn (twice quits) · ctrl-D leaves");
@@ -729,6 +748,11 @@ public final class ChatRepl {
                     io.println("  new session, seeded from " + old.id());
                     io.println("  " + session.restate().replace("\n", "\n  "));
                 }, () -> io.println("  could not read " + matches.get(0)[0]));
+            }
+            case "/carry" -> {
+                if (arg.isEmpty()) { io.println("  /carry <what to keep in mind> — carried into your next message, once"); break; }
+                carry(arg);
+                io.println("  carried into your next message");
             }
             case "/handoff" -> {
                 if (session == null || session.turns() == 0) {

@@ -297,6 +297,30 @@ else
         || bad "MCP: no jsonrpc envelope on stdout"
 fi
 
+# ── 5b. the chat in the browser ─────────────────────────────────────────────
+# `codezaiku web` on a port, its list and token under the work folder, the model a closed port: the front page and a project's page
+# answer, opening the project starts its chat (the loop talks through the page), a send reaches it. Nothing of this touches ~/.codezaiku.
+web_port=7390
+if have_py; then web_port="$("$PY_BIN" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"; fi
+CODEZAIKU_WEB_DIR="$WORK/web" CODEZAIKU_CHAT_DIR="$WORK/chat" $CP web "$REPO" --port "$web_port" --host 127.0.0.1 --drive http://127.0.0.1:9 >"$WORK/web.txt" 2>&1 &
+webpid=$!
+web_up=0; for i in $(seq 1 60); do curl -fsS -m 3 "http://127.0.0.1:$web_port/health" >/dev/null 2>&1 && { web_up=1; break; }; sleep 1; done
+if [ "$web_up" = 1 ]; then
+    ok "web: answers on its port"
+    curl -fsS -m 5 "http://127.0.0.1:$web_port/" >"$WORK/web-home.html" 2>/dev/null
+    grep -q 'CodeZaiku' "$WORK/web-home.html" && grep -q '/chat?project=' "$WORK/web-home.html" && ok "web: the front page lists the project" || bad "web: the front page" "$(head -c 160 "$WORK/web-home.html")"
+    web_proj="$(sed -n 's/.*\/chat?project=\([^"]*\)".*/\1/p' "$WORK/web-home.html" | head -1)"
+    curl -fsS -m 10 "http://127.0.0.1:$web_port/chat?project=$web_proj" >"$WORK/web-chat.html" 2>/dev/null
+    grep -q 'id="composer"' "$WORK/web-chat.html" && ok "web: the project's page carries the box to type" || bad "web: the project's page" "$(head -c 160 "$WORK/web-chat.html")"
+    curl -fsS -m 5 -X POST --data "project=$web_proj&say=%2Fsessions" "http://127.0.0.1:$web_port/chat/say" >/dev/null 2>&1
+    web_said=0; for i in $(seq 1 60); do curl -fsS -m 3 "http://127.0.0.1:$web_port/chat/log?project=$web_proj&since=0" 2>/dev/null | grep -q 'earlier sessions' && { web_said=1; break; }; sleep 1; done
+    [ "$web_said" = 1 ] && ok "web: a send reaches the chat and its answer comes back to the page" || bad "web: the chat did not answer through the page" "$(tail -c 200 "$WORK/web.txt")"
+    [ -f "$WORK/web/projects" ] && ok "web: the project list is kept under the work folder, not the home" || bad "web: the list went elsewhere"
+else
+    bad "web: nothing answered on port $web_port in 60 s" "$(tail -c 200 "$WORK/web.txt")"
+fi
+kill -TERM "$webpid" 2>/dev/null; wait "$webpid" 2>/dev/null
+
 # ── 6. security surface (report-only) ────────────────────────────────────────
 head_ "security surface"
 

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.16
+
+What's new: you can talk to CodeZaiku in your browser, for more than one project at a time, and move between projects without losing your place.
+
+### Added
+
+**The chat in the browser.** Start it with `codezaiku web` and open `http://127.0.0.1:7072/`. You get the
+same chat as in the terminal. It reads your project, says what it is about to change, and asks before it
+writes a file or runs a command. On the page you answer with buttons instead of typing a letter.
+
+**More than one project.** The front page lists your projects. Add one by typing its folder. Each project
+has its own conversation, and the conversation keeps going as long as the server runs, even if you close
+the tab. When you open a project again, the page shows the last conversation and picks it up where it
+left off.
+
+**Moving between projects.** The menu has a link to each project. Press "switch" instead, and the chat in
+the other project is told where you were, so the next thing you say there starts from it.
+
+**The page itself.** The conversation scrolls on its own while the menu and the box you type in stay
+where they are. The menu shows each project's state, lets you change how much the chat asks, take back
+the last message, open an earlier session, see which model is answering, and choose a light or dark look.
+The chat's answers read as text, the steps it took fold away under one line, and a question it has for
+you appears above the box with its buttons.
+
+**On your network.** Start it with `--host 0.0.0.0` and other machines on your network can reach it too.
+It prints the addresses to type and a token, and the browser asks for the token once. Without the token,
+nothing opens.
+
+**In the terminal chat,** a new command: `/carry <note>` keeps a note in mind for your next message,
+once. The page's switch uses it.
+
 ## 0.3.15
 
 What's new: the model on this machine runs on AMD and Intel graphics too, and a bug fix.

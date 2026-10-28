@@ -108,6 +108,7 @@ import org.codezaiku.chat.ChatRepl;
 import org.codezaiku.chat.ChatSession;
 import org.codezaiku.chat.SessionArchive;
 import org.codezaiku.chat.V1Server;
+import org.codezaiku.chat.WebChat;
 import org.codezaiku.research.LibraryBridge;
 import org.codezaiku.tools.Tool;
 /**
@@ -131,7 +132,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.15";
+    public static final String VERSION = "0.3.16";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -444,6 +445,46 @@ public final class FamiliarMain {
         // WebUI (or any OpenAI client) is the GUI. Pinned to the READ rung by the protocol's own
         // shape: no mid-turn callback exists, so no approval prompt can render, so no tool that
         // would need one is in the registry (V1Server's javadoc carries the argument).
+        // WEB — the chat in the browser, for several projects under one server: the terminal chat's own loop per project, talking
+        // through a page; the page shows a question the chat asks as buttons, so it can act, not only answer. Loopback, no sign-in.
+        if (args.length >= 1 && args[0].equals("web")) {
+            try {
+                List<Path> projects = new ArrayList<>();
+                if (args.length >= 2 && !args[1].startsWith("--")) projects.add(Path.of(args[1]));
+                for (int i = 1; i + 1 < args.length; i++) if (args[i].equals("--project")) projects.add(Path.of(args[++i]));
+                int port = Integer.parseInt(flag(args, "--port", Config.get("CODEZAIKU_WEB_PORT", "7072")));
+                String host = flag(args, "--host", "127.0.0.1");   // loopback: no sign-in exists here
+                var mode = ChatConsent.Mode.fromConfig(flag(args, "--mode", Config.get("CODEZAIKU_CHAT_MODE")));
+                int turns = Integer.parseInt(flag(args, "--max-turns", Config.get("CODEZAIKU_CHAT_MAX_TURNS", "0"))); if (turns <= 0) turns = 1_000_000;
+                Path webDir = Path.of(Config.get("CODEZAIKU_WEB_DIR", System.getProperty("user.home") + "/.codezaiku/web"));   // the kept list and the token
+                Path registry = webDir.resolve("projects");
+                SavedModels.Choice onModel = chosenOrExit(flag(args, "--drive", DEFAULT_DRIVE), modelFlag, Auto.Job.of("chat", "B", true, projects.isEmpty() ? Path.of(".") : projects.get(0)));
+                WebChat web = new WebChat(projects.isEmpty() && !Files.isRegularFile(registry) ? List.of(Path.of(".")) : projects, onModel.drive(), onModel.model(), onModel.entry(), mode, turns, registry);
+                boolean onNetwork = !(host.equals("127.0.0.1") || host.equals("localhost") || host.equals("::1"));
+                String token = flag(args, "--token", Config.get("CODEZAIKU_WEB_TOKEN", ""));
+                Path tokenFile = webDir.resolve("token");
+                if (onNetwork && token.isBlank()) token = WebChat.tokenKept(tokenFile);   // the network asks for a token; one is kept so it stays the same
+                web.token(token.isBlank() ? null : token);
+                web.start(host, port);
+                System.out.println("web: the chat in the browser at http://" + host + ":" + port + "/  —  " + web.projects().size() + " project(s); the list is kept in " + registry);
+                for (String gone : web.skipped()) System.out.println("     left off the list, its folder is gone: " + gone);
+                if (onNetwork) {
+                    for (String a : lanAddresses()) System.out.println("     on your network: http://" + a + ":" + port + "/");
+                    System.out.println("     the browser asks for the token once: " + token + (flag(args, "--token", null) == null && Config.get("CODEZAIKU_WEB_TOKEN", "").isBlank() ? "   (kept in " + tokenFile + ")" : ""));
+                } else if (!token.isBlank()) System.out.println("     the browser asks for the token once.");
+                Thread.currentThread().join();
+            } catch (NumberFormatException e) {
+                System.err.println("codezaiku web: not a number: " + e.getMessage());
+                System.exit(2);
+            } catch (IllegalArgumentException e) {
+                System.err.println("codezaiku web: " + e.getMessage());
+                System.err.println("usage: codezaiku web [project] [--project <path>]... [--port 7072] [--host 127.0.0.1|0.0.0.0] [--token <word>] [--mode ask] [--drive URL]");
+                System.exit(2);
+            } catch (IOException | InterruptedException e) {
+                System.err.println("codezaiku web: " + e.getMessage());
+                System.exit(1);
+            }
+        }
         if (args.length >= 1 && args[0].equals("v1")) {
             try {
                 Path root = args.length >= 2 && !args[1].startsWith("--") ? Path.of(args[1]) : Path.of(".");
@@ -857,6 +898,17 @@ public final class FamiliarMain {
      * like it had worked and then failed later against a server the user had not asked for. Saying
      * so costs one line and saves the confusion.
      */
+    /** This machine's addresses on its networks, the ones a person types into another machine's browser. */
+    static List<String> lanAddresses() {
+        List<String> out = new ArrayList<>();
+        try {
+            var ifs = java.net.NetworkInterface.getNetworkInterfaces();
+            while (ifs != null && ifs.hasMoreElements()) { var ni = ifs.nextElement(); if (!ni.isUp() || ni.isLoopback()) continue;
+                for (var a : java.util.Collections.list(ni.getInetAddresses())) if (a instanceof java.net.Inet4Address && !a.isLoopbackAddress() && !a.isLinkLocalAddress()) out.add(a.getHostAddress()); }
+        } catch (java.net.SocketException ignored) { }
+        return out;
+    }
+
     static String flag(String[] args, String name, String def) {
         for (int i = 0; i < args.length; i++) {
             if (!args[i].equals(name)) continue;
@@ -894,6 +946,12 @@ public final class FamiliarMain {
                                                 /v1/chat/completions endpoint (Open WebUI is the
                                                 GUI). Read-only tools: this wire cannot ask
                                                 permission, so nothing that needs it is offered.
+              web [project] [--project <path>]... [--port 7072] [--host 127.0.0.1] [--token <word>] [--mode ask] [--drive URL]
+                                                the chat in the browser, for several projects under
+                                                one server: the same chat as the terminal's, it asks
+                                                before it acts and you answer with buttons; switching
+                                                projects carries where you were. --host 0.0.0.0 opens
+                                                it to your network and asks the browser for a token once.
               sessions list|export|import [project] [--out F] [--force]
                                                 the chat store as an archive: export is backup,
                                                 import is restore (never overwrites unless --force).

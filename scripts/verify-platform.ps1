@@ -64,6 +64,21 @@ if (-not $proc.WaitForExit(180000)) { Stop-Process -Id $proc.Id -Force -ErrorAct
 $acp = (Get-Content "$W\acp-out.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -match '"id":2' } | Out-String)
 if ($acp -match '"sessionId"') { Pass 'ACP: the MCP server started' } else { Fail 'ACP: the MCP server started' $acp }
 if ($acp -match '"category":"model"') { Pass 'ACP: model option offered' } else { Fail 'ACP: model option offered' $acp }
+# the chat in the browser: on a port, its list and token under the work folder, the model a closed port ($home is PowerShell's own: never assign it)
+$env:CODEZAIKU_WEB_DIR = "$W\web"; $env:CODEZAIKU_CHAT_DIR = "$W\chat"
+$webPort = Get-Random -Minimum 7300 -Maximum 7999
+$web = Start-Process -FilePath cmd.exe -ArgumentList "/c `"$Z2 web $W\repo --port $webPort --host 127.0.0.1 --drive http://127.0.0.1:9 > $W\web-out.txt 2>&1`"" -PassThru -WindowStyle Hidden
+$webUp = $false
+for ($i = 0; $i -lt 60 -and -not $webUp; $i++) { try { $r = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$webPort/health" -TimeoutSec 3; if ($r.StatusCode -eq 200) { $webUp = $true } } catch { Start-Sleep -Seconds 1 } }
+if ($webUp) { Pass 'web: answers on its port'
+  $front = (Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$webPort/" -TimeoutSec 5).Content
+  if ($front -match 'CodeZaiku' -and $front -match '/chat\?project=') { Pass 'web: the front page lists the project' } else { Fail 'web: the front page' $front.Substring(0, [Math]::Min(160, $front.Length)) }
+  if ($front -match '/chat\?project=([^"]+)"') { $proj = $Matches[1]; $chat = (Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$webPort/chat?project=$proj" -TimeoutSec 10).Content
+    if ($chat -match 'id="composer"') { Pass "web: the project's page carries the box to type" } else { Fail "web: the project's page" '' } }
+  if (Test-Path "$W\web\projects") { Pass 'web: the project list is kept under the work folder, not the home' } else { Fail 'web: the list went elsewhere' '' }
+} else { Fail "web: nothing answered on port $webPort in 60 s" (Get-Content "$W\web-out.txt" -ErrorAction SilentlyContinue | Select-Object -Last 3 | Out-String) }
+Stop-Process -Id $web.Id -Force -ErrorAction SilentlyContinue
+Remove-Item Env:CODEZAIKU_WEB_DIR -ErrorAction SilentlyContinue; Remove-Item Env:CODEZAIKU_CHAT_DIR -ErrorAction SilentlyContinue
 Stop-Process -Id $http.Id -Force -ErrorAction SilentlyContinue
 Get-Process java -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$W*" } | Stop-Process -Force -ErrorAction SilentlyContinue
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

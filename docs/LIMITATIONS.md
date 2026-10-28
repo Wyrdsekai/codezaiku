@@ -222,6 +222,9 @@ instrument were broken, then check that by hand.
 
 ## Chat (0.2.0)
 
+- **`codezaiku web` on the network is a token over plain HTTP** — the token travels once, when the
+  browser is given it, and rides as a cookie after. Fine on a home network; on one you do not trust,
+  reach the machine over a tunnel such as Tailscale. There are no accounts: one token, one person.
 - **macOS: ctrl-C turn-cancellation is unverified when stdin is a pipe** — the signal is consumed
   without stopping the turn. Interactive terminal use is the supported path on macOS.
 - **`codezaiku v1` cannot ask permission** — the wire has no mid-turn callback, so it serves

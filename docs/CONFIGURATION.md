@@ -189,6 +189,9 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 | `CODEZAIKU_MCP_TIMEOUT_SECONDS` | How long a call to an MCP server waits with no answer and no progress notification. Default 60. |
 | `CODEZAIKU_ACP_MCP_MAX_TOOLS` | How many tools the MCP servers an ACP client passes may add to a session. Default 40. |
 | `CODEZAIKU_V1_PORT` | Port for `codezaiku v1` (default 7071). |
+| `CODEZAIKU_WEB_PORT` | Port for `codezaiku web`, the chat in the browser (default 7072). |
+| `CODEZAIKU_WEB_DIR` | Where `codezaiku web` keeps its project list and token (default `~/.codezaiku/web`). |
+| `CODEZAIKU_WEB_TOKEN` | The token `codezaiku web` asks the browser for. On the network one is made and kept in `~/.codezaiku/web/token` when none is set. |
 | `CODEZAIKU_TEMP` | Sampling temperature override; `none` omits the field (some hosted models reject any temperature). |
 | `CODEZAIKU_DRIVE_TIMEOUT` | Per-request HTTP timeout in seconds (default 300). Raise for drives with very long generations. |
 | `CODEZAIKU_DRIVE_TEMPLATE_KWARGS` | JSON object merged into every request's `chat_template_kwargs` — e.g. `{"enable_thinking":false}` for engines with no server-side reasoning control. |

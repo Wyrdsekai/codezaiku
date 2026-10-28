@@ -237,6 +237,14 @@ background tasks, delegating work to a second agent, switching models, cost trac
 can only read, never change anything — an API cannot ask you for permission, so it is not given
 anything that would need it.
 
+`codezaiku web` is the chat in the browser, for several projects under one server: open
+`http://127.0.0.1:7072/`, pick a project or add one by its folder, and talk. It is the same chat as
+the terminal's, so it asks before it writes or runs anything, and you answer with buttons on the
+page. Each project keeps its own conversation. Moving to another project is a click, and "switch"
+also carries where you were, so the next thing you say there starts from it. It listens on this
+machine only unless you say `--host 0.0.0.0`, which opens it to your network; it then prints a token
+and the addresses to type, and the browser asks for the token once.
+
 **Research a question**
 
 ```bash

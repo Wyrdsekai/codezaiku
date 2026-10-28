@@ -73,6 +73,9 @@ tasks.test {
     // The suite must never read the developer's household config: with CODEZAIKU_EMBED set in
     // ~/.codezaiku/config, index tests reached the live embedder (2026-09-02). Explicitly off.
     environment("CODEZAIKU_EMBED", "off")
+    // A chat a test starts keeps its sessions, its undo journal and its run log under the build folder, never under this machine's own
+    // ~/.codezaiku/chat: two test runs had left stores there, with the ops tests' log lines inside them (2026-10-27).
+    environment("CODEZAIKU_CHAT_DIR", layout.buildDirectory.dir("test-chat").get().asFile.absolutePath)
     environment("CODEZAIKU_RERANK", "off")
     // Every shell command a test runs would otherwise make a project environment (a Python venv) for its temporary folder under the
     // real ~/.codezaiku/envs: the first full run after ProjectEnv made seven, 86 MB (2026-09-29). ProjectEnvTest switches it on itself.
