@@ -267,6 +267,8 @@ backend. For the whole web, two options, the first recommended:
 
 ```bash
 codezaiku config set CODEZAIKU_BRAVE_KEY <key>        # recommended: Brave Search API
+codezaiku config set CODEZAIKU_SERPER_KEY <key>       # Google's own results, paid per search (serper.dev); or CODEZAIKU_SERPAPI_KEY
+codezaiku config set CODEZAIKU_FIRECRAWL_KEY <key>    # pages a plain fetch cannot read, through Firecrawl's browser, paid per page
 codezaiku config set CODEZAIKU_SEARXNG http://host:8888   # or: your own SearXNG instance
 ```
 

@@ -9,6 +9,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -26,6 +27,7 @@ class FetchGuardTest {
 
     @Test
     void walksRedirectsWithTheCheckAtEveryHop() throws Exception {
+        Fetch.ownHostsForTests = List.of();   // a box whose settings put a service on 127.0.0.1 (a SearXNG there) would refuse the stand-in server; the guard itself is tested above
         HttpServer s = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         s.createContext("/start", ex -> { ex.getResponseHeaders().add("Location", "/page"); ex.sendResponseHeaders(302, -1); ex.close(); });
         s.createContext("/page", ex -> { byte[] b = "Hand cut, says the page.".getBytes(StandardCharsets.UTF_8); ex.getResponseHeaders().add("Content-Type", "text/plain"); ex.sendResponseHeaders(200, b.length); ex.getResponseBody().write(b); ex.close(); });
@@ -56,5 +58,5 @@ class FetchGuardTest {
         var f = Fetch.class.getDeclaredField("allowLoopback"); f.setAccessible(true); f.set(null, v);
     }
 
-    @AfterEach void noLoopback() throws Exception { setLoopback(false); }
+    @AfterEach void noLoopback() throws Exception { setLoopback(false); Fetch.ownHostsForTests = null; }
 }

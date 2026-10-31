@@ -15,6 +15,9 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.LinkedHashMap;
+import java.util.HashMap;
+import java.util.Map;
 import org.codezaiku.Config;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -36,6 +39,14 @@ public final class WebSearchTool implements Tool {
             new AtomicInteger();
 
     /** Which backend answered, session-wide; and searches that found no backend at all. */
+    public static final AtomicInteger SERPER_USED = new AtomicInteger(), SERPAPI_USED = new AtomicInteger();
+    /** The Google rungs' addresses; a test points them at its own server. */
+    public static final Map<String, String> GOOGLE = new HashMap<>();
+    static { GOOGLE.put("serper", "https://google.serper.dev/search"); GOOGLE.put("serper_resolve", "https://google.serper.dev/resolve"); GOOGLE.put("serpapi", "https://serpapi.com/search.json"); }
+    public static final String SERPER_KEY = "CODEZAIKU_SERPER_KEY", SERPAPI_KEY = "CODEZAIKU_SERPAPI_KEY";
+    /** Whether a Google rung is set: a Serper key or a SerpApi key. */
+    public static boolean googleConfigured() { return !blank(Config.get(SERPER_KEY)) || !blank(Config.get(SERPAPI_KEY)); }
+    static boolean blank(String s) { return s == null || s.isBlank(); }
     public static final AtomicInteger BRAVE_USED = new AtomicInteger(),
             SEARXNG_USED = new AtomicInteger(), FALLBACK_USED = new AtomicInteger(),
             UNREACHABLE = new AtomicInteger();
@@ -89,6 +100,7 @@ public final class WebSearchTool implements Tool {
             if (!r[2].isEmpty()) sb.append("   ").append(r[2]).append('\n');
         }
         FALLBACK_USED.incrementAndGet();
+        SearchTally.count("the built-in fallback", 0);
         return sb.toString();
     }
 
@@ -172,6 +184,128 @@ public final class WebSearchTool implements Tool {
         }
     }
 
+    /**
+     * Google's results through Serper (serper.dev), first when the person set a key: paid per search after the free credits, so only a
+     * key the person put there turns it on. Since 2026-10-30 Google gives a program only the top three links of a search at once; the
+     * rest come as google.com/goto redirects, which Serper's free resolve call turns into the real addresses, sometimes after a short
+     * wait. A link still unresolved is shown as the redirect with the site's readable name. Returns null when unset or unusable.
+     */
+    private String serperSearch(String query, int limit) {
+        String key = Config.get(SERPER_KEY);
+        if (blank(key)) return null;
+        try {
+            var body = M.createObjectNode().put("q", query).put("num", Math.min(Math.max(limit, 1), 20));
+            HttpResponse<String> resp = HTTP.send(HttpRequest.newBuilder(URI.create(GOOGLE.get("serper"))).timeout(Duration.ofSeconds(20))
+                    .header("Accept", "application/json").header("Content-Type", "application/json").header("X-API-KEY", key.strip())
+                    .POST(HttpRequest.BodyPublishers.ofString(M.writeValueAsString(body))).build(), HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) return null;
+            JsonNode answer = M.readTree(resp.body());
+            JsonNode rs = answer.path("organic");
+            if (!rs.isArray() || rs.isEmpty()) return null;
+            List<String> gotos = new ArrayList<>();
+            for (JsonNode r : rs) if (isGoogleRedirect(r.path("link").asText(""))) gotos.add(r.path("link").asText(""));
+            Map<String, String> resolved = gotos.isEmpty() ? Map.of() : serperResolve(key.strip(), gotos);
+            SERPER_USED.incrementAndGet();
+            SearchTally.count("Serper", answer.path("credits").asInt(1));
+            StringBuilder sb = new StringBuilder("results for \"" + query + "\" (Google, through Serper):\n");
+            int shown = 0, unresolved = 0;
+            for (int i = 0; i < rs.size() && shown < limit; i++) {
+                JsonNode r = rs.get(i);
+                String url = r.path("link").asText("");
+                boolean redirect = isGoogleRedirect(url);
+                if (redirect && resolved.containsKey(url)) { url = resolved.get(url); redirect = false; }
+                String desc = r.path("snippet").asText("").replaceAll("\\s+", " ").strip();
+                if (desc.length() > 240) desc = desc.substring(0, 240) + "…";
+                shown++;
+                if (redirect) unresolved++;
+                sb.append(shown).append(". ").append(r.path("title").asText("")).append('\n')
+                  .append("   ").append(url).append(redirect ? "  [a Google redirect Google has not released yet, to " + r.path("displayedLink").asText("the page") + "; search for the page by that name to read it]" : "").append('\n');
+                if (!desc.isEmpty()) sb.append("   ").append(desc).append('\n');
+            }
+            if (unresolved > 0) sb.append("(").append(unresolved).append(" address(es) are Google redirects Google has not released yet; the readable site name is given for each)\n");
+            return sb.toString();
+        } catch (Exception e) { return null; }
+    }
+
+    static boolean isGoogleRedirect(String url) { return url != null && url.matches("(?i)https?://(www\\.)?google\\.[a-z.]+/(goto|url)\\?.*"); }
+
+    /**
+     * Serper's free resolve call: the google.com/goto links a search gave, back as the real addresses in the order sent (measured
+     * 2026-10-30: {"links": [...], "credits": 0}); when Google has not released a link yet the answer says retryAfter in seconds, and
+     * one more try follows that wait. Read leniently: a list of addresses in order, or objects naming the link sent and the address found.
+     */
+    static Map<String, String> serperResolve(String key, List<String> links) {
+        Map<String, String> out = new LinkedHashMap<>();
+        List<String> left = new ArrayList<>(links);
+        for (int attempt = 0; attempt < 2 && !left.isEmpty(); attempt++) {
+            try {
+                var body = M.createObjectNode(); var arr = body.putArray("links"); for (String l : left) arr.add(l);
+                HttpResponse<String> resp = HTTP.send(HttpRequest.newBuilder(URI.create(GOOGLE.get("serper_resolve"))).timeout(Duration.ofSeconds(40))
+                        .header("Accept", "application/json").header("Content-Type", "application/json").header("X-API-KEY", key)
+                        .POST(HttpRequest.BodyPublishers.ofString(M.writeValueAsString(body))).build(), HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() != 200) return out;
+                JsonNode j = M.readTree(resp.body());
+                JsonNode list = null;
+                for (String k : List.of("links", "resolvedLinks", "resolved_links", "results", "data")) if (j.path(k).isArray()) { list = j.path(k); break; }
+                if (list == null && j.isArray()) list = j;
+                if (list != null) for (int i = 0; i < list.size(); i++) {
+                    JsonNode e = list.get(i);
+                    String from = e.isTextual() ? (i < left.size() ? left.get(i) : "") : first(e, "link", "url", "original", "goto", "input", "source");
+                    String to = e.isTextual() ? e.asText("") : first(e, "resolved", "resolvedLink", "resolved_link", "resolvedUrl", "resolved_url", "destination", "target", "finalUrl");
+                    if (from.isEmpty() && !e.isTextual() && i < left.size()) from = left.get(i);
+                    if (!from.isEmpty() && !to.isEmpty() && !isGoogleRedirect(to)) out.put(from, to);
+                }
+                left.removeIf(out::containsKey);
+                int retryAfter = j.path("retryAfter").asInt(j.path("retry_after").asInt(0));
+                if (left.isEmpty() || retryAfter <= 0 || attempt == 1) break;
+                Thread.sleep(Math.min(retryAfter, 8) * 1000L);
+            } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return out; }
+            catch (Exception e) { return out; }
+        }
+        return out;
+    }
+
+    static String first(JsonNode e, String... keys) { for (String k : keys) if (e.path(k).isTextual() && !e.path(k).asText().isBlank()) return e.path(k).asText(); return ""; }
+
+    /**
+     * Google's results through SerpApi (serpapi.com), before Brave when the person set a key and no Serper key: paid per search after
+     * the free hundred a month. Measured 2026-10-30: SerpApi's answer carries Google's unreleased redirects for most results, as a
+     * relative "/goto?url=…" with the readable site name in displayed_link, so such a result is shown as a redirect with that name.
+     */
+    private String serpApiSearch(String query, int limit) {
+        String key = Config.get(SERPAPI_KEY);
+        if (blank(key)) return null;
+        try {
+            String url = GOOGLE.get("serpapi") + "?engine=google&q=" + URLEncoder.encode(query, StandardCharsets.UTF_8) + "&num=" + Math.min(Math.max(limit, 1), 20) + "&api_key=" + URLEncoder.encode(key.strip(), StandardCharsets.UTF_8);
+            HttpResponse<String> resp = HTTP.send(HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(25)).header("Accept", "application/json").GET().build(), HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) return null;
+            JsonNode j = M.readTree(resp.body());
+            if (j.has("error")) return null;
+            JsonNode rs = j.path("organic_results");
+            if (!rs.isArray() || rs.isEmpty()) return null;
+            SERPAPI_USED.incrementAndGet();
+            SearchTally.count("SerpApi", 1);
+            StringBuilder sb = new StringBuilder("results for \"" + query + "\" (Google, through SerpApi):\n");
+            int shown = 0, unresolved = 0;
+            for (int i = 0; i < rs.size() && shown < limit; i++) {
+                JsonNode r = rs.get(i);
+                String u = r.path("link").asText("");
+                if (u.startsWith("/")) u = "https://www.google.com" + u;
+                if (u.isEmpty()) continue;
+                boolean redirect = isGoogleRedirect(u);
+                String desc = r.path("snippet").asText("").replaceAll("\\s+", " ").strip();
+                if (desc.length() > 240) desc = desc.substring(0, 240) + "…";
+                shown++;
+                if (redirect) unresolved++;
+                sb.append(shown).append(". ").append(r.path("title").asText("")).append('\n')
+                  .append("   ").append(u).append(redirect ? "  [a Google redirect Google has not released yet, to " + r.path("displayed_link").asText("the page") + "; search for the page by that name to read it]" : "").append('\n');
+                if (!desc.isEmpty()) sb.append("   ").append(desc).append('\n');
+            }
+            if (unresolved > 0) sb.append("(").append(unresolved).append(" address(es) are Google redirects Google has not released yet; the readable site name is given for each)\n");
+            return sb.toString();
+        } catch (Exception e) { return null; }
+    }
+
     @Override public String name() { return "web_search"; }
 
     @Override public String description() {
@@ -211,9 +345,10 @@ public final class WebSearchTool implements Tool {
             return "ALREADY SEARCHED: you already ran this exact query; its results are above in your history. "
                     + "Use a DIFFERENT query, web_fetch one of the results you have not read yet, or write your "
                     + "answer and call task_done.";
-        String brave = braveSearch(query, limit);
+        String brave = serperSearch(query, limit);   // Google first, through the key the person set: Serper, else SerpApi; then Brave
+        if (brave == null) brave = serpApiSearch(query, limit);
+        if (brave == null) { brave = braveSearch(query, limit); if (brave != null) { BRAVE_USED.incrementAndGet(); SearchTally.count("Brave", 0); } }
         if (brave != null) {
-            BRAVE_USED.incrementAndGet();
             if (!sweepNoted && looksBatched(query)) {
                 sweepNoted = true;
                 brave += "\nNOTE: this query names several distinct items at once: engines require ALL "
@@ -277,6 +412,7 @@ public final class WebSearchTool implements Tool {
             return "no results for: " + query;
         }
         SEARXNG_USED.incrementAndGet();
+        SearchTally.count("SearXNG", 0);
         StringBuilder sb = new StringBuilder("results for \"" + query + "\":\n");
         for (int i = 0; i < results.size() && i < limit; i++) {
             JsonNode r = results.get(i);

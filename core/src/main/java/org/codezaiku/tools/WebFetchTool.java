@@ -13,6 +13,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -77,6 +78,10 @@ public final class WebFetchTool implements Tool {
         return this;
     }
 
+    /** How many pages one tool reads through Firecrawl: each costs a credit, so a run reads a few this way, not a site. */
+    static final int MOST_FIRECRAWL = 20;
+    private final AtomicInteger firecrawls = new AtomicInteger();
+
     @Override public String execute(JsonNode args) throws Exception {
         String url = args.path("url").asText("");
         if (url.isBlank()) return "ERROR: empty url";
@@ -100,6 +105,11 @@ public final class WebFetchTool implements Tool {
             return "ERROR: could not fetch " + url + " (" + e + ")";
         }
         url = resp.url();   // after redirects — what was actually read is what gets cited
+        String via = "";   // how the page was read when a plain fetch could not read it
+        if (resp.status() >= 400 && (resp.status() == 401 || resp.status() == 403 || resp.status() == 406 || resp.status() == 429 || resp.status() >= 500) && Firecrawl.on() && firecrawls.incrementAndGet() <= MOST_FIRECRAWL) {
+            Fetch.Result r = Firecrawl.scrape(url, Duration.ofSeconds(45));   // a site that turns a plain fetch away may let a browser in
+            if (r != null) { via = "read through Firecrawl's browser, because a plain fetch got HTTP " + resp.status(); resp = r; }
+        }
         if (resp.status() >= 400) {
             // WIKIPEDIA 404 → real titles. A model GUESSES plausible article titles and a near-miss 404s
             // (measured: "List of state constitutions of the United States" — the page exists as
@@ -118,12 +128,17 @@ public final class WebFetchTool implements Tool {
             return "ERROR: PDF at " + url + " could not be converted (" + doc.kind() + ")";
         }
         String text = doc.text();
+        if (via.isEmpty() && text.strip().length() < 400 && bytes.length > 15_000 && new String(bytes, 0, Math.min(bytes.length, 6000), StandardCharsets.UTF_8).toLowerCase(Locale.ROOT).contains("<script")
+                && Firecrawl.on() && firecrawls.incrementAndGet() <= MOST_FIRECRAWL) {   // a script shell: the page is drawn in the browser
+            Fetch.Result r = Firecrawl.scrape(url, Duration.ofSeconds(45));
+            if (r != null) { via = "read through Firecrawl's browser, because the page is built by scripts: " + text.strip().length() + " characters of text in " + bytes.length + " bytes"; resp = r; bytes = r.body(); doc = DocText.convert(bytes, url); text = doc.text(); }
+        }
         FETCHES_OK.incrementAndGet();
         // The document's own title rides on the source line: the person watching the turn sees
         // WHAT was read, not just that a read happened, and the model cites by name, not URL.
         String title = doc.title();
         String kindNote = "html".equals(doc.kind()) || "text".equals(doc.kind()) ? "" : " [" + doc.kind() + "]";
-        String head = "source: " + url + (title.isEmpty() ? "" : " — " + title) + kindNote + "\n\n";
+        String head = "source: " + url + (title.isEmpty() ? "" : " — " + title) + kindNote + (via.isEmpty() ? "" : " [" + via + "]") + "\n\n";
         if (text.length() <= MAX_CHARS) return head + text;
         String terms = args.path("find").asText("");
         if (terms.isBlank()) terms = focus;

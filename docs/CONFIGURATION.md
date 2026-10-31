@@ -178,7 +178,12 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 | `CODEZAIKU_CHAT_DIR` | Where sessions, project memory and the undo journal live (default `~/.codezaiku/chat`). |
 | `CODEZAIKU_UNDO_DEPTH` | How many agent steps `/undo` can walk back (default 10, or the turn cap if higher). |
 | `CODEZAIKU_SEARXNG` | SearXNG endpoint for `web_search`. Setting it (or the Brave key) is what puts web tools into chat. |
-| `CODEZAIKU_BRAVE_KEY` | Brave Search API key — first-choice search backend when set; SearXNG is the fallback on any failure. |
+| `CODEZAIKU_SERPER_KEY` | Serper key (serper.dev): Google's own results, used first for web search when set. Paid per search after the free credits, about a tenth of a cent each; a research run makes tens of searches. Google releases only the top three links of a search at once since 2026-10-30; the rest are asked for with Serper's free second call, and an address still unreleased is shown as a Google redirect with the site's readable name. |
+| `CODEZAIKU_SERPAPI_KEY` | SerpApi key (serpapi.com): Google's own results, used first when set and no Serper key is. Paid per search after the free hundred a month, about one and a half cents each; most addresses come as Google's unreleased redirects today, so Serper is the better key. |
+| `CODEZAIKU_FIRECRAWL_KEY` | Firecrawl key (firecrawl.dev): a page a plain fetch cannot read, built by scripts, a bot wall or a 403, is read through Firecrawl's browser instead and the source line says so. Paid per page after the free credits, at most twenty pages a run. |
+| `CODEZAIKU_BRAVE_KEY` | Brave Search API key — the search backend after a Google key when one is set, before SearXNG; SearXNG is the fallback on any failure. |
+
+Every search and every page read through a service is counted, by month and by service, with the credits the paid ones charge, in `search-tally.json` in the settings folder; `codezaiku doctor` says what the month cost so far ("This month, 2026-10: 123 searches through Serper, 123 credits; 40 through Brave; 12 pages through Firecrawl, 12 credits.").
 | `CODEZAIKU_FALLBACK_SEARCH` | `on` — when neither Brave nor SearXNG answers, `web_search` uses Wikipedia plus Crossref and OpenAlex (reference pages and papers by DOI). `off` disables it. `scholar_search`, the literature by DOI, is offered in every research run regardless. |
 | `CODEZAIKU_FETCH_PRIVATE` | `deny` refuses `web_fetch` of private-network addresses. Loopback, link-local, unspecified, multicast and the hosts of your own drive, embedder, reranker and search backend are always refused, at every redirect hop. |
 | `CODEZAIKU_FETCH_MAX_BYTES` | The largest document `web_fetch` reads (default 25 MB); the body and its decompression are capped. |

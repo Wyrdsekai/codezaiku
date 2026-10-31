@@ -1,5 +1,8 @@
 package org.codezaiku;
 
+import org.codezaiku.tools.SearchTally;
+import org.codezaiku.tools.WebSearchTool;
+
 import org.codezaiku.drive.DriveClient;
 import org.codezaiku.ops.Exec;
 
@@ -177,12 +180,14 @@ final class Doctor {
         String searx = Config.get("CODEZAIKU_SEARXNG", "http://localhost:8888");
         String brave = Config.get("CODEZAIKU_BRAVE_KEY");
         boolean haveBrave = brave != null && !brave.isBlank();
+        boolean haveGoogle = WebSearchTool.googleConfigured();
         boolean searxAnswers = httpOk(searx + "/search?q=probe&format=json");
-        checks.add(new Check(haveBrave ? "web search: Brave Search key set" : "web search: SearXNG at " + searx, false, haveBrave || searxAnswers,
+        checks.add(new Check(haveGoogle ? "web search: Google through a Serper or SerpApi key, paid per search" + (haveBrave ? ", then Brave" : "") : haveBrave ? "web search: Brave Search key set" : "web search: SearXNG at " + searx, false, haveGoogle || haveBrave || searxAnswers,
                 haveBrave || searxAnswers ? "" : "research runs search the web with it; without it they only reach Wikipedia, Crossref and OpenAlex",
                 "either a Brave Search API key (free plan at https://brave.com/search/api/): codezaiku config set CODEZAIKU_BRAVE_KEY <key>\n"
                 + "      or a SearXNG server with its JSON API turned on: codezaiku config set CODEZAIKU_SEARXNG http://<host>:8888\n"
                 + "      `codezaiku setup` asks for either."));
+        checks.add(new Check("search tally: " + SearchTally.summary(), false, true, "", ""));   // what a month of searching cost, counted by service
 
         boolean git = exec.run("git --version", 10).ok();
         checks.add(new Check("git", false, git, git ? "" : "the coding commands commit their work with it, and `run` uses it to list the files a task changed",

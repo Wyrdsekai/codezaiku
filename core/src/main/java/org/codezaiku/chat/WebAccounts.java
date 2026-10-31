@@ -10,6 +10,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -42,7 +43,7 @@ public final class WebAccounts {
         if (Files.isRegularFile(f)) { String t = Files.readString(f, StandardCharsets.UTF_8).strip(); if (t.length() == 64) return secret = HexFormat.of().parseHex(t); }
         byte[] s = new byte[32]; new SecureRandom().nextBytes(s);
         Files.createDirectories(dir); Files.writeString(f, HexFormat.of().formatHex(s) + "\n", StandardCharsets.UTF_8);
-        try { Files.setPosixFilePermissions(f, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")); } catch (UnsupportedOperationException | IOException ignored) { }
+        try { Files.setPosixFilePermissions(f, PosixFilePermissions.fromString("rw-------")); } catch (UnsupportedOperationException | IOException ignored) { }
         return secret = s;
     }
 
@@ -61,7 +62,7 @@ public final class WebAccounts {
         StringBuilder b = new StringBuilder();
         for (Row r : rows) b.append(r.name()).append('\t').append(r.role()).append('\t').append(HexFormat.of().formatHex(r.salt())).append('\t').append(HexFormat.of().formatHex(r.hash())).append('\n');
         Files.writeString(file(), b.toString(), StandardCharsets.UTF_8);
-        try { Files.setPosixFilePermissions(file(), java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")); } catch (UnsupportedOperationException | IOException ignored) { }
+        try { Files.setPosixFilePermissions(file(), PosixFilePermissions.fromString("rw-------")); } catch (UnsupportedOperationException | IOException ignored) { }
     }
 
     static byte[] hash(String password, byte[] salt) {

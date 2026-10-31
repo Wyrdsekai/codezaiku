@@ -78,7 +78,11 @@ public final class Fetch {
     }
 
     /** The hosts of the configured drive, embedder, reranker and search backend. */
+    /** The hosts of the library's own services as a test sets them; null outside tests, when they come from the settings. */
+    static volatile List<String> ownHostsForTests = null;
+
     static List<String> ownServiceHosts() {
+        if (ownHostsForTests != null) return ownHostsForTests;
         List<String> out = new ArrayList<>();
         for (String key : new String[]{"CODEZAIKU_DRIVE", "CODEZAIKU_LIBRARIAN_DRIVE", "CODEZAIKU_DELEGATE_DRIVE", "CODEZAIKU_EMBED", "CODEZAIKU_RERANK", "CODEZAIKU_SEARXNG", "CODEZAIKU_JOB_DRIVES"}) {
             String v = Config.get(key);

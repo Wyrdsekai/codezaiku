@@ -309,6 +309,9 @@ public final class Setup {
 
         // 2. web search
         out.println("2. Web search, for research runs. A Brave Search API key (free plan) or a SearXNG address; without either the");
+        out.println("   runs reach only Wikipedia and the paper indexes. Google's own results come through a Serper or SerpApi key, paid per");
+        out.println("   search, and a page a plain fetch cannot read through a Firecrawl key, paid per page: codezaiku config set");
+        out.println("   CODEZAIKU_SERPER_KEY, CODEZAIKU_SERPAPI_KEY or CODEZAIKU_FIRECRAWL_KEY. `codezaiku doctor` says what a month cost.");
         out.println("   built-in fallback (Wikipedia, Crossref, OpenAlex) answers, which is reference pages and papers, not the web.");
         String haveBrave = Config.get("CODEZAIKU_BRAVE_KEY"), haveSearx = Config.get("CODEZAIKU_SEARXNG");
         String dfltSearch = haveBrave != null && !haveBrave.isBlank() ? "(the Brave key in your settings)" : haveSearx != null && !haveSearx.isBlank() ? haveSearx : "";

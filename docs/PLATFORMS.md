@@ -29,6 +29,20 @@ permission blocks a JVM started over ssh from reaching another machine on the LA
 the documented way round it (below). The Debian package was installed and run on a second Linux
 machine before publishing.
 
+### Acceptance run for 0.3.18 (2026-10-31)
+
+The same 28-check pass, run on the 0.3.18 tarballs the day they were built:
+
+| Platform | passed | failed | skipped | model server |
+|---|---|---|---|---|
+| Linux (reference) | 28 | 0 | 0 | a 27B on another machine on the LAN |
+| macOS 26 arm64 (M4, 16 GB) | 28 | 0 | 0 | the one `codezaiku model serve install` set up on the Mac itself: a 9B on Metal |
+| Windows 11 native | 13 | 0 | 0 | its own PowerShell pass, with fewer checks |
+| WSL2 | not re-run | | | |
+
+The Debian package installed, ran and removed cleanly in a fresh Ubuntu 24.04 container, and the Linux
+build with its own Java runtime verified and ran on a second Linux machine.
+
 ### Acceptance run for 0.3.17 (2026-10-28)
 
 The same pass, grown to 28 checks since 0.3.0, run on the 0.3.17 tarballs the day they were built:

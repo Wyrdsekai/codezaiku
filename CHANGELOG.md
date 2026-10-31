@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.18
+
+What's new: CodeZaiku now works with Serper, SerpApi and Firecrawl. Serper or SerpApi give it Google's
+search results, Firecrawl reads the web pages that block programs, and the doctor counts what a month of
+that cost.
+
+### Added
+
+- Searching with Google. Until now CodeZaiku searched the web through Brave, or through a search
+  engine you run yourself. Now you can give it a key from Serper (serper.dev, the setting
+  `CODEZAIKU_SERPER_KEY`) or from SerpApi (serpapi.com, `CODEZAIKU_SERPAPI_KEY`), two services that
+  fetch Google's results for programs, and it uses Google first. Both charge a small amount per search
+  once their free allowance is used up, so a key is used only when you put it in your settings. One
+  wrinkle: since late October, Google hands a program only the first three links of a search right
+  away. Through Serper, CodeZaiku asks for the rest a moment later at no charge; a link Google has not
+  released yet is shown as a Google link with the name of the site it leads to.
+- Reading pages that block programs. Some web pages stay blank unless a real browser draws them, and
+  some refuse anything that is not a browser. If you give CodeZaiku a Firecrawl key (firecrawl.dev,
+  `CODEZAIKU_FIRECRAWL_KEY`), it reads such a page through Firecrawl's browser instead and says so
+  above the text. Firecrawl charges per page after its free allowance, and CodeZaiku reads at most
+  twenty pages this way in one run.
+- What your searching cost. CodeZaiku now counts every search and every page it read through one of
+  these services, month by month, with the credits each one charged. `codezaiku doctor` shows the
+  count, so you know what a month cost before the bill arrives.
+
 ## 0.3.17
 
 What's new: you can move the chat from one project to another, the chat's answers are easier to read

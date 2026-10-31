@@ -16,6 +16,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
@@ -91,7 +92,7 @@ public final class WebChat {
         if (Files.isRegularFile(file)) { String t = Files.readString(file, StandardCharsets.UTF_8).strip(); if (!t.isEmpty()) return t; }
         String t = newToken();
         Files.createDirectories(file.getParent()); Files.writeString(file, t + "\n", StandardCharsets.UTF_8);
-        try { Files.setPosixFilePermissions(file, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")); } catch (UnsupportedOperationException | IOException ignored) { }
+        try { Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------")); } catch (UnsupportedOperationException | IOException ignored) { }
         return t;
     }
 
