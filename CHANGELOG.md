@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.19
+
+What's new: A safety fix for the chat in the browser, and the web app updates itself too.
+
+### Fixed
+
+- The chat in the browser, on this machine with no token, carried out whatever a web page you had open sent it: a page
+  on another site could add a project, say something to its chat, and answer the question the chat asks before it
+  writes or runs anything. Now it carries out a form only when it came from its own page, and with no token it answers
+  only to this computer's own name, 127.0.0.1 or localhost. If you use the chat in the browser, update.
+- The web app, left running, installs a newer CodeZaiku once a day at a quiet moment, for its next start. Before, only
+  a terminal chat did, so a web app or an agent driving CodeZaiku stayed on its version.
+
 ## 0.3.18
 
 What's new: CodeZaiku now works with Serper, SerpApi and Firecrawl. Serper or SerpApi give it Google's

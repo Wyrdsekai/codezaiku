@@ -244,7 +244,8 @@ the terminal's, so it asks before it writes or runs anything, and you answer wit
 page. Each project keeps its own conversation. Moving to another project is a click, and "switch"
 also carries where you were, so the next thing you say there starts from it. It listens on this
 machine only unless you say `--host 0.0.0.0`, which opens it to your network; it then prints a token
-and the addresses to type, and the browser asks for the token once. From the menu's People page you
+and the addresses to type, and the browser asks for the token once. On this machine it carries out a form only from
+its own page and answers only to 127.0.0.1 or localhost, so another web page you have open cannot work it. From the menu's People page you
 can name others: a viewer sees every page and every chat as it runs and can type nothing, an owner can
 do all you can. Each signs in with a name and a password.
 

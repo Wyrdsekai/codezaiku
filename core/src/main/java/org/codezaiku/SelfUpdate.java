@@ -331,6 +331,17 @@ public final class SelfUpdate {
         return "`codezaiku update now` installs it; your settings and sessions stay.";
     }
 
+    /**
+     * The auto mode's turn at a quiet moment of a program that runs for days, the web app: the latest release read now rather than from
+     * the day's cache, and swapped in for the next start. Returns what it did, or "".
+     */
+    public static String maybeAutoNow() {
+        if (!mode().equals("auto")) return "";
+        String latest = latestVersion();
+        if (latest != null) { try { Path c = latestCache(); Files.createDirectories(c.getParent()); Files.writeString(c, latest, StandardCharsets.UTF_8); } catch (IOException ignored) { } }
+        return maybeAuto(mode(), latest, v -> now(v, new PrintStream(new ByteArrayOutputStream(), true)));
+    }
+
     /** The auto mode's turn, at the start of a chat: a newer release is swapped in for the NEXT start. Returns what it did, or "". */
     public static String maybeAuto() {
         return maybeAuto(mode(), latestCached(), v -> now(v, new PrintStream(new ByteArrayOutputStream(), true)));

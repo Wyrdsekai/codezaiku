@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.codezaiku.SelfUpdate;
 import org.codezaiku.drive.SavedModels;
 
 import java.io.IOException;
@@ -50,6 +51,33 @@ public final class WebChat {
     }
 
     private final Map<String, Loop> loops = new LinkedHashMap<>();
+    /** What the daily update turn did, shown on the page: "" until it did something. */
+    private volatile String updateNote = "";
+    public String updateNote() { return updateNote; }
+    /** How often the server takes its quiet moment, and how long it waits when a chat is working. */
+    static final long UPDATE_EVERY_MS = 24L * 3600 * 1000, UPDATE_RETRY_MS = 10L * 60 * 1000, UPDATE_FIRST_MS = 60_000;
+
+    /** A quiet moment: no project's chat is working; one waiting for the person, or not started, or ended, is quiet. */
+    static boolean quiet(List<Loop> loops) {
+        for (Loop l : loops) if (l.running() && l.io.pending() == null) return false;
+        return true;
+    }
+
+    /** The server's own update turn: once a day, at a quiet moment, in auto mode; what it did goes on the page and to the terminal. Only a terminal chat took that turn before, so a web app left running stayed on its version. */
+    private void updateDaily() {
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(UPDATE_FIRST_MS);
+                while (!Thread.currentThread().isInterrupted()) {
+                    if (!quiet(projects())) { Thread.sleep(UPDATE_RETRY_MS); continue; }
+                    try { String said = SelfUpdate.maybeAutoNow(); if (!said.isEmpty()) { updateNote = said; System.out.println(said); } }
+                    catch (Throwable e) { System.out.println("codezaiku: the automatic update did not work: " + e); }
+                    Thread.sleep(UPDATE_EVERY_MS);
+                }
+            } catch (InterruptedException ignored) { }
+        }, "codezaiku-web-update");
+        t.setDaemon(true); t.start();
+    }
     private final String driveUrl, model; private final SavedModels.Entry entry; private final ChatConsent.Mode mode; private final int maxTurns;
     private final Path registry;
     private HttpServer server;
@@ -114,7 +142,7 @@ public final class WebChat {
     String loginPage(boolean wrong) throws IOException {
         boolean named = accounts != null && accounts.any();
         String in = "style=\"font:inherit;padding:.5em .7em;border:1px solid var(--line);border-radius:.5em;background:var(--bg);color:var(--ink)\"";
-        return head("CodeZaiku") + "<nav id=\"side\"><p class=\"brand\">CodeZaiku</p></nav><main><header><b>Sign in</b></header><div class=\"home\">"
+        return head("CodeZaiku") + note() + "<nav id=\"side\"><p class=\"brand\">CodeZaiku</p></nav><main><header><b>Sign in</b></header><div class=\"home\">"
                 + "<p>This chat can change files and run commands in your projects, so it asks who you are" + (named ? ": your name and password, or the owner's token alone" : ": the token it printed when it started") + (wrong ? ". <b>That was not it.</b>" : ".") + "</p>"
                 + "<form method=\"post\" action=\"/login\" style=\"display:flex;gap:.6em;max-width:36em;flex-wrap:wrap\">" + (named ? "<input name=\"name\" placeholder=\"name (blank for the owner's token)\" " + in + ">" : "") + "<input name=\"token\" type=\"password\" placeholder=\"" + (named ? "password or token" : "the token") + "\" autofocus required " + in + "><button>Enter</button></form>"
                 + "<p class=\"note\">The token travels once, over this network, and the browser keeps it as a cookie for a month. On a network you do not trust, reach this machine over a tunnel such as Tailscale instead.</p></div></main></body></html>";
@@ -201,6 +229,7 @@ public final class WebChat {
         server.createContext("/", this::handle);
         server.setExecutor(Executors.newCachedThreadPool(r -> { Thread t = new Thread(r, "codezaiku-web-http"); t.setDaemon(true); return t; }));
         server.start();
+        updateDaily();
         return server;
     }
     public int port() { return server.getAddress().getPort(); }
@@ -209,6 +238,9 @@ public final class WebChat {
     private void handle(HttpExchange x) throws IOException {
         try {
             String path = x.getRequestURI().getPath(), method = x.getRequestMethod();
+            // with no token whoever reaches the port is the owner: only by this computer's own name, and a form only from the chat's own page (OwnPage)
+            if (token == null && !OwnPage.thisComputer(x.getRequestHeaders().getFirst("Host"))) { send(x, 403, "text/plain; charset=utf-8", OwnPage.NAME_REFUSED); return; }
+            if (!OwnPage.formAllowed(x)) { send(x, 403, "text/plain; charset=utf-8", OwnPage.FORM_REFUSED); return; }
             Map<String, String> q = query(x.getRequestURI().getRawQuery());
             Map<String, String> form = "POST".equals(method) ? query(new String(x.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)) : Map.of();
             if (path.equals("/login")) {   // the owner's token, or a named person's password; the browser keeps a session for a month
@@ -231,11 +263,11 @@ public final class WebChat {
             boolean acts = me.owner();
             if (!acts && "POST".equals(method)) {   // a viewer watches
                 if (path.startsWith("/chat/")) send(x, 403, "application/json", "{\"error\":\"you are watching; an owner can type\"}");
-                else send(x, 403, "text/html; charset=utf-8", head("CodeZaiku") + "<main><header><b>Not yours to do</b></header><div class=\"home\"><p>You are signed in as a viewer: you can read every page and watch the chats, and an owner can type, answer and change the projects. <a href=\"/\">Back</a></p></div></main></body></html>");
+                else send(x, 403, "text/html; charset=utf-8", head("CodeZaiku") + note() + "<main><header><b>Not yours to do</b></header><div class=\"home\"><p>You are signed in as a viewer: you can read every page and watch the chats, and an owner can type, answer and change the projects. <a href=\"/\">Back</a></p></div></main></body></html>");
                 return;
             }
             if (path.equals("/people") || path.startsWith("/people/")) {   // the owner names people
-                if (accounts == null || token == null) { send(x, 200, "text/html; charset=utf-8", head("People · CodeZaiku") + side(null, me) + "<main><header><b>People</b></header><div class=\"home\"><p>This chat is on this machine only, with no token, so whoever reaches it is you. Start it with <code>--host 0.0.0.0</code> or <code>--token</code> to name other people.</p></div></main>" + SHELL_JS + "</body></html>"); return; }
+                if (accounts == null || token == null) { send(x, 200, "text/html; charset=utf-8", head("People · CodeZaiku") + note() + side(null, me) + "<main><header><b>People</b></header><div class=\"home\"><p>This chat is on this machine only, with no token, so whoever reaches it is you. Start it with <code>--host 0.0.0.0</code> or <code>--token</code> to name other people.</p></div></main>" + SHELL_JS + "</body></html>"); return; }
                 if (path.equals("/people/add") && "POST".equals(method)) {
                     try { accounts.put(form.getOrDefault("name", ""), form.getOrDefault("password", ""), form.getOrDefault("role", WebAccounts.VIEWER)); redirect(x, "/people"); }
                     catch (IllegalArgumentException e) { send(x, 400, "text/html; charset=utf-8", peoplePage(me, e.getMessage())); }
@@ -350,12 +382,15 @@ public final class WebChat {
         return b.append("</div></nav>").toString();
     }
 
+    /** The update turn's note, on every page while it stands; "" when there is none. */
+    private String note() { return updateNote.isEmpty() ? "" : "<p class=\"k\">" + esc(updateNote) + "</p>"; }
+
     static String head(String title) { return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + esc(title) + "</title>" + THEME_JS + CSS + "</head><body>"; }
 
     String home() throws IOException { return home(new WebAccounts.Person("you", WebAccounts.OWNER)); }
 
     String home(WebAccounts.Person me) throws IOException {
-        StringBuilder b = new StringBuilder(head("CodeZaiku")).append(side(null, me));
+        StringBuilder b = new StringBuilder(head("CodeZaiku")).append(note()).append(side(null, me));
         b.append("<main><header><b>Your projects</b><span class=\"k\">each with its own conversation, kept while this server runs</span></header><div class=\"home\">");
         List<Loop> all = projects();
         if (all.isEmpty()) b.append("<p>No project yet. Add one by its folder, in the menu.</p>");
@@ -376,7 +411,7 @@ public final class WebChat {
     String chatPage(Loop l) throws IOException { return chatPage(l, new WebAccounts.Person("you", WebAccounts.OWNER)); }
 
     String chatPage(Loop l, WebAccounts.Person me) throws IOException {
-        StringBuilder b = new StringBuilder(head(l.name() + " · CodeZaiku")).append(side(l, me));
+        StringBuilder b = new StringBuilder(head(l.name() + note() + " · CodeZaiku")).append(side(l, me));
         b.append("<main><header><b>").append(esc(l.name())).append("</b><span class=\"k\">").append(esc(l.root.toString())).append("</span><span class=\"k\" id=\"state\"></span></header>");
         b.append("<div id=\"log\" data-project=\"").append(esc(l.id)).append("\" data-who=\"").append(esc(me.name())).append("\"></div><button type=\"button\" id=\"news\" hidden>new messages \u2193</button><div id=\"ask\" hidden></div><div id=\"status\"></div>");
         if (me.owner()) b.append("<form id=\"composer\"><textarea name=\"say\" rows=\"1\" placeholder=\"Say something. Enter sends, Shift+Enter is a new line; @path attaches a file\" autofocus></textarea><button>Send</button><button type=\"button\" id=\"stop\" title=\"stop the running turn, as ctrl-C does\">Stop</button></form>");
@@ -386,7 +421,7 @@ public final class WebChat {
     }
 
     String peoplePage(WebAccounts.Person me, String said) throws IOException {
-        StringBuilder b = new StringBuilder(head("People · CodeZaiku")).append(side(null, me));
+        StringBuilder b = new StringBuilder(head("People · CodeZaiku")).append(note()).append(side(null, me));
         b.append("<main><header><b>People</b><span class=\"k\">who may use this chat, and as what</span></header><div class=\"home\">");
         if (said != null) b.append("<p><b>").append(esc(said)).append("</b></p>");
         b.append("<table><tr><th>Name</th><th>Role</th><th></th></tr>");

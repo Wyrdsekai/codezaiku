@@ -76,7 +76,7 @@ final class UpdateCommand {
                 if (rest.size() != 2 || !(rest.get(1).equals("on") || rest.get(1).equals("off"))) { err.println("usage: codezaiku update auto on|off"); return 2; }
                 try { Config.set("CODEZAIKU_UPDATE", rest.get(1).equals("on") ? "auto" : "check"); } catch (Exception e) { err.println("could not save: " + e.getMessage()); return 1; }
                 out.println(rest.get(1).equals("on")
-                        ? "Auto-update is on. A chat installs a newer CodeZaiku when it starts, for the next start. ResearchZosho keeps its own setting: researchzosho update auto on|off."
+                        ? "Auto-update is on. A chat installs a newer CodeZaiku when it starts, for the next start; the web app does the same once a day at a quiet moment, for its next start. ResearchZosho keeps its own setting: researchzosho update auto on|off."
                         : "Auto-update is off. doctor and the chat say when a newer release exists; codezaiku update now installs it.");
                 return 0;
             }
