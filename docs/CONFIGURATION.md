@@ -7,6 +7,7 @@ Settings live in a **config file**; environment variables override it. There are
 codezaiku init                                    # write a starter config
 codezaiku config list                             # what is set, and where it came from
 codezaiku config set drive http://localhost:8200  # change a setting
+codezaiku config set librarian.token --file signin.txt   # a secret from a file, kept out of the shell's history (or - to type it unseen)
 codezaiku config get ops.authority
 codezaiku config unset searxng
 codezaiku config edit                             # open it in $EDITOR
@@ -16,7 +17,11 @@ codezaiku doctor                                  # what is missing, and the fix
 
 `config set` edits in place, so comments and ordering survive. If a setting is also exported in your
 environment — which overrides the file — it says so rather than letting the change look like it did
-nothing.
+nothing. A value typed on the command line stays in your shell's history: for a key or a sign-in,
+`--file <path>` reads it from a file (its last line that is not empty) and `-` asks for it without
+showing it, or reads it from a pipe. `config set` and `config list` print a key or a sign-in as `(set)`.
+A word that begins with two dashes is never taken for a value: `config set` refuses it and stores nothing.
+A value that really begins with two dashes goes after `--`: `codezaiku config set <key> -- --its-value`.
 
 ### Where settings come from
 
@@ -133,8 +138,8 @@ export CODEZAIKU_OPS_AUDIT=$HOME/.codezaiku/audit.jsonl
 | Variable | Default | Notes |
 |---|---|---|
 | `CODEZAIKU_RESEARCH_POOL` | `~/.codezaiku/research/findings.jsonl` | Accumulated findings. **Use a separate pool per experiment arm** — a shared pool carries one arm's findings into another and invalidates the comparison. |
-| `CODEZAIKU_LIBRARIAN_URL` | `http://127.0.0.1:4649` | Where ResearchZosho's daemon answers. The chat pushes what the library holds into each turn, `/librarian` asks it, `/research go` files runs with it. Without a daemon, none of that happens and the research memory is what you have. `CODEZAIKU_LIBRARIAN_PORT` changes only the port. |
-| `CODEZAIKU_LIBRARIAN_TOKEN` | — | A write token for the daemon, needed to file research runs from the chat. `codezaiku install researchzosho` makes one; by hand: `researchzosho reader token did:key:local-codezaiku` after `researchzosho reader allow did:key:local-codezaiku write codezaiku`. |
+| `CODEZAIKU_LIBRARIAN_URL` | `http://127.0.0.1:4649` | Where ResearchZosho's library answers, on this computer or another one on your network (`http://192.168.1.20:4649`; that library must listen on its network address: `researchzosho service install --host 0.0.0.0` there). The chat pushes what the library holds into each turn, `/librarian` asks it, `/research go` files runs with it. Without a library, none of that happens and the research memory is what you have. `codezaiku doctor` says what the library at this address is to CodeZaiku, whether or not ResearchZosho is installed here. `CODEZAIKU_LIBRARIAN_PORT` changes only the port. |
+| `CODEZAIKU_LIBRARIAN_TOKEN` | — | CodeZaiku's token for the daemon, sent with every request to it: needed to file research runs from the chat, and to read at all when the library refuses anonymous readers (`researchzosho reader default deny`). `codezaiku install researchzosho` makes one, and `codezaiku install researchzosho --token` makes a new one. For a library on another computer, run there `researchzosho reader allow did:key:local-codezaiku write codezaiku` and `researchzosho reader token did:key:local-codezaiku > codezaiku-signin.txt`, copy the file here, run `codezaiku config set CODEZAIKU_LIBRARIAN_TOKEN --file codezaiku-signin.txt` and delete the file: the token is then on no screen and in no shell's history. A library is found by its health address, which needs no token; `doctor` and the chat then say whether it lets CodeZaiku in, and if not, these commands. |
 | `CODEZAIKU_UPDATE` | `check` | `check`: `doctor` and the chat say when a newer CodeZaiku is released. To know, they ask GitHub's API for CodeZaiku's latest release, at most once a day: one request to `api.github.com`, which carries CodeZaiku's version as its client name (`CodeZaiku/<version>`) and nothing else, sent when `doctor` runs or a chat starts (in the web app, when a project's chat page opens); the answer is kept in `~/.codezaiku/codezaiku-latest.txt`. Where ResearchZosho is installed (its `researchzosho` command is on the PATH or where its installer puts it), they ask for its latest release the same way. `auto`: the same requests, and a chat swaps a newer release in at its start, for the next start; the web app, left running, asks once a day at a quiet moment and does the same (tarball installs on Linux and macOS; a Debian install uses apt). The new release is downloaded from GitHub with its `SHA256SUMS`. `off`: CodeZaiku asks GitHub nothing by itself, and `doctor` and the chat say nothing about new releases; `codezaiku config set update off` sets it. In every mode, `codezaiku update` asks GitHub for the latest release when you run it, and `codezaiku update now` downloads it. This setting is CodeZaiku's alone: ResearchZosho has its own, `RESEARCHZOSHO_UPDATE`, and its own service updates it. |
 | `CODEZAIKU_GAPREFLECT` | on | Gap-reflection loop. Measured *unproven* (see LIMITATIONS.md); left on because it shows no harm. |
 

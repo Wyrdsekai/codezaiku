@@ -149,6 +149,21 @@ public final class GitDirGuard {
         return lines(project, sinceMillis);
     }
 
+    /**
+     * The program is ending while jobs have not ended (a shutdown hook: SIGTERM, an interrupt, the end of its input): for every project
+     * a job began in, one last look and what a command changed put back, as {@link #ended} does, asking nobody. Until 0.3.21 that was
+     * done only on the job's own thread, which the program does not wait for when it is ended, so a command that wrote into the
+     * repository's settings and was then killed left what it wrote. The lines for a person, or none.
+     */
+    public static List<String> endAll() {
+        List<String> out = new ArrayList<>();
+        for (Job j : JOBS.values()) {
+            if (!j.active) continue;
+            try { out.addAll(ended(j.project, 0, false)); } catch (RuntimeException e) { /* the next project */ }
+        }
+        return out;
+    }
+
     /** The first lines a job prints about its git folders; said once. */
     public static List<String> startLines(Path project) {
         Job j = project == null ? null : JOBS.get(key(project));

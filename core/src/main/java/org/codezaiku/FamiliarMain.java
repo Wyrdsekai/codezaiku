@@ -26,6 +26,12 @@ import java.io.PrintStream;
 import java.util.function.Consumer;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import org.codezaiku.tools.ShellTool;
+import java.nio.file.InvalidPathException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.CharacterCodingException;
+import java.nio.ByteBuffer;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -44,6 +50,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.Map;
 import java.util.Set;
 import org.codezaiku.library.CrateIndexer;
@@ -140,7 +147,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.20";
+    public static final String VERSION = "0.3.21";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -159,9 +166,50 @@ public final class FamiliarMain {
         }
     }
 
+    /** The commands that run a model's work and its commands: ended by a person or a host, they take what they started with them. */
+    static final Set<String> ENDS_ITS_CHILDREN = Set.of("chat", "web", "code", "loop", "decompose", "review", "research", "mcp", "acp", "v1");
+
+    /**
+     * At the end of the program, however it ends (SIGTERM, SIGINT when no turn runs, the end of its input, /quit), the commands its
+     * jobs started end with it, and everything they started: until 0.3.21 a `code` or `chat` ended by SIGTERM left the command it was
+     * running behind. `run` has its own, which also writes its document (RunVerb).
+     */
+    static void endChildrenAtExit(String verb) {
+        boolean tell = verb.equals("chat");   // code says its put-back in its own closing lines, on stdout (AtEnd)
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> endWhatThisProgramStarted(tell), "codezaiku-end-children"));
+    }
+
+    /**
+     * The end of what this program started: its commands and what they started, then what a command wrote into a repository's own
+     * git settings put back (GitDirGuard.endAll), as a job's end does. Nothing goes to stdout, which is the protocol or the document
+     * for mcp, acp, v1 and run; the put-back is said on stderr for a person ({@code tell}: chat and code). The shutdown hook runs it,
+     * and the chat's second ctrl-C, which ends the program at once without the hooks.
+     */
+    /** Set by the `code` and `loop` verbs: a job ended by a signal prints its closing lines on stdout, as its own end does. */
+    static volatile boolean closingLinesAtEnd;
+
+    public static void endWhatThisProgramStarted(boolean tell) {
+        AtEnd.programEnds();   // first: a job whose command is stopped below does not claim its own end, nor start another model call
+        ShellTool.stopRunning();
+        try {
+            List<ProcessHandle> kids = ProcessHandle.current().descendants().toList();
+            kids.forEach(ProcessHandle::destroy);
+            Thread.sleep(200);   // a moment to go down politely
+            for (ProcessHandle h : kids) if (h.isAlive()) h.destroyForcibly();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException ignored) { }
+        try {
+            List<String> putBack = GitDirGuard.endAll();
+            if (tell) for (String l : putBack) System.err.println(l);
+        } catch (RuntimeException ignored) { }
+        AtEnd.runAll();   // what each job does at its own end and did not get to: its spend recorded, a chat's session saved, code's last lines
+    }
+
     public static void main(String[] args) {
         HttpSettings.apply();
         quietenThirdPartyStartupNoise();
+        if (args.length >= 1 && ENDS_ITS_CHILDREN.contains(args[0])) endChildrenAtExit(args[0]);
         // --model <saved name|model id>: the model for this job, for the verbs that take one (code, loop, review, research, chat).
         // `run` reads its own flags, and `model set` has a --model of its own.
         String modelFlag = null;
@@ -705,9 +753,12 @@ public final class FamiliarMain {
     }
 
     /** `codezaiku config …` — read and change settings without opening an editor. */
-    private static int configCommand(String[] a) {
+    static int configCommand(String[] a) {
         try {
             String sub = a.length >= 1 ? a[0] : "list";
+            // the forms that take a fixed number of words take no more: an extra word is a mistake to say, not to drop
+            int takes = switch (sub) { case "path", "list", "edit" -> 1; case "get", "unset" -> 2; default -> Integer.MAX_VALUE; };
+            if (a.length > takes || (a.length >= 2 && a[1].startsWith("-") && !sub.equals("set"))) { System.err.println(CONFIG_USAGE); return 2; }
             switch (sub) {
                 case "path" -> {
                     System.out.println(Config.userConfigPath());
@@ -721,10 +772,40 @@ public final class FamiliarMain {
                     return 0;
                 }
                 case "set" -> {
-                    if (a.length < 3) { System.err.println("usage: codezaiku config set <key> <value>"); return 2; }
+                    if (a.length < 3 || a[1].startsWith("-")) { System.err.println(CONFIG_USAGE); return 2; }
                     String key = normalizeCliKey(a[1]);
-                    Config.set(key, a[2]);
-                    System.out.println(key + " = " + a[2] + "   (" + Config.userConfigPath() + ")");
+                    // A value given on the command line stays in the shell's history. --file reads it from a file (its last line with
+                    // text, so what `researchzosho reader token … > file` wrote is read as it is), - from the keyboard unseen or from a
+                    // pipe. A word that begins with two dashes is never a value (until 0.3.21 `config set <key> --verbose` stored the
+                    // word): one that really begins so comes after --. The words of a value are joined, as ResearchZosho's are.
+                    List<String> words = Arrays.asList(a).subList(2, a.length);
+                    String value;
+                    if (words.get(0).equals("--file")) {
+                        if (words.size() == 1) { System.err.println("config: --file needs the path of a file.\n" + CONFIG_USAGE); return 2; }
+                        if (words.size() > 2) { System.err.println("config: --file takes one path and nothing after it; a path with spaces goes in quotes.\n" + CONFIG_USAGE); return 2; }
+                        String[] read = valueFromFile(words.get(1));
+                        if (read[1] != null) { System.err.println("config: " + read[1] + " Nothing was changed."); return 1; }
+                        value = read[0];
+                    } else if (words.get(0).equals("-")) {
+                        if (words.size() > 1) { System.err.println(CONFIG_USAGE); return 2; }
+                        if (System.console() != null && System.in.available() == 0) {
+                            char[] typed = System.console().readPassword("%s (not shown): ", key);
+                            value = typed == null ? null : new String(typed).strip();
+                        } else value = valueFrom(new String(System.in.readAllBytes(), StandardCharsets.UTF_8).lines().toList());
+                        if (value == null || value.isEmpty()) { System.err.println("config: no value was given. Nothing was changed."); return 1; }
+                    } else if (words.get(0).equals("--")) {
+                        if (words.size() == 1) { System.err.println("config: -- needs the value after it.\n" + CONFIG_USAGE); return 2; }
+                        value = String.join(" ", words.subList(1, words.size()));
+                    } else {
+                        for (String w : words) if (w.startsWith("--")) {
+                            System.err.println("config: " + (w.equals("--file") ? "--file goes in the value's place, with the path after it." : "config set does not take " + w + ".")
+                                    + " A value that begins with two dashes goes after --.\n" + CONFIG_USAGE);
+                            return 2;
+                        }
+                        value = String.join(" ", words);
+                    }
+                    Config.set(key, value);
+                    System.out.println(key + " = " + displayValue(key, value) + "   (" + Config.userConfigPath() + ")");
                     // Say so rather than letting the change look like it did nothing.
                     if (System.getenv(key) != null && !System.getenv(key).isBlank())
                         System.out.println("NOTE: " + key + " is also set in your environment, which "
@@ -760,17 +841,7 @@ public final class FamiliarMain {
                     return 0;
                 }
                 default -> {
-                    System.err.println("""
-                        usage:
-                          codezaiku config list                 what is set, and where it came from
-                          codezaiku config get <key>
-                          codezaiku config set <key> <value>
-                          codezaiku config unset <key>
-                          codezaiku config edit                 open it in $EDITOR
-                          codezaiku config path
-
-                        Keys accept any spelling: drive, ops.authority, CODEZAIKU_OPS_ROLLBACK.
-                        """);
+                    System.err.println(CONFIG_USAGE);
                     return 2;
                 }
             }
@@ -778,6 +849,52 @@ public final class FamiliarMain {
             System.err.println("config: " + e.getMessage());
             return 1;
         }
+    }
+
+    static final String CONFIG_USAGE = """
+            usage:
+              codezaiku config list                 what is set, and where it came from
+              codezaiku config get <key>
+              codezaiku config set <key> <value>
+              codezaiku config set <key> -- <value>       a value that begins with two dashes
+              codezaiku config set <key> --file <path>   the value from a file: its last line with text on it (so the two lines
+                                                         `researchzosho reader token … > file` writes are read as they are),
+                                                         kept out of the shell's history
+              codezaiku config set <key> -               the value typed unseen, or from a pipe
+              codezaiku config unset <key>
+              codezaiku config edit                 open it in $EDITOR
+              codezaiku config path
+
+            Keys accept any spelling: drive, ops.authority, CODEZAIKU_OPS_ROLLBACK.""";
+
+    /** The most a value's file is read for: a key is a few hundred bytes, and a larger file is not one value. */
+    static final int CONFIG_FILE_MOST = 64 * 1024;
+
+    /**
+     * The value in the file at {@code given}, as {value, null}, or {null, why}: the refusal names the file and shows nothing of what is in
+     * it (missing, a folder, not readable, not text, larger than a value, no line with text).
+     */
+    static String[] valueFromFile(String given) {
+        Path p;
+        try { p = Path.of(given); } catch (InvalidPathException e) { return new String[]{null, "There is no file at " + given + "."}; }
+        if (Files.isDirectory(p)) return new String[]{null, given + " is a folder, not a file."};
+        if (!Files.exists(p)) return new String[]{null, "There is no file at " + given + "."};
+        byte[] bytes;
+        try (InputStream in = Files.newInputStream(p)) { bytes = in.readNBytes(CONFIG_FILE_MOST + 1); }
+        catch (IOException e) { return new String[]{null, "The file " + given + " cannot be read."}; }
+        if (bytes.length > CONFIG_FILE_MOST) return new String[]{null, "The file " + given + " is larger than one value can be (" + CONFIG_FILE_MOST / 1024 + " KB)."};
+        String text;
+        try { text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString(); }
+        catch (CharacterCodingException e) { return new String[]{null, "The file " + given + " is not text."}; }
+        if (text.startsWith("\uFEFF")) text = text.substring(1);   // the mark some editors put at a text file's start
+        String v = valueFrom(text.lines().toList());
+        return v == null ? new String[]{null, "The file " + given + " is empty."} : new String[]{v, null};
+    }
+
+    /** The value in a file's lines or a pipe's: the last line that is not empty, stripped; null when there is none. */
+    static String valueFrom(List<String> lines) {
+        for (int i = lines.size() - 1; i >= 0; i--) if (!lines.get(i).isBlank()) return lines.get(i).strip();
+        return null;
     }
 
     private static String normalizeCliKey(String k) {
@@ -1003,6 +1120,7 @@ public final class FamiliarMain {
             LIBRARY — ResearchZosho, the research library, is a separate program
               install researchzosho           fetch it, check it, run its setup; the chat then files
                                               research runs with it and reads what it holds
+              install researchzosho --token   a new token for CodeZaiku, when the library refuses it
               librarian <args…>               the installed researchzosho command, same arguments
 
             INTEGRATION — three ways another program drives CodeZaiku
@@ -1091,6 +1209,7 @@ public final class FamiliarMain {
         var drive = new DriveClient(chosenModel.drive(), chosenModel.model()).effort(chosenModel.entry().effort());
         long[] usage = new long[4];
         DriveClient.countInto(usage);
+        AtEnd.Task ending = AtEnd.add(() -> settle("decompose", root, chosenModel, usage, 0, "stopped"));
         LibraryIndex index = new LibraryIndex(libraryIndexDir());
         Library library = new Library();
         System.out.println("decompose: library ON"
@@ -1111,7 +1230,7 @@ public final class FamiliarMain {
         } finally { DriveClient.stopCounting(); }
         System.out.println("\n=== LOOP " + (result.done() ? "task_done" : "ended")
                 + " after " + result.turns() + " turns ===\n" + result.summary());
-        System.out.println(settle("decompose", root, chosenModel, usage).line());
+        try { System.out.println(settle("decompose", root, chosenModel, usage, 0, null, null, null, ending.claim()).line()); } finally { ending.over(); }
         System.out.println("(read the code at " + root + " to judge quality)");
         try { index.close(); } catch (Exception ignored) { }
     }
@@ -2372,7 +2491,9 @@ public final class FamiliarMain {
 
     private static void loop(Path root, String goal, String baseUrl, int maxTurns, String gateName, String model) {
         refusedAtCapOrExit(baseUrl, model, Auto.Job.of("code", Auto.tierForCoding(goal, false), true, root));
+        closingLinesAtEnd = true;   // the person or host reading `code` gets its last lines however it ends
         Tracked t = runLoopTracked(root, goal, baseUrl, maxTurns, gateName, null, model);
+        if (AtEnd.ending()) return;   // ended by a signal: the program's end says the job's last lines, once
         FamiliarLoop.Result result = t.result();
         System.out.println("\n=== LOOP " + (result.done() ? "task_done" : "STOPPED")
                 + " after " + result.turns() + " turns ===");
@@ -2483,12 +2604,17 @@ public final class FamiliarMain {
      * counts the twin's few tokens as paid, never the other way round.
      */
     static ModelRun settle(String kind, Path where, SavedModels.Choice c, long[] usage, long secs, String status, String raised, String note) {
+        return settle(kind, where, c, usage, secs, status, raised, note, true);
+    }
+
+    /** {@code record} false: the line alone, for a job whose record the program's end has written already (AtEnd). */
+    static ModelRun settle(String kind, Path where, SavedModels.Choice c, long[] usage, long secs, String status, String raised, String note, boolean record) {
         double cost = c.model() != null && c.model().endsWith(":free") ? 0 : c.entry().cost(usage);   // the free twin is priced at nothing
         String onLine = raised == null ? note : note == null ? raised : raised + "; " + note;
         Map<String, Integer> servedBy = DriveClient.servedBy(usage);   // through a router, who served the job's requests
         int unreported = DriveClient.unreported(usage);                 // answers the server sent no token counts with: in no figure
         ModelRun run = new ModelRun(c.entry().name() == null ? "" : c.entry().name(), c.model(), c.entry().host(), usage, cost, c.entry().prices() != null, onLine, servedBy);
-        if (usage[0] + usage[3] > 0 || unreported > 0) {
+        if (record && (usage[0] + usage[3] > 0 || unreported > 0)) {
             try { Spend.record(kind, where, c.entry(), usage, cost, secs, status, raised, c.model(), note, servedBy, unreported); }
             catch (IOException e) { System.err.println("the spend ledger could not be written: " + e.getMessage()); }
         }
@@ -2603,6 +2729,23 @@ public final class FamiliarMain {
         long[] usage = new long[4];
         long startedAt = System.currentTimeMillis();
         DriveClient.countInto(usage);
+        AtomicReference<FamiliarLoop> running = new AtomicReference<>();
+        boolean sayAtEnd = closingLinesAtEnd;
+        // ended by a signal before it got to its end: what it spent is recorded as "stopped", and `code` says so with its usual last lines
+        AtEnd.Task ending = AtEnd.add(() -> {
+            long secs = (System.currentTimeMillis() - startedAt) / 1000;
+            FamiliarLoop l = running.get();
+            if (overseerChoice != null && l != null) settle("oversee", root, overseerChoice, l.overseerUsage(), secs, "stopped", null);
+            ModelRun r = settle("code", root, chosenModel, usage, secs, "stopped", null);
+            if (sayAtEnd) {
+                System.out.println("stopped: the job was ended before it finished");
+                System.out.println(r.line());
+                for (String line : Sandbox.netLines(root, startedAt)) System.out.println(line);
+                for (String line : GitOutside.lines(root, startedAt)) System.out.println(line);
+                for (String line : GitDirGuard.lines(root, startedAt)) System.out.println(line);
+                System.out.flush();
+            }
+        });
         var lsp = LspClient.forProject(root, ProjectFacts.language(root));
         var tools = ToolRegistry.standard(root, lsp); // no gate; lsp powers edit_file fallback + replace_symbol
         tools.withGit(root, false);                   // with git.push on only: push, fetch and pull requests by CodeZaiku (an ACP client is asked as well)
@@ -2618,6 +2761,7 @@ public final class FamiliarMain {
         if ("1".equals(Config.get("CODEZAIKU_LIB_OFF")) || "off".equalsIgnoreCase(Config.get("CODEZAIKU_LIB_OFF"))) {
             System.out.println("library: OFF (A/B baseline -- idioms + error-grounding + worked-examples disabled; project-shape still on)");
             loop = forMode(new FamiliarLoop(drive, tools, root, goal, maxTurns, null, null), mode).lsp(lsp).cancelIf(cancel).overseer(overseer);
+            running.set(loop);
             result = loop.run();
         } else {
             try (var index = new LibraryIndex(libraryIndexDir())) {
@@ -2625,29 +2769,41 @@ public final class FamiliarMain {
                     System.out.println("library: " + index.size() + " chunks indexed at " + libraryIndexDir());
                 }
                 loop = forMode(new FamiliarLoop(drive, tools, root, goal, maxTurns, new Library(), index), mode).lsp(lsp).cancelIf(cancel).overseer(overseer);
+                running.set(loop);
                 result = loop.run();
             }
         }
+        } catch (RuntimeException | Error e) {
+            // a job that failed on the way still has its spend recorded, now, and not as "stopped" when a long-lived server ends
+            if (ending.claim()) {
+                try { settle("code", root, chosenModel, usage, (System.currentTimeMillis() - startedAt) / 1000, "failed", null); } finally { ending.over(); }
+            }
+            throw e;
         } finally { DriveClient.stopCounting(); }
         var scope = tools.scope();
+        boolean mine = ending.claim();   // false when the program is ending: its end records the job and says its last lines
+        try {
         String raised = null;   // the note on the model line: the overseer's part, when there is one
         // The overseer's own line and ledger entry: its calls were counted apart
         ModelRun oversaw = null;
         if (overseer != null && loop != null) {
             long[] ou = loop.overseerUsage();
-            oversaw = settle("oversee", root, overseerChoice, ou, (System.currentTimeMillis() - startedAt) / 1000, result.done() ? "success" : "incomplete", null);
+            oversaw = settle("oversee", root, overseerChoice, ou, (System.currentTimeMillis() - startedAt) / 1000, result.done() ? "success" : "incomplete", null, null, mine);
             raised = "overseer " + (overseerChoice.entry().name() == null ? overseerChoice.model() : overseerChoice.entry().name())
                     + ": " + loop.overseerReviews() + " review" + (loop.overseerReviews() == 1 ? "" : "s") + ", " + Spend.usageLine(ou, oversaw.cost(), oversaw.priced())
                     + (oversaw.servedBy().isEmpty() ? "" : ", " + Spend.servedLine(oversaw.servedBy()));
         }
-        ModelRun run = settle("code", root, chosenModel, usage, (System.currentTimeMillis() - startedAt) / 1000, result.done() ? "success" : "incomplete", raised);
-        System.out.println(run.line());
-        for (String line : Sandbox.netLines(root, startedAt)) System.out.println(line);
-        for (String line : GitOutside.lines(root, startedAt)) System.out.println(line);
-        for (String line : GitDirGuard.ended(root, startedAt, true)) System.out.println(line);
+        ModelRun run = settle("code", root, chosenModel, usage, (System.currentTimeMillis() - startedAt) / 1000, result.done() ? "success" : "incomplete", raised, null, mine);
+        if (mine) {
+            System.out.println(run.line());
+            for (String line : Sandbox.netLines(root, startedAt)) System.out.println(line);
+            for (String line : GitOutside.lines(root, startedAt)) System.out.println(line);
+            for (String line : GitDirGuard.ended(root, startedAt, true)) System.out.println(line);
+        }
         return new Tracked(result,
                 scope == null ? List.of() : scope.written(),
                 scope != null && !scope.mayBeIncomplete(), run, oversaw);
+        } finally { ending.over(); }
     }
 
     /** Read-only code REVIEW → structured findings (no edits). Reuses the familiar's navigation with the
@@ -2661,8 +2817,12 @@ public final class FamiliarMain {
         long[] usage = new long[4];
         long startedAt = System.currentTimeMillis();
         DriveClient.countInto(usage);
+        AtEnd.Task ending = AtEnd.add(() -> settle("review", root, c, usage, (System.currentTimeMillis() - startedAt) / 1000, "stopped"));
         try { return reviewWith(root, scopeSpec, new DriveClient(c.drive(), c.model()).effort(c.entry().effort()), maxTurns); }
-        finally { DriveClient.stopCounting(); System.out.println(settle("review", root, c, usage, (System.currentTimeMillis() - startedAt) / 1000, "done").line()); }
+        finally {
+            DriveClient.stopCounting();
+            try { System.out.println(settle("review", root, c, usage, (System.currentTimeMillis() - startedAt) / 1000, "done", null, null, ending.claim()).line()); } finally { ending.over(); }
+        }
     }
 
     static FamiliarLoop.Result reviewWith(Path root, String scopeSpec, DriveClient drive, int maxTurns) {
@@ -2953,6 +3113,8 @@ public final class FamiliarMain {
         //    itself is the single sub-question and this degrades to depth-research + synthesis.
         // The library consults FIRST (the compounding loop): what ResearchZosho holds is pushed into
         // decompose so the fan runs only on the GAPS. "" when no daemon answers or it holds nothing.
+        String refused = LibraryBridge.refusedOnce(LibraryBridge.keptHere());   // a library that refuses CodeZaiku is said, not skipped in silence
+        if (!refused.isEmpty()) System.err.println("codezaiku: " + refused);
         String libKnown = LibraryBridge.push(question, 6);
         List<String> open = new ArrayList<>();
         try {
@@ -3093,8 +3255,12 @@ public final class FamiliarMain {
         long[] usage = new long[4];
         long startedAt = System.currentTimeMillis();
         DriveClient.countInto(usage);
+        AtEnd.Task ending = AtEnd.add(() -> settle("research", cwd, c, usage, (System.currentTimeMillis() - startedAt) / 1000, "stopped"));
         try { return research(question, mode, new DriveClient(c.drive(), c.model()).effort(c.entry().effort()), maxTurns, System.out, cwd); }
-        finally { DriveClient.stopCounting(); System.out.println(settle("research", cwd, c, usage, (System.currentTimeMillis() - startedAt) / 1000, "done").line()); }
+        finally {
+            DriveClient.stopCounting();
+            try { System.out.println(settle("research", cwd, c, usage, (System.currentTimeMillis() - startedAt) / 1000, "done", null, null, ending.claim()).line()); } finally { ending.over(); }
+        }
     }
 
     /**

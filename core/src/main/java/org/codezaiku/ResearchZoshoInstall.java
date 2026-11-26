@@ -291,6 +291,7 @@ public final class ResearchZoshoInstall {
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--version") && i + 1 < args.length) version = args[++i];
             else if (args[i].equals("--no-setup")) setup = false;
+            else if (args[i].equals("--token")) return newToken(launcher, out);
         }
         boolean failed = false;
         if (launcher != null) {
@@ -337,6 +338,13 @@ public final class ResearchZoshoInstall {
      * the person has been asking and its housekeeping can pick them up.
      */
     static void connect(Path launcher, PrintStream out) {
+        if (LibraryBridge.elsewhere()) {
+            // the library CodeZaiku is set to use is on another computer: a sign-in made by this machine's ResearchZosho is for this
+            // machine's library and would be refused there, so none is made, and the person is told which library CodeZaiku uses
+            out.println("codezaiku: CodeZaiku is set to use the library at " + LibraryBridge.url() + " (CODEZAIKU_LIBRARIAN_URL), not the one just set up here.");
+            out.println("           To use this one: codezaiku config unset CODEZAIKU_LIBRARIAN_URL, then codezaiku install researchzosho --token.");
+            return;
+        }
         if (LibraryBridge.token() == null) {
             String token = mintToken(launcher);
             if (token != null) {
@@ -363,9 +371,34 @@ public final class ResearchZoshoInstall {
         }
     }
 
+    /**
+     * {@code install researchzosho --token}: a new token for CodeZaiku from the ResearchZosho installed here, stored, and what the library
+     * says to it then. For a library that answers but refuses CodeZaiku's token, or where none was set.
+     */
+    public static int newToken(Path launcher, PrintStream out) {
+        if (LibraryBridge.elsewhere()) { out.println("codezaiku: the library CodeZaiku uses is at " + LibraryBridge.url() + ", on another computer, so its sign-in is made there: " + LibraryBridge.fixCommand(false)); return 1; }
+        if (launcher == null) { out.println("codezaiku: ResearchZosho is not installed on this machine. " + LibraryBridge.fixCommand(false)); return 1; }
+        String token = mintToken(launcher);
+        if (token == null) { out.println("codezaiku: no token was made; " + launcher + " reader token " + DID + " says why"); return 1; }
+        try { Config.set("CODEZAIKU_LIBRARIAN_TOKEN", token); } catch (Exception e) { out.println("codezaiku: could not store the token: " + e.getMessage()); return 1; }
+        out.println("codezaiku: a new token for CodeZaiku is stored as CODEZAIKU_LIBRARIAN_TOKEN");
+        LibraryBridge.reprobe();
+        LibraryBridge.Seen s = LibraryBridge.seen();
+        switch (s.door()) {
+            case IN -> { out.println("codezaiku: the library at " + LibraryBridge.url() + " lets CodeZaiku in"); return 0; }
+            case REFUSED -> { out.println("codezaiku: " + LibraryBridge.refusedLine(s.why(), true)); return 1; }
+            default -> { out.println("codezaiku: " + s.why() + "; the token is kept for when it answers"); return 0; }
+        }
+    }
+
     /** The research memory's topics become the library's open questions; the answers stay readable here. */
     static void handOver(PrintStream out) {
-        if (!LibraryBridge.answers()) return;
+        if (!LibraryBridge.answers()) {
+            // the person ran the install: a library that answers and refuses CodeZaiku is said, not skipped in silence
+            LibraryBridge.Seen s = LibraryBridge.seen();
+            if (s.door() == LibraryBridge.Door.REFUSED) out.println("codezaiku: the research memory's questions were not handed over: " + LibraryBridge.refusedLine(s.why(), true));
+            return;
+        }
         LinkedHashSet<String> topics = new LinkedHashSet<>();
         for (var f : ResearchMemory.all()) if (f.topic() != null && !f.topic().isBlank()) topics.add(f.topic().strip());
         if (topics.isEmpty()) return;
@@ -394,6 +427,11 @@ public final class ResearchZoshoInstall {
     public static int alias(String[] args, PrintStream out) {
         Path launcher = installed();
         if (launcher == null) {
+            if (LibraryBridge.elsewhere()) {   // the library CodeZaiku uses is on another computer: its commands are run there
+                out.println("codezaiku: ResearchZosho is not installed on this computer. The library CodeZaiku uses is at " + LibraryBridge.url() + ";");
+                out.println("           run researchzosho on the computer that keeps it. `codezaiku doctor` says whether it lets CodeZaiku in.");
+                return 1;
+            }
             out.println("codezaiku: ResearchZosho is not installed. `codezaiku install researchzosho` fetches it and runs its setup;");
             out.println("           until then, `codezaiku research \"…\"` answers from the web and keeps what it finds in the research memory.");
             return 1;

@@ -101,11 +101,17 @@ public final class NetProxy {
      * settings, and finds the proxy there again.
      */
     static final int PORT_FIRST = 47000, PORT_COUNT = 1000;
+    /**
+     * The first port of the range, PORT_FIRST but for a test on Linux: there the range lies inside the system's ephemeral ports
+     * (32768 to 60999), so a test could lose its port for a moment to any program's outgoing connection. A Mac's ephemeral ports
+     * start at 49152, above the range, so the product is not affected.
+     */
+    static volatile int portFirst = PORT_FIRST;
 
     /** A project's own port on macOS: a fixed function of its folder (its real path) into the range above. */
     static int portFor(Path project) {
         int h = Integer.parseUnsignedInt(hash(key(project)).substring(0, 7), 16);
-        return PORT_FIRST + h % PORT_COUNT;
+        return portFirst + h % PORT_COUNT;
     }
 
     private static volatile NetProxy running;
@@ -229,7 +235,7 @@ public final class NetProxy {
         int own = portFor(project);
         ServerSocketChannel l = null;
         for (int i = 0; i < PORT_COUNT && l == null; i++) {
-            int p = PORT_FIRST + (own - PORT_FIRST + i) % PORT_COUNT;
+            int p = portFirst + (own - portFirst + i) % PORT_COUNT;
             if (answers(p)) continue;                              // another program listens there, maybe on every address: not ours to take
             ServerSocketChannel c = ServerSocketChannel.open(StandardProtocolFamily.INET);
             try {
@@ -239,7 +245,7 @@ public final class NetProxy {
                 c.close();                                         // taken: the next one
             }
         }
-        if (l == null) throw new IOException("every port from " + PORT_FIRST + " to " + (PORT_FIRST + PORT_COUNT - 1) + " on 127.0.0.1 is taken");
+        if (l == null) throw new IOException("every port from " + portFirst + " to " + (portFirst + PORT_COUNT - 1) + " on 127.0.0.1 is taken");
         made.listener = l;
         made.port = ((InetSocketAddress) l.getLocalAddress()).getPort();
         made.preferred = own;

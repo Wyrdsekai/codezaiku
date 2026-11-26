@@ -24,10 +24,28 @@ server, all runs the same day:
 | Windows 11 native | 17 | 0 | 1 |
 | WSL2 (Ubuntu 26.04) | 19 | 0 | 0 (0.2.0 run; not re-run for 0.3.0) |
 
-The macOS run reached the model server through an ssh tunnel to `127.0.0.1`: macOS's local-network
-permission blocks a JVM started over ssh from reaching another machine on the LAN, and a tunnel is
-the documented way round it (below). The Debian package was installed and run on a second Linux
-machine before publishing.
+The macOS run reached the model server through an ssh tunnel to `127.0.0.1`. The Debian package was
+installed and run on a second Linux machine before publishing.
+
+### Acceptance run for 0.3.20 (2026-11-26)
+
+The same 28-check pass, run on the 0.3.20 tarballs the day they were built:
+
+| Platform | passed | failed | skipped | model server |
+|---|---|---|---|---|
+| Linux (reference) | 28 | 0 | 0 | a 27B on another machine on the LAN |
+| macOS arm64 | 28 | 0 | 0 | the one `codezaiku model serve install` set up on the Mac itself: a 9B on Metal |
+| Windows 11 native | 13 | 0 | 0 | its own PowerShell pass, with fewer checks, on the release installed by `install.ps1` |
+| WSL2 | not re-run | | | |
+
+The Debian package installed, ran, and was removed and purged cleanly in a fresh Ubuntu 24.04 container.
+The Linux build with its own Java runtime ran in that container, which has no Java, and the tarball checked
+against its `SHA256SUMS` and ran on a second Linux machine. The suite of the exported tree passed on Java 25 and
+Java 21 on Linux and on the Mac, and the npm launcher's tests passed against the built release.
+
+The release build ran `codezaiku model serve check`: each model file at its pinned revision was the one its row
+records, and it noted that the 27B's file on `main` is now a different one. Not run for this release: WSL2, and a
+hosted model on any platform.
 
 ### Acceptance run for 0.3.19 (2026-11-05)
 
@@ -168,8 +186,7 @@ arm64 from a clean unpack.
 identical to Linux on the same drive: ACP (protocol v1, sessions, error codes, uncorrupted stdout), MCP,
 `run`'s JSON contract with the task id echoed, SIGTERM producing a valid interrupted document and
 leaving no orphaned children, `doctor` naming what it cannot check, and `secure` rendering once with
-its intrusion-detection status. The two failures are the two checks that need the model to finish a
-coding task, and were run against a small local model — capability, not platform.
+its intrusion-detection status.
 
 Install from source, `doctor`, the coding surface and the test oracle are all exercised there.
 Reasoning about a platform is not the same as running on it — three defects only a real run could
@@ -182,16 +199,8 @@ have found, all fixed:
 - a stock Mac has no `pytest`, and an absent runner was likewise reported as a failing suite rather
   than as "no tests ran".
 
-**Workaround for a LAN drive:** an ssh tunnel makes it local, and `localhost` is exempt from the
-permission below — `ssh -N -L 8200:127.0.0.1:8200 user@drive-host`, then point `CODEZAIKU_DRIVE` at
-`http://127.0.0.1:8200`. Verified: a full multi-file coding task with a 9B model over that tunnel.
-
-**Local Network permission — the one thing that will catch you.** macOS 14+ gates local-network access
-per application, and a JVM started from a terminal (or over ssh) cannot show the permission prompt. A
-drive on another machine on your LAN then fails with "No route to host" *while `curl` reaches the same
-URL a second later*. Grant your terminal app access under **System Settings → Privacy & Security →
-Local Network**. CodeZaiku names this in the error when it happens. A drive on `localhost`, or a remote
-host reached over the internet or ssh, is unaffected.
+**A model server reached through an ssh tunnel:** `ssh -N -L 8200:127.0.0.1:8200 user@drive-host`, then point
+`CODEZAIKU_DRIVE` at `http://127.0.0.1:8200`. Verified: a full multi-file coding task with a 9B model over that tunnel.
 
 Docker is optional here as everywhere: with the daemon stopped, the coding and research surfaces work
 and the container-dependent checks report themselves unavailable.

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.21
+
+What's new: bug fixes for stopping a chat or a job, for a ResearchZosho library that is locked or on another computer, and for setting keys.
+
+### New
+
+- `codezaiku config set <name> --file <path>` reads a key from a file, so the key does not appear on the command line or in your shell's history. `config set <name> -` asks for it without showing it.
+
+### Bug fixes
+
+- Ctrl-C did not stop a turn while the model was still answering or a command was still running. The turn now stops at once and the chat carries on.
+- When CodeZaiku was stopped, the command it was running kept running. It now ends too, with everything it started.
+- When CodeZaiku was stopped while a command was running, what that command had written into your project's git settings could stay there. It is now put back however CodeZaiku is stopped.
+- A chat or a coding job that was stopped did not record what it had spent, so it was missing from `/cost` and from a model's monthly limit. It is now recorded every time.
+- A chat ended in the middle of a turn lost that turn. The turn is now saved, marked as stopped.
+- `code` printed nothing when it was stopped, and `run` could report a stopped job as not tested. Both now say the job was stopped.
+- Started as a background job, the chat said ctrl-C stops a turn, though there it cannot. It now says so, and how to stop it.
+- CodeZaiku didn't use your ResearchZosho library when the library was locked to outsiders. It said the library was off. Now it uses it. If the library won't let CodeZaiku in, CodeZaiku says so and shows the command that fixes it.
+- With the library on another computer, `codezaiku doctor` said ResearchZosho was not installed. It now says whether that library answers and lets CodeZaiku in.
+- `codezaiku config set` showed a key back on the screen, and saved words like `--file` or `--verbose` as the value. It now shows a key only as (set) and refuses those words.
+- On a Mac, when a model server or a library on another computer could not be reached, CodeZaiku blamed a macOS privacy setting, which was never shown to be the cause. It now says which address failed.
+
 ## 0.3.20
 
 What's new: a sandbox for the commands a coding job runs, leak protection for hosted models, an avoid list for hosted providers, a fallback model, and bug fixes for the browser chat and for counting cost.

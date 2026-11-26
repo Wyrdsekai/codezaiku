@@ -16,6 +16,8 @@ import org.codezaiku.exec.Sandbox;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 /**
  * Run a shell command in the project root. Network is ON (RESET §3.4 — let build tools resolve
  * deps live; no offline mode). stderr is merged into stdout; the whole output is returned if it
@@ -269,6 +271,29 @@ public final class ShellTool implements Tool {
         long startedAt = System.currentTimeMillis();
         if (!ContainerExec.active()) GitDirGuard.commandStarted(scope.root());
         Process proc = pb.start();
+        RUNNING.add(proc);
+        try {
+            return waitFor(proc, cmd, lc, scope, startedAt);
+        } finally {
+            RUNNING.remove(proc);
+        }
+    }
+
+    /** The commands running now, which {@link #stopRunning} ends when a person stops the turn or the program is ended. */
+    private static final Set<Process> RUNNING = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Ends every command the shell tool is running, with everything each started, at once: a stopped turn leaves nothing running.
+     * Until 0.3.21 an interrupt let the command run on to its own end or to the tool's time limit (minutes), and a program that was
+     * ended left it running.
+     */
+    public static void stopRunning() {
+        for (Process p : List.copyOf(RUNNING)) {
+            try { p.descendants().forEach(ProcessHandle::destroyForcibly); p.destroyForcibly(); } catch (RuntimeException ignored) { }
+        }
+    }
+
+    private String waitFor(Process proc, String cmd, String lc, PathScope scope, long startedAt) throws Exception {
         // Drain stdout in a daemon thread — do NOT readAllBytes() on the main thread, or a process that
         // never exits and never closes stdout (e.g. `godot --headless`, a stray server) blocks the read
         // forever and the timeout below never even applies. (This actually happened: a headless godot ran

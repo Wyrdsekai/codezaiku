@@ -327,6 +327,18 @@ Send `SIGTERM`. CodeZaiku kills its descendant processes, emits the same JSON do
 `"interrupted": true` and whatever files were already written, and exits `143`. A killed run still
 tells you what it changed, because those files are on disk either way.
 
+A program that drives `codezaiku chat` through a pipe stops a turn with `SIGINT`, as a person does with
+ctrl-C: the model's answer in flight and the command the job is running are ended, the chat prints
+"(stopping the turn …)" and then asks what should change, and the next line it reads answers that. A second
+`SIGINT` during the turn, or one while no turn runs, ends the chat. `SIGTERM` ends it at once. Whichever way
+it ends, `chat`, `code` and the other commands that run a model's work end what they started, what a
+command wrote into the repository's own git settings is put back, and what the job spent is recorded, where
+`codezaiku spend` and a saved model's monthly limit read it. A model answer that was cut off counts as one
+answer without token counts, because the server never sent them; a chat's `/cost` says so too. A chat keeps the turn it was in, marked as stopped.
+`code` ended by a signal prints `stopped: the job was ended before it finished` and its usual closing lines on
+stdout, and exits `143` for `SIGTERM` or `130` for `SIGINT`. A process started with `SIGINT` ignored (a
+shell's background job is) never sees it, and the chat's banner then says so: send `SIGTERM` to such a one.
+
 ---
 
 ## 5. Surface B — ACP

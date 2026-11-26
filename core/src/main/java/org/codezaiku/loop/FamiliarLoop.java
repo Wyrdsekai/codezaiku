@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.codezaiku.AtEnd;
 import org.codezaiku.drive.DriveClient;
 import org.codezaiku.library.Library;
 import org.codezaiku.library.LibraryIndex;
@@ -148,11 +149,12 @@ public final class FamiliarLoop {
     // thread: an interrupt lands in the middle of an HTTP call or a file write, and the whole point of
     // a cancel is to stop cleanly, not to leave a half-written file behind. The cost is that a cancel
     // takes effect at the next turn boundary, which the protocol layer reports honestly.
-    private BooleanSupplier cancelled = () -> false;
+    // The program ending (SIGTERM, a second ctrl-C) cancels every run too: no model call starts then, and the run ends at once.
+    private BooleanSupplier cancelled = AtEnd::ending;
 
     /** Ask {@code check} before each turn; when it answers true the run stops and reports not-done. */
     public FamiliarLoop cancelIf(BooleanSupplier check) {
-        if (check != null) this.cancelled = check;
+        if (check != null) this.cancelled = () -> AtEnd.ending() || check.getAsBoolean();
         return this;
     }
 
@@ -477,10 +479,36 @@ public final class FamiliarLoop {
     }
 
     /** One model call; when the server is away, the same request again once it answers, for up to {@link #AWAY_MINUTES}, or until the host cancels. */
+    /**
+     * The model call in flight can be stopped from another thread ({@link #stopNow}): the thread waiting on it is interrupted, which
+     * ends a plain request and cancels it at the model server, and a stream is closed (DriveClient.abort), which a read in progress does
+     * not notice otherwise. Only while the call is in flight: an interrupt anywhere else could land in a file being written.
+     */
+    private final Object inCall = new Object();
+    private Thread callThread;
+
+    /** Stops the turn now: what {@code cancelIf} says is checked between steps, and the model call in flight is ended. */
+    public void stopNow() {
+        synchronized (inCall) {
+            if (callThread != null) { drive.abort(); callThread.interrupt(); }
+        }
+    }
+
     private ObjectNode chatThroughRestarts(ArrayNode messages, ArrayNode tools, int maxTokens, String toolChoice) {
+        synchronized (inCall) { callThread = Thread.currentThread(); }
+        try {
+            return chatThroughRestartsInCall(messages, tools, maxTokens, toolChoice);
+        } finally {
+            synchronized (inCall) { callThread = null; Thread.interrupted(); drive.resumeAfterAbort(); }   // no interrupt outlives the call
+        }
+    }
+
+    private ObjectNode chatThroughRestartsInCall(ArrayNode messages, ArrayNode tools, int maxTokens, String toolChoice) {
+        if (cancelled.getAsBoolean()) throw new DriveClient.Aborted();
         try {
             return drive.chat(messages, tools, maxTokens, toolChoice);
         } catch (RuntimeException e) {
+            if (cancelled.getAsBoolean()) throw new DriveClient.Aborted();
             if (!serverAway(e)) throw e;
             long start = System.currentTimeMillis(), until = start + AWAY_MINUTES * 60_000L;
             log.warn("the model server is not answering ({}); waiting for it, up to {} minutes",
@@ -3290,6 +3318,11 @@ public final class FamiliarLoop {
                 }
                 calibrate(requestChars(messages) + turnTools.toString().length(), drive.lastPromptTokens());
             } catch (RuntimeException e) {
+                // stopped while the model was answering: the turn ends here, nothing is sent again
+                if (cancelled.getAsBoolean()) {
+                    log.info("  ↳ stopped at turn {} while the model was answering", turn);
+                    return new Result(false, "cancelled by the host after " + (turn - 1) + " turns", turn);
+                }
                 // A single bad model response (e.g. malformed tool-call JSON the server rejected) must NOT
                 // abort the run. Nudge and skip the turn; the re-sample next turn almost always succeeds.
                 String msg = e.getMessage() == null ? "" : e.getMessage();
@@ -4420,6 +4453,8 @@ public final class FamiliarLoop {
 
     private void researchFirst() {
         String setting = researchFirstSetting();
+        String refused = LibraryBridge.refusedOnce(LibraryBridge.keptHere());   // a library that refuses CodeZaiku: in the job's log, once
+        if (!refused.isEmpty()) log.info("research before the work: {}", refused);
         String skipped = researchFirstSkipped(setting, drive.frontier(), searchConfigured() || LibraryBridge.answers());
         if (skipped != null) {
             if (!skipped.startsWith("CODEZAIKU_RESEARCH_FIRST=off")) log.info("research before the work: not run — {}", skipped);

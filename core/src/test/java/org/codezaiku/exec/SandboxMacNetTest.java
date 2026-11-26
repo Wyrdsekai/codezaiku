@@ -51,8 +51,23 @@ class SandboxMacNetTest {
     Path madeTmp;
     HttpServer server;
 
+    /**
+     * The proxy's ports, below the system's ephemeral ones on Linux, where the product's range (47000 to 47999) lies inside them and
+     * any program's outgoing connection could hold the test's port for a moment (seen once, 2026-11-26). The Mac's ephemeral ports
+     * start at 49152, above the product's range, which the test then keeps.
+     */
+    static int portsBelowEphemeral() {
+        try {
+            String[] r = Files.readString(Path.of("/proc/sys/net/ipv4/ip_local_port_range")).strip().split("\\s+");
+            int first = Integer.parseInt(r[0]);
+            if (first <= NetProxy.PORT_FIRST + NetProxy.PORT_COUNT && first - 2 * NetProxy.PORT_COUNT >= 1024) return first - 2 * NetProxy.PORT_COUNT;
+        } catch (IOException | RuntimeException notLinux) { }
+        return NetProxy.PORT_FIRST;
+    }
+
     @BeforeEach
     void before() throws IOException {
+        NetProxy.portFirst = portsBelowEphemeral();
         realHome = System.getProperty("user.home");
         System.setProperty("user.home", home.toString());
         Config.invalidate();
@@ -61,6 +76,7 @@ class SandboxMacNetTest {
 
     @AfterEach
     void after() throws IOException {
+        NetProxy.portFirst = NetProxy.PORT_FIRST;
         if (server != null) server.stop(0);
         Sandbox.asker(project, null);
         NetProxy.stopForTests();
@@ -254,7 +270,7 @@ class SandboxMacNetTest {
         login();
         Sandbox.model(project, true);
         int own = NetProxy.portFor(project);
-        assertTrue(own >= NetProxy.PORT_FIRST && own < NetProxy.PORT_FIRST + NetProxy.PORT_COUNT, "in the range: " + own);
+        assertTrue(own >= NetProxy.portFirst && own < NetProxy.portFirst + NetProxy.PORT_COUNT, "in the range: " + own);
         Sandbox.in(project).shell("true");
         int first = NetProxy.get().job(project).port();
         NetProxy.stopForTests();                                    // CodeZaiku ends; a new one works in the same project
@@ -269,7 +285,7 @@ class SandboxMacNetTest {
             other.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), own));    // another program has the project's port
             ProcessBuilder pb = Sandbox.in(project).shell("true");
             NetProxy.Job job = NetProxy.get().job(project);
-            assertTrue(job.port() != own && job.port() >= NetProxy.PORT_FIRST && job.port() < NetProxy.PORT_FIRST + NetProxy.PORT_COUNT, "moved, in the range: " + job.port());
+            assertTrue(job.port() != own && job.port() >= NetProxy.portFirst && job.port() < NetProxy.portFirst + NetProxy.PORT_COUNT, "moved, in the range: " + job.port());
             assertTrue(pb.environment().get("HTTPS_PROXY").endsWith(":" + job.port()), pb.environment().get("HTTPS_PROXY"));
             assertEquals(List.of(Sandbox.movedLine(own, job.port())), said, "said once");
             Sandbox.in(project).shell("true");

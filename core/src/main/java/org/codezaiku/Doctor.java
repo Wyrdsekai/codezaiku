@@ -35,7 +35,7 @@ import org.codezaiku.research.LibraryBridge;
  */
 final class Doctor {
 
-    private record Check(String name, boolean required, boolean ok, String detail, String fix) { }
+    record Check(String name, boolean required, boolean ok, String detail, String fix) { }
 
     /** How to install trivy on this operating system, as a command a person can copy. */
     static String trivyInstall() {
@@ -137,17 +137,13 @@ final class Doctor {
         boolean czNewer = czLatest != null && ResearchZoshoInstall.compareVersions(czLatest, FamiliarMain.VERSION) > 0;
         String czSaid = czNewer ? " (" + czLatest + " is available)" : czLatest != null ? " (the latest)" : SelfUpdate.checks() ? "" : " (the update check is off)";
         checks.add(new Check("codezaiku " + FamiliarMain.VERSION + czSaid, false, !czNewer, czNewer ? czLatest + " is available" : "", czNewer ? SelfUpdate.howToUpdate() : ""));
-        // ResearchZosho, the research library, is a separate program: say whether it is here, whether its daemon answers, and whether a newer release exists
+        // ResearchZosho, the research library, is a separate program, and the library CodeZaiku uses may be on another machine. Two things
+        // are said: whether ResearchZosho is installed here (and whether a newer one is out), and what the library at the address
+        // CodeZaiku is set to use is to CodeZaiku. Until 0.3.21 the second was said only for an install here, so a library on another
+        // machine read "not installed" though the chat used it.
         String rzHave = ResearchZoshoInstall.installedVersion();
-        if (rzHave == null) {
-            checks.add(new Check("researchzosho (the research library)", false, false, "not installed; research keeps its findings in the research memory only", "codezaiku install researchzosho"));
-        } else {
-            boolean answers = LibraryBridge.answers();
-            String latest = ResearchZoshoInstall.latestCached();
-            boolean newer = latest != null && ResearchZoshoInstall.compareVersions(latest, rzHave) > 0;
-            checks.add(new Check("researchzosho " + rzHave + (answers ? ", daemon answering at " + LibraryBridge.url() : ", daemon not answering at " + LibraryBridge.url()),
-                    false, !newer, newer ? latest + " is available" : "", newer ? "codezaiku update now  (has ResearchZosho's own updater install it; the library and settings stay)" : answers ? "" : "the library is installed but not running: `researchzosho service install` starts it now and at every login, `researchzosho serve` runs it in this terminal"));
-        }
+        checks.addAll(libraryChecks(rzHave, rzHave == null ? null : ResearchZoshoInstall.latestCached(), LibraryBridge.seen(), LibraryBridge.configured(),
+                LibraryBridge.url(), LibraryBridge.elsewhere(), LibraryBridge.token() != null));
         String shared = ResearchZoshoInstall.livesInOurFolderSaid();
         if (!shared.isEmpty()) checks.add(new Check("researchzosho's files", false, true, shared, ""));
         // no drive: when this machine can serve one on demand, that is the fix to name (ModelServer); the docker line otherwise
@@ -252,6 +248,50 @@ final class Doctor {
             }
         }
         return failedRequired == 0 ? 0 : 1;
+    }
+
+    /**
+     * doctor's lines on the research library. "Not installed" only when ResearchZosho is not installed here, no library address is
+     * set and none answers at the default one; otherwise the install here (with its update notice) when there is one, and always the
+     * line for the library at the address CodeZaiku uses.
+     */
+    static List<Check> libraryChecks(String rzHave, String latest, LibraryBridge.Seen seen, boolean configured, String url, boolean elsewhere, boolean haveSignIn) {
+        List<Check> out = new ArrayList<>();
+        if (rzHave == null && seen.door() == LibraryBridge.Door.NONE && !configured) {
+            out.add(new Check("researchzosho (the research library)", false, false, "not installed; research keeps its findings in the research memory only", "codezaiku install researchzosho"));
+            return out;
+        }
+        if (rzHave != null) {
+            boolean newer = latest != null && ResearchZoshoInstall.compareVersions(latest, rzHave) > 0;
+            out.add(new Check("researchzosho " + rzHave + ", installed here", false, !newer, newer ? latest + " is available" : "",
+                    newer ? "codezaiku update now  (has ResearchZosho's own updater install it; the library and settings stay)" : ""));
+        }
+        out.add(libraryCheck(seen, url, elsewhere, rzHave != null, haveSignIn));
+        return out;
+    }
+
+    /**
+     * The library line: what the library at {@code url} is to CodeZaiku, in the three cases, and the fix for each where it is kept: on
+     * this machine ({@code installedHere} and not {@code elsewhere}) the commands here, on another the commands there.
+     */
+    static Check libraryCheck(LibraryBridge.Seen seen, String url, boolean elsewhere, boolean installedHere, boolean haveSignIn) {
+        String where = elsewhere ? " (on another computer)" : "";
+        return switch (seen.door()) {
+            case IN -> new Check("research library at " + url + where + ": lets CodeZaiku in", false, true, "", "");
+            case REFUSED -> {
+                String said = seen.why().strip().replaceFirst("\\.+$", "");
+                yield new Check("research library at " + url + where + ": answers, but does not let CodeZaiku in", false, false,
+                        (haveSignIn ? "it does not accept the sign-in CodeZaiku has for it (CODEZAIKU_LIBRARIAN_TOKEN)"
+                                : "CodeZaiku has not been given a sign-in for it (CODEZAIKU_LIBRARIAN_TOKEN is empty)") + (said.isEmpty() ? "" : "; the library says: " + said),
+                        LibraryBridge.fixCommand(installedHere && !elsewhere));
+            }
+            case NONE -> new Check("research library at " + url + where + ": nothing answers", false, false,
+                    seen.why().isBlank() || seen.why().startsWith("nothing answers") ? "" : seen.why(),   // the name says it already
+                    elsewhere ? "check that the computer that keeps it is on and its library is running there (researchzosho service install, on that computer); "
+                              + "or point CodeZaiku at another library: codezaiku config set CODEZAIKU_LIBRARIAN_URL <its address>"
+                    : installedHere ? "the library is installed but not running: `researchzosho service install` starts it now and at every login, `researchzosho serve` runs it in this terminal"
+                    : "codezaiku install researchzosho  (or point CodeZaiku at a library on another computer: codezaiku config set CODEZAIKU_LIBRARIAN_URL <its address>)");
+        };
     }
 
     /** The fix line for a missing drive: the on-demand install when this machine can do it, the server line otherwise. */

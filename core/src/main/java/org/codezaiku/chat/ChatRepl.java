@@ -16,6 +16,7 @@ import org.codezaiku.drive.Auto;
 import org.codezaiku.drive.SavedModels;
 import org.codezaiku.drive.Spend;
 import org.codezaiku.library.Library;
+import org.codezaiku.tools.ShellTool;
 import org.codezaiku.library.LibraryIndex;
 import org.codezaiku.loop.FamiliarLoop;
 import org.codezaiku.lsp.LspClient;
@@ -44,6 +45,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import org.codezaiku.Config;
+import org.codezaiku.AtEnd;
 import org.codezaiku.FamiliarMain;
 import org.codezaiku.ResearchZoshoInstall;
 import org.codezaiku.SelfUpdate;
@@ -105,7 +107,26 @@ public final class ChatRepl {
      * The tokens so far, through a router who served them, and how many answers came without counts, on the ledger against the model
      * that answered them (where a saved model's monthly cap reads them), and the count begins again.
      */
-    private void settleSpend() {
+    /** A turn is running and not yet written into the session: whichever writes it, the turn's end or the program's, takes this. */
+    private final AtomicBoolean turnOpen = new AtomicBoolean();
+    private final Object turnWriting = new Object();
+    static final String ENDED_IN_TURN = "(stopped: the chat was ended during this turn)";
+
+    /**
+     * The chat's end when the program is ended before the chat gets there (SIGTERM, a second ctrl-C): the turn that was running is
+     * written into the transcript as ended, the session is saved as at a turn's end (or, with no turn done, nothing is left, as at an
+     * ordinary end), and what it spent goes on the ledger. Until 0.3.21 SIGTERM did none of it.
+     */
+    private void endedByTheProgram() {
+        ChatSession s = session;
+        if (s != null) synchronized (turnWriting) {   // the turn's own end may be writing it at this moment
+            if (turnOpen.compareAndSet(true, false)) { s.turnDone(); s.log("agent", ENDED_IN_TURN); }   // as a stopped turn is written
+            if (s.turns() > 0) s.save(); else s.discard();
+        }
+        settleSpend();
+    }
+
+    private synchronized void settleSpend() {
         DriveClient.Tally tally = DriveClient.take(chatUsage);
         if (chatUsage[0] + chatUsage[3] == 0 && tally.unreported() == 0) return;
         SavedModels.Entry e = entry != null ? entry : SavedModels.choose(driveUrl, model).entry();
@@ -292,12 +313,17 @@ public final class ChatRepl {
             @Override public void told(String line) { for (String l : line.split("\n")) io.println("     " + l); }
         });
         GitDirGuard.asker(root, consent::gitKeep);         // what a command changes in the repository's own settings is put back; the person may keep it
+        AtEnd.Task ending = AtEnd.add(this::endedByTheProgram);
         try { return runChat(); }
         finally {
-            Sandbox.asker(root, null); GitOutside.asker(root, null); GitDirGuard.asker(root, null);
-            List<String> left = GitDirGuard.ended(root, 0, false);             // only what was put back after the last command, which nobody was asked about
-            if (io != null) for (String l : left) io.println(l);
-            DriveClient.stopCounting(); settleSpend();
+            boolean mine = ending.claim();   // false when the program is ending: its end records the spend
+            try {
+                Sandbox.asker(root, null); GitOutside.asker(root, null); GitDirGuard.asker(root, null);
+                List<String> left = GitDirGuard.ended(root, 0, false);             // only what was put back after the last command, which nobody was asked about
+                if (io != null) for (String l : left) io.println(l);
+                DriveClient.stopCounting();
+                if (mine) settleSpend();
+            } finally { ending.over(); }
         }
     }
 
@@ -535,7 +561,12 @@ public final class ChatRepl {
         if (!self.isEmpty()) io.println(self);
         String rz = ResearchZoshoInstall.updateNotice();
         if (!rz.isEmpty()) io.println(rz);
-        io.println("/help for commands, /quit to leave.  ctrl-C stops a turn, ctrl-D leaves");
+        if (ChatIo.interruptsIgnored()) {
+            // started with SIGINT ignored (a shell's background job is): the program cannot take it back, so ctrl-C and SIGINT stop nothing
+            io.println("/help for commands, /quit to leave, ctrl-D leaves");
+            io.println("  note: this chat was started with interrupts ignored, as a shell's background job is, so ctrl-C and SIGINT do not");
+            io.println("        stop a turn here; SIGTERM ends the chat, and what its commands started with it");
+        } else io.println("/help for commands, /quit to leave.  ctrl-C stops a turn, ctrl-D leaves");
         io.println("");
     }
 
@@ -584,17 +615,42 @@ public final class ChatRepl {
         for (int round = 1; round <= 3; round++) {
             io.print("  planning… "); 
             String plan;
-            try {
+            // ctrl-C while the model writes the plan stops the turn, as it does during the work: until 0.3.21 the turn's handler was
+            // not yet in place here, so the interrupt ended the whole chat with nothing said (exit 130)
+            Thread me = Thread.currentThread();
+            AtomicBoolean stopped = new AtomicBoolean();
+            try (AutoCloseable ignored = io.onInterrupt(() -> {
+                if (stopped.compareAndSet(false, true)) {
+                    io.println("");
+                    io.println("  (stopping the turn; press ctrl-C again to quit)");
+                    drive.abort();
+                    me.interrupt();
+                } else {
+                    io.println("  (quitting)");
+                    FamiliarMain.endWhatThisProgramStarted(true);
+                    Runtime.getRuntime().halt(130);
+                }
+            })) {
                 var json = new ObjectMapper();
                 var msgs = json.createArrayNode();
                 msgs.addObject().put("role", "system").put("content", planInstruction(mayDecline));
                 msgs.addObject().put("role", "user").put("content", context + "\n\nTHE MESSAGE TO PLAN FOR:\n" + ask
                         + (changes.isEmpty() ? "" : "\n\nTHE PERSON'S CHANGES TO YOUR LAST PLAN (apply them):\n" + changes));
                 plan = drive.classify(msgs, 700).strip();
-            } catch (RuntimeException e) {
+            } catch (Exception e) {
+                if (stopped.get()) {
+                    Thread.interrupted();
+                    drive.resumeAfterAbort();
+                    io.println("  (stopped before the work began)");
+                    return null;
+                }
                 io.println("no plan (" + firstLine(String.valueOf(e.getMessage())) + ") — going ahead");
                 return "";
+            } finally {
+                Thread.interrupted();   // no interrupt outlives the plan's call
+                drive.resumeAfterAbort();
             }
+            if (stopped.get()) { io.println("  (stopped before the work began)"); return null; }
             LoggerFactory.getLogger(ChatRepl.class).info("plan step (round {}): {}", round, plan.replace("\n", " / "));
             if (plan.isEmpty() || (mayDecline && plan.toUpperCase(Locale.ROOT).startsWith("NO PLAN"))) { io.println("no plan needed"); return ""; }
             io.println("");
@@ -743,8 +799,9 @@ public final class ChatRepl {
                     researchRead(io, arg.substring(5).strip());
                 } else if (arg.startsWith("go")) {
                     if (brief == null) { io.println("    research mode is not on — /research <topic> first"); break; }
-                    if (!LibraryBridge.answers()) {
-                        io.println("    no library answers on " + LibraryBridge.url() + " — /setup librarian installs ResearchZosho, or start its service (the brief is kept)");
+                    String notUsable = LibraryBridge.unusable(LibraryBridge.keptHere());   // no library, or one that refuses CodeZaiku, each said for what it is
+                    if (!notUsable.isEmpty()) {
+                        io.println("    " + notUsable + " (the brief is kept)");
                         break;
                     }
                     if (LibraryBridge.token() == null) {
@@ -786,6 +843,13 @@ public final class ChatRepl {
             case "/setup" -> {
                 // `/setup librarian`: install ResearchZosho if it is not here yet, then its setup conversation, in this terminal.
                 if (!arg.equals("librarian") && !arg.equals("researchzosho")) { io.println("    usage: /setup librarian   (install ResearchZosho and set it up)"); break; }
+                if (LibraryBridge.elsewhere()) {   // the library this chat uses is on another computer: it is set up there, and nothing is installed here
+                    io.println("    this chat uses the library at " + LibraryBridge.url() + ", on another computer: researchzosho setup, run there, sets it up.");
+                    String not = LibraryBridge.unusable(false);
+                    io.println("    " + (not.isEmpty() ? "it lets CodeZaiku in; /librarian <question> asks it" : not));
+                    io.println("    to install a library on this computer instead: codezaiku config unset CODEZAIKU_LIBRARIAN_URL, then /setup librarian");
+                    break;
+                }
                 int rc = ResearchZoshoInstall.door(new String[0], System.out);
                 io.println(rc == 0 ? "    done — /librarian <question> asks the library" : "    setup did not finish (exit " + rc + ")");
             }
@@ -1109,6 +1173,7 @@ public final class ChatRepl {
 
     private void turn(ChatIo io, DriveClient drive, LspClient lsp, Library library,
                       LibraryIndex index, String text) {
+        turnOpen.set(true);
         if (session == null) {
             session = ChatSession.start(root, text);
             // Into the RUN LOG, so a log file can always be joined back to its session files.
@@ -1172,6 +1237,8 @@ public final class ChatRepl {
         String digest = tasks == null ? "" : tasks.digestInto();
         // The library's push: relevant holdings ride into the turn's context (push before pull —
         // the model never has to call a recall tool to benefit). "" when absent or irrelevant.
+        String refused = LibraryBridge.refusedOnce(LibraryBridge.keptHere());   // a library that refuses CodeZaiku is said once, not at every turn
+        if (!refused.isEmpty()) io.println("  " + refused);
         String stacks = LibraryBridge.push(text, 4);
         // Research mode rides as context, not as a different loop: the map shows what is already
         // organized so the model extends it instead of re-gathering (same push-not-pull logic).
@@ -1244,30 +1311,34 @@ public final class ChatRepl {
                 });
 
         FamiliarLoop.Result result;
-        // ctrl-C stops the turn and keeps the conversation. The loop checks `abandoned` between
-        // steps, so this lands at the next boundary rather than tearing anything down mid-write.
+        // research mode: a bounded turn (a few searches, then answer); otherwise the person is the cap
+        int turnBudget = brief != null ? Math.min(maxTurns, RESEARCH_TURN_STEPS) : maxTurns;
+        FamiliarLoop loop = new FamiliarLoop(drive, tools, root, goal, turnBudget, library, index)
+                .chat()          // one task_done ends the turn — the person is the verifier
+                .lsp(lsp)
+                .cancelIf(abandoned::get);
+        // ctrl-C (or SIGINT from a program, with the input a pipe or a file) stops the turn and keeps the conversation: the model's
+        // answer in flight is ended and the command running is ended with what it started, so the turn ends within a second or so.
+        // Until 0.3.21 the turn went on to the end of the step in flight: a model answering for minutes, or a command that does not
+        // end, kept it going until its own time limit.
         try (AutoCloseable ignored = io.onInterrupt(() -> {
             if (abandoned.compareAndSet(false, true)) {
                 io.println("");
-                io.println("  (stopping — finishing the step in flight; ctrl-C again to quit)");
+                io.println("  (stopping the turn; press ctrl-C again to quit)");
+                loop.stopNow();
+                ShellTool.stopRunning();
             } else {
                 // Twice means leave, the way every other tool behaves. Someone pressing it a second
                 // time has decided the first press did not work, and arguing with them by staying
                 // open is the wrong answer.
                 io.println("  (quitting)");
-                if (session != null && session.turns() > 0) session.save();
+                FamiliarMain.endWhatThisProgramStarted(true);   // nothing of the turn left running, .git put back, the session saved, the spend recorded
                 Runtime.getRuntime().halt(130);      // 128 + SIGINT
             }
         })) {
-            // research mode: a bounded turn (a few searches, then answer); otherwise the person is the cap
-            int turnBudget = brief != null ? Math.min(maxTurns, RESEARCH_TURN_STEPS) : maxTurns;
             ticker.start();
             try {
-                result = new FamiliarLoop(drive, tools, root, goal, turnBudget, library, index)
-                        .chat()          // one task_done ends the turn — the person is the verifier
-                        .lsp(lsp)
-                        .cancelIf(abandoned::get)
-                        .run();
+                result = loop.run();
             } finally {
                 ticker.stop();
             }
@@ -1321,16 +1392,22 @@ public final class ChatRepl {
         String sum = summary.strip();
         boolean alreadyShown = !shown.isEmpty()
                 && (shown.endsWith(sum) || sum.endsWith(shown) || sum.contains(shown));
-        if (!alreadyShown) io.println(summary);
+        // a stopped turn has said so already ("(stopped — …)"); the loop's own words for it, "cancelled by the host", are not for a person
+        boolean stopped = abandoned.get() || AtEnd.ending();
+        if (!alreadyShown && !(stopped && sum.startsWith("cancelled by the host"))) io.println(summary);
         io.println("");
         // "done" only when the model finished the turn; "stopped" when the person stopped it; "ended" for the rest (the model answered
         // without acting, the turn limit, a model server that kept failing), whose reason is the line above. All read "done" before.
-        io.println("\u001b[2m  " + (abandoned.get() ? "stopped" : result.done() ? "done" : "ended") + " · " + narrator.steps() + " step(s) · " + Ticker.elapsed(ticker.startedAt()) + "\u001b[0m");
+        io.println("\u001b[2m  " + (stopped ? "stopped" : result.done() ? "done" : "ended") + " · " + narrator.steps() + " step(s) · " + Ticker.elapsed(ticker.startedAt()) + "\u001b[0m");
         io.println("");
 
         seen.forEach(session::sawFile);
-        session.turnDone();
-        session.log("agent", result.summary());
+        synchronized (turnWriting) {
+            if (turnOpen.compareAndSet(true, false)) {   // not when the program's end wrote it already
+                session.turnDone();
+                session.log("agent", AtEnd.ending() ? ENDED_IN_TURN : result.summary());
+            }
+        }
         for (Outbound.Refusal r : tools.refused()) session.log("refused", r.line());   // a request not sent, with the tool, the host and the rule
         if (continueWith != null) {
             GivenAddresses.personSaid(continueWith);
@@ -1377,7 +1454,8 @@ public final class ChatRepl {
     /** `/research status`: the active jobs, the last ten finished, and how many more there are. */
     /** `/research status`: this patron's jobs on the daemon — the active ones, the last ten finished, unread marked. */
     private void researchStatus(ChatIo io) {
-        if (!LibraryBridge.answers()) { io.println("    no library answers on " + LibraryBridge.url() + " — /setup librarian installs ResearchZosho, or start its service"); return; }
+        String notUsable = LibraryBridge.unusable(LibraryBridge.keptHere());
+        if (!notUsable.isEmpty()) { io.println("    " + notUsable); return; }
         try {
             var page = LibraryBridge.client().jobs(10, null);
             var read = readJobs();
@@ -1444,7 +1522,8 @@ public final class ChatRepl {
 
     /** `/research read <J-id | I-id>`: the whole result, here, from the daemon. */
     private void researchRead(ChatIo io, String ref) {
-        if (!LibraryBridge.answers()) { io.println("    no library answers on " + LibraryBridge.url()); return; }
+        String notUsable = LibraryBridge.unusable(LibraryBridge.keptHere());
+        if (!notUsable.isEmpty()) { io.println("    " + notUsable); return; }
         try {
             var client = LibraryBridge.client();
             if (ref.equals("all")) {

@@ -9,8 +9,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.ConnectException;
-import java.net.NoRouteToHostException;
+import org.codezaiku.AtEnd;
 import org.codezaiku.Config;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -88,6 +87,28 @@ public final class DriveClient {
         }
         return false;
     }
+
+    /** A model call that was stopped (FamiliarLoop.stopNow): nothing of it is sent again. */
+    public static final class Aborted extends RuntimeException {
+        public Aborted() { super("the model call was stopped"); }
+    }
+
+    /** Set by {@link #abort} for the call in flight; cleared when it is over ({@link #resumeAfterAbort}). */
+    private volatile boolean aborted;
+    /** The body of the stream being read, which {@link #abort} closes: a read in progress does not notice an interrupt. */
+    private volatile InputStream streamInFlight;
+
+    /** Ends the call in flight: the stream being read is closed, and no stream or retry sends the request again. */
+    public void abort() {
+        aborted = true;
+        InputStream s = streamInFlight;
+        if (s != null) { try { s.close(); } catch (IOException ignored) { } }
+    }
+
+    /** The next call may go: after a stopped one is over. */
+    public void resumeAfterAbort() { aborted = false; }
+
+    private void stopIfAborted() { if (aborted || Thread.currentThread().isInterrupted()) throw new Aborted(); }
 
     private HttpResponse<String> send(HttpRequest req) throws IOException, InterruptedException {
         try { return http.send(req, HttpResponse.BodyHandlers.ofString()); }
@@ -216,28 +237,6 @@ public final class DriveClient {
         return json;
     }
 
-    /**
-     * On macOS, name the real cause of an unreachable LAN drive instead of leaving a dead end.
-     *
-     * <p>macOS 14+ gates local-network access per application. A JVM launched from a terminal — and
-     * especially over ssh — cannot show the permission prompt, so the connection is refused with
-     * {@code NoRouteToHostException} even though the host is plainly reachable: measured on macOS 26.5,
-     * where {@code curl} returned 200 for the same URL, in the same shell, a second apart. Without this
-     * note the message points at the endpoint, which is the one thing that is NOT wrong.
-     */
-    private static String localNetworkHint(Exception e) {
-        if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac")) return "";
-        for (Throwable c = e; c != null; c = c.getCause()) {
-            if (c instanceof NoRouteToHostException || c instanceof ConnectException) {
-                return " — on macOS this is usually the Local Network privacy permission rather than the "
-                        + "network: grant it to your terminal app under System Settings > Privacy & "
-                        + "Security > Local Network, then retry. (If `curl` reaches the same URL, that is "
-                        + "the cause.) A drive on localhost or a remote host outside the LAN is unaffected.";
-            }
-        }
-        return "";
-    }
-
     /** Process-lifetime token counters, for /cost on metered drives. Static on purpose: a chat
      *  session swaps DriveClient instances on /model, and the person's question is "what has this
      *  SESSION spent", not "this client object". */
@@ -280,6 +279,7 @@ public final class DriveClient {
     private static final class JobTally {
         final Map<String, Integer> servedBy = new LinkedHashMap<>();
         int unreported;
+        final List<Call> open = new ArrayList<>();   // calls with the server now, read when the job is settled before they end
     }
     private static final Map<long[], JobTally> TALLY = new WeakHashMap<>();
 
@@ -292,7 +292,7 @@ public final class DriveClient {
     /** How many answers counted into {@code usage} came without token counts from the server: their tokens are in no figure. */
     public static int unreported(long[] usage) {
         if (usage == null) return 0;
-        synchronized (TALLY) { JobTally t = TALLY.get(usage); return t == null ? 0 : t.unreported; }
+        synchronized (TALLY) { JobTally t = TALLY.get(usage); return t == null ? 0 : t.unreported + unanswered(t); }
     }
 
     /** Both, for a record. */
@@ -301,8 +301,47 @@ public final class DriveClient {
     /** Both, and they begin again: for a count that goes on after its record is written (the chat's, at a change of model). */
     public static Tally take(long[] usage) {
         if (usage == null) return new Tally(Map.of(), 0);
-        synchronized (TALLY) { JobTally t = TALLY.remove(usage); return t == null ? new Tally(Map.of(), 0) : new Tally(mostFirst(t.servedBy), t.unreported); }
+        synchronized (TALLY) { JobTally t = TALLY.remove(usage); return t == null ? new Tally(Map.of(), 0) : new Tally(mostFirst(t.servedBy), t.unreported + unanswered(t)); }
     }
+
+    /**
+     * A request of a job that is with the model server and whose answer has not been counted. A call stopped by the person before its
+     * answer came, and a call still waiting when the program is ended, count as an answer without token counts: the server reported
+     * none, so its tokens are in no figure, and the job's record says one is missing. A hosted API bills what it generated before the
+     * cut; that number never reaches CodeZaiku.
+     */
+    private static final class Call {
+        final long[] job;
+        volatile boolean answered;
+        Call(long[] job) { this.job = job; }
+    }
+    private static final ThreadLocal<Call> CALL = new ThreadLocal<>();
+
+    private static Call callOpens() {
+        if (CALL.get() != null) return null;   // a call within a call (the same turn asked again another way): the outer one stands for both
+        long[] job = COUNT.get();
+        if (job == null) return null;
+        Call c = new Call(job);
+        CALL.set(c);
+        synchronized (TALLY) { TALLY.computeIfAbsent(job, k -> new JobTally()).open.add(c); }
+        return c;
+    }
+
+    private void callCloses(Call c) {
+        if (c == null) return;
+        CALL.remove();
+        boolean cut = !c.answered && (aborted || Thread.currentThread().isInterrupted());
+        synchronized (TALLY) {
+            JobTally t = TALLY.get(c.job);
+            if (t != null) t.open.remove(c);
+            if (cut) TALLY.computeIfAbsent(c.job, k -> new JobTally()).unreported++;
+        }
+    }
+
+    /** The answer of this thread's call came: counted, with figures or without. */
+    private static void answered() { Call c = CALL.get(); if (c != null) c.answered = true; }
+
+    private static int unanswered(JobTally t) { int n = 0; for (Call c : t.open) if (!c.answered) n++; return n; }
 
     /** This thread's job had an answer without token counts. */
     private static void unreportedForJob() {
@@ -538,10 +577,7 @@ public final class DriveClient {
             }
             return null;
         } catch (Exception e) {
-            // A connection-level failure here is worth naming, because on macOS it is usually the
-            // Local Network permission rather than the endpoint — but it is not fatal on its own.
-            String hint = localNetworkHint(e);
-            if (!hint.isEmpty()) log.warn("reaching {}{}", baseUrl, hint);
+            // not fatal on its own: the window is not known, and the request that follows says what failed, at which address
             return null;
         }
     }
@@ -749,6 +785,13 @@ public final class DriveClient {
 
     private ObjectNode chat(ArrayNode messages, ArrayNode tools, int maxTokens, String wantToolChoice,
                             double temperature, boolean noThink) {
+        if (AtEnd.ending()) throw new Aborted();   // the program is ending: a call now would never be answered nor counted
+        Call c = callOpens();
+        try { return chatCall(messages, tools, maxTokens, wantToolChoice, temperature, noThink); } finally { callCloses(c); }
+    }
+
+    private ObjectNode chatCall(ArrayNode messages, ArrayNode tools, int maxTokens, String wantToolChoice,
+                                double temperature, boolean noThink) {
         // SANITIZE history before every send: llama.cpp --jinja re-parses EVERY historical tool_call's
         // `arguments` while rendering the chat template, so a single malformed one (the model emitted bad
         // JSON that the output parser let through, or compaction rewrote args into invalid JSON) makes EVERY
@@ -849,6 +892,7 @@ public final class DriveClient {
                     streamed = chatStreaming(json.writeValueAsString(body));
                 }
                 if (streamed != null) return streamed;
+                stopIfAborted();   // a stream closed because the turn was stopped is not followed by the plain request
                 // A failed stream falls through to the plain request rather than failing the turn:
                 // streaming is presentation, and presentation must never cost an answer.
                 body.put("stream", false);
@@ -873,7 +917,8 @@ public final class DriveClient {
                 if (limited(resp)) { waited++; long after = retryAfterSeconds(resp); ms = after > 0 ? Math.min(after, 120) * 1000 : Math.min(5_000L * waited, 60_000); attempt--; }
                 log.warn("drive HTTP {} ({}), waiting {} ms: {}", resp.statusCode(), limited(resp) ? "rate limit, wait " + waited + "/6" : "retry " + attempt + "/4", ms,
                         b.length() > 200 ? b.substring(0, 200) : b);
-                try { Thread.sleep(ms); } catch (InterruptedException ignored) { }
+                try { Thread.sleep(ms); } catch (InterruptedException stopped) { throw new Aborted(); }
+                stopIfAborted();
                 sentAt = System.nanoTime();
                 resp = send(req);
             }
@@ -942,6 +987,7 @@ public final class DriveClient {
      * said of its tokens can say they are not all there. {@code who}: the provider that served it through a router, or null.
      */
     private void counted(JsonNode u, String who, String what) {
+        answered();
         String by = who == null ? "" : ", served by " + who;
         if (u == null || !u.isObject()) {
             unreportedForJob();
@@ -1251,6 +1297,12 @@ public final class DriveClient {
      * the message content (falling back to reasoning_content), or "" on any failure.
      */
     public String classify(ArrayNode messages, int maxTokens) {
+        if (AtEnd.ending()) return "";   // as a decision that failed
+        Call c = callOpens();
+        try { return classifyCall(messages, maxTokens); } finally { callCloses(c); }
+    }
+
+    private String classifyCall(ArrayNode messages, int maxTokens) {
         ObjectNode body = json.createObjectNode();
         body.put("model", model);
         body.set("messages", messages);
@@ -1298,6 +1350,7 @@ public final class DriveClient {
             lastCompletionTokens = parsed.path("usage").path("completion_tokens").asInt(0);
             // A decision's tokens are the job's tokens too: counted like a turn's (they were not, so an overseer's plan and reviews, all
             // decisions, had no cost on the model line or in the ledger, 2026-10-18)
+            answered();
             { JsonNode u = parsed.path("usage"); long[] acc = COUNT.get();
               if (acc != null && u.isObject()) { acc[0] += u.path("prompt_tokens").asLong(0); acc[1] += u.path("prompt_tokens_details").path("cached_tokens").asLong(0); acc[3] += u.path("completion_tokens").asLong(0); }
               if (!u.isObject()) unreportedForJob(); }   // no figure from the server: nothing counted, and the job knows one is missing
@@ -1318,7 +1371,7 @@ public final class DriveClient {
             log.warn("classify: {}", e.getMessage());
             return "";
         } catch (Exception e) {
-            log.warn("classify() failed against {}: {}", baseUrl, e.toString());
+            if (!aborted) log.warn("classify() failed against {}: {}", baseUrl, e.toString());   // a call the person stopped is no failure
             return "";
         }
     }
@@ -1494,6 +1547,8 @@ public final class DriveClient {
             // sends nothing for a whole drive timeout is dead: the watchdog closes it, the read throws, and the turn
             // falls back to the plain request.
             final InputStream body = resp.body();
+            streamInFlight = body;
+            if (aborted) { try { body.close(); } catch (IOException ignored) { } }   // stopped between the headers and the first read
             final long idleNanos = idle.toNanos();
             final AtomicLong lastEvent = new AtomicLong(System.nanoTime());
             final AtomicBoolean over = new AtomicBoolean(false);
@@ -1602,10 +1657,12 @@ public final class DriveClient {
             } finally {
                 over.set(true);
                 watchdog.interrupt();
+                streamInFlight = null;
             }
         } catch (NotServed e) {
             throw e;   // nothing was sent, and a plain request would not be sent either
         } catch (Exception e) {
+            if (aborted || Thread.currentThread().isInterrupted()) return null;   // stopped by the person: the caller ends the call
             log.warn("streaming failed ({}), falling back to a plain request", e.toString());
             // part of the reply is on the screen and it is not the answer: whoever shows it is told, before the reply is asked for again
             var broken = onBroken;

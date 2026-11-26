@@ -81,6 +81,25 @@ public interface ChatIo extends AutoCloseable {
     @Override void close();
 
     /**
+     * Whether this program was started with SIGINT ignored, as a shell's background job is: the JVM then takes no handler for it, and
+     * ctrl-C or a SIGINT from another program stops nothing. Asked by putting a handler in place and taking it away again: what was
+     * there before says it.
+     */
+    static boolean interruptsIgnored() {
+        try {
+            Class<?> sig = Class.forName("sun.misc.Signal"), handler = Class.forName("sun.misc.SignalHandler");
+            Object intSig = sig.getConstructor(String.class).newInstance("INT");
+            Object ignored = handler.getField("SIG_IGN").get(null);
+            Object probe = Proxy.newProxyInstance(ChatIo.class.getClassLoader(), new Class<?>[]{handler}, (p, m, a) -> null);
+            Object previous = sig.getMethod("handle", sig, handler).invoke(null, intSig, probe);
+            sig.getMethod("handle", sig, handler).invoke(null, intSig, previous);
+            return previous == ignored;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
      * A real terminal when there is one, a plain reader when stdin is a pipe.
      *
      * <p>The tty check happens BEFORE JLine is asked for anything. Letting JLine discover the pipe

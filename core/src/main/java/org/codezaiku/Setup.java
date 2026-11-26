@@ -1,5 +1,6 @@
 package org.codezaiku;
 
+import org.codezaiku.research.LibraryBridge;
 import org.codezaiku.tools.WebSearchTool;
 
 import org.codezaiku.drive.DriveClient;
@@ -356,7 +357,8 @@ public final class Setup {
 
         // 4. the research library
         if (offerLibrary) {
-            if (acts.libraryInstalled()) out.println("4. ResearchZosho, the research library, is installed; `codezaiku doctor` says whether its service answers.");
+            if (LibraryBridge.elsewhere()) out.println("4. The research library: CodeZaiku uses the one at " + LibraryBridge.url() + ", on another computer; `codezaiku doctor` says whether it lets CodeZaiku in.");
+            else if (acts.libraryInstalled()) out.println("4. ResearchZosho, the research library, is installed; `codezaiku doctor` says whether its service answers.");
             else if (yesNo("4. ResearchZosho, the research library, keeps what research runs find and checks it. Install it? It fetches its release and asks its own questions.", false)) {
                 int rc = acts.installLibrary(out);
                 out.println(rc == 0 ? "   ResearchZosho is installed." : "   ResearchZosho did not install (see above). Later: codezaiku install researchzosho");

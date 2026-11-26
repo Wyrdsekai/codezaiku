@@ -1,10 +1,12 @@
 package org.codezaiku.run;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.codezaiku.exec.GitDirGuard;
 import org.codezaiku.drive.HttpSettings;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import org.codezaiku.AtEnd;
 import org.codezaiku.Config;
 import org.codezaiku.FamiliarMain;
 import org.codezaiku.verify.ProjectTests;
@@ -75,7 +77,12 @@ public final class RunVerb {
         // a SIGTERM ~3s in produced zero bytes on stdout, which a parser reads as a crashed backend.
         var state = new State(a, workspace, stdout);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            AtEnd.programEnds();
             killDescendants();
+            // what a command wrote into the repository's own git settings is put back before the document is written, so the document's
+            // gitPutBack names it; nothing is printed (stdout is the document)
+            try { GitDirGuard.endAll(); } catch (RuntimeException ignored) { }
+            AtEnd.runAll();   // the job's spend on the ledger as "stopped" (it prints nothing here)
             state.emitIfFirst("failed", null, true);
         }, "codezaiku-run-shutdown"));
 
@@ -97,6 +104,8 @@ public final class RunVerb {
             FamiliarMain.overseeWith(a.overseer);
             FamiliarMain.Tracked t = FamiliarMain.runLoopTracked(
                     workspace, a.text, a.drive, a.maxTurns, "none", a.mode, a.model);
+            // ended by a signal, the loop stops at once: the document is the shutdown hook's, as it always was, and no test suite runs now
+            if (AtEnd.ending()) Thread.currentThread().join();
             state.tracked = t;
             // Ask the project's own test suite what happened. Measured AFTER the loop, so it describes
             // the FINAL on-disk state — the loop's keep-best-green may restore an earlier snapshot at
@@ -107,9 +116,13 @@ public final class RunVerb {
             // Derived from the status so the exit code and the document can never contradict.
             exit = ResultDocument.exitFor(status);
             state.emitIfFirst(status, t, false);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            exit = 1;
         } catch (RuntimeException | Error e) {
             // A crash must not look like a clean "nothing happened" — report it as a failure, with
             // whatever the run had already written still listed.
+            if (AtEnd.ending()) return;   // the shutdown hook writes the document
             state.error = e.toString();
             state.emitIfFirst("failed", state.tracked, false);
             exit = 1;

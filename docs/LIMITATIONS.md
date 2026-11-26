@@ -249,8 +249,7 @@ instrument were broken, then check that by hand.
 - **`codezaiku web` on the network is a token over plain HTTP** — the token travels once, when the
   browser is given it, and rides as a cookie after. Fine on a home network; on one you do not trust,
   reach the machine over a tunnel such as Tailscale. Named people sign in with a password over the same plain HTTP.
-- **macOS: ctrl-C turn-cancellation is unverified when stdin is a pipe** — the signal is consumed
-  without stopping the turn. Interactive terminal use is the supported path on macOS.
+- **macOS: stopping a chat's turn with SIGINT when its input is a pipe is measured on Linux only.**
 - **`codezaiku v1` cannot ask permission** — the wire has no mid-turn callback, so it serves
   read-only tools by design. Anything that writes or runs belongs in the terminal chat.
 - **`/undo` cannot cover background work** — a `run_background` or `delegate` step mutates after
