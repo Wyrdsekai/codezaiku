@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import org.codezaiku.library.ProjectConventions;
 import org.codezaiku.ops.OpsDiscovery;
 import org.codezaiku.research.ResearchMemory;
+import org.codezaiku.tools.GivenAddresses;
 
 import java.util.function.Predicate;
 /**
@@ -311,6 +312,7 @@ public final class McpServer {
                 }
                 case "research": {
                     String question = reqStr(args, "question");
+                    GivenAddresses.personSaid(question);   // the host's question: an address in it may be opened
                     String mode = args.path("mode").asText("broad");
                     int maxTurns = args.path("maxTurns").asInt(30);
                     String drive = args.path("drive").asText(DEFAULT_DRIVE);

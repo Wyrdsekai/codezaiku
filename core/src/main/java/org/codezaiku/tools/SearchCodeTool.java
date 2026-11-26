@@ -1,5 +1,6 @@
 package org.codezaiku.tools;
 
+import org.codezaiku.exec.Sandbox;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -10,7 +11,10 @@ import java.util.List;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 /**
  * First-class code search, so the model stops paying for exploration with its context window.
  *
@@ -62,6 +66,31 @@ public final class SearchCodeTool implements Tool {
         return p;
     }
 
+    /**
+     * The lines of the answer that come from a file as it was before the job began ({@link PathScope#asItWas}): only those give the
+     * addresses written in them. A search of one file prints its lines without the path.
+     */
+    @Override
+    public String givenText(JsonNode args, String answer) {
+        if (ContainerExec.active() || answer == null || answer.startsWith("ERROR") || answer.startsWith("no matches")) return null;
+        try {
+            String rel = args.path("path").asText(".");
+            Path target = rel.equals(".") ? scope.root() : scope.resolve(rel);
+            if (Files.isRegularFile(target)) return scope.asItWas(target) ? answer : null;
+            StringBuilder b = new StringBuilder();
+            for (String line : answer.split("\n")) {
+                Matcher m = MATCH_LINE.matcher(line);
+                if (m.lookingAt() && scope.asItWas(scope.resolve(m.group(1)))) b.append(line).append('\n');
+            }
+            return b.isEmpty() ? null : b.toString();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** A line of the search's answer: the file's path, its line number, the text. */
+    private static final Pattern MATCH_LINE = Pattern.compile("^([^:\\n]+):\\d+:");
+
     @Override
     public String execute(JsonNode args) throws Exception {
         String pattern = args.path("pattern").asText("");
@@ -76,7 +105,9 @@ public final class SearchCodeTool implements Tool {
         }
 
         List<String> cmd = new ArrayList<>();
-        boolean rg = new ProcessBuilder("sh", "-c", "command -v rg").start().waitFor() == 0;
+        // the harness's own search, its words fixed here: sandboxed where there is a sandbox, and run for a hosted model too where there is none
+        boolean rg = Sandbox.in(scope.root()).fixed().command("sh", "-c", "command -v rg").redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD).start().waitFor() == 0;
         if (rg) {
             // -n line numbers, -S smart case, --no-heading path:line:text, capped columns so a
             // minified line cannot flood the result.
@@ -88,7 +119,7 @@ public final class SearchCodeTool implements Tool {
                     "--exclude-dir=node_modules", "--exclude-dir=.codezaiku",
                     "--", pattern, target.toString()));
         }
-        Process proc = new ProcessBuilder(cmd).directory(scope.root().toFile())
+        Process proc = Sandbox.in(scope.root()).fixed().command(cmd)
                 .redirectErrorStream(true).start();
         List<String> lines = new ArrayList<>();
         int total = 0;

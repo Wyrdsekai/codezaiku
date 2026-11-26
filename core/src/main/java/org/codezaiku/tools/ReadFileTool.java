@@ -59,6 +59,18 @@ public final class ReadFileTool implements Tool {
         return p;
     }
 
+    /**
+     * A file of the project gives the addresses written in it when it is as it was before the job began ({@link PathScope#asItWas}): a
+     * README's links, a manifest's URLs. One the job wrote or changed gives none, nor does a file read inside a container, whose times
+     * this side does not see.
+     */
+    @Override
+    public String givenText(JsonNode args, String answer) {
+        if (ContainerExec.active() || answer == null || answer.startsWith("ERROR")) return null;
+        try { return scope.asItWas(scope.resolve(args.path("path").asText())) ? answer : null; }
+        catch (RuntimeException e) { return null; }
+    }
+
     @Override
     public String execute(JsonNode args) throws Exception {
         String rel = args.path("path").asText();

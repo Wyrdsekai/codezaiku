@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.codezaiku.drive.anthropic.Claude;
 import org.codezaiku.drive.openai.OpenAI;
 import org.codezaiku.drive.aws.Bedrock;
+import org.codezaiku.exec.Sandbox;
 import org.codezaiku.exec.Shell;
 import org.codezaiku.research.LibraryBridge;
 /**
@@ -78,6 +79,14 @@ final class Doctor {
                 "commands the model runs go through WSL, not Windows itself. If you want Windows, set CODEZAIKU_SHELL to a Windows "
                 + "bash, for example Git for Windows' bash.exe. If you want WSL, run CodeZaiku inside the WSL distribution."));
 
+        // Whether the commands a coding job runs are sandboxed to the project folder. Not required: a job on a local model runs
+        // them unsandboxed where there is no sandbox and says so; a job on a hosted model then runs none.
+        Sandbox.Found sandbox = Sandbox.found();
+        checks.add(new Check("sandbox: " + Sandbox.describe(), false, sandbox.on(),
+                sandbox.on() ? "" : "a job's commands are not limited to its project folder",
+                "the commands of a job on a local model can read whatever your account can, and a job on a hosted model runs none. "
+                + "To have them sandboxed, " + Sandbox.whatToDo() + "."));
+
         // /v1/models is the cheap probe and every local server answers it — but it is NOT what
         // CodeZaiku requires, and some hosted providers do not serve it to this credential at all.
         // Measured: api.anthropic.com answers 401 on /v1/models while its OpenAI-compatible
@@ -123,10 +132,11 @@ final class Doctor {
             drive = probe.ok();
             driveDetail = probe.detail();
         }
-        // this program's own release against the latest
+        // this program's own release against the latest; with CODEZAIKU_UPDATE=off nothing is asked and nothing is said about it
         String czLatest = SelfUpdate.latestCached();
         boolean czNewer = czLatest != null && ResearchZoshoInstall.compareVersions(czLatest, FamiliarMain.VERSION) > 0;
-        checks.add(new Check("codezaiku " + FamiliarMain.VERSION + (czNewer ? " (" + czLatest + " is available)" : czLatest == null ? "" : " (the latest)"), false, !czNewer, czNewer ? czLatest + " is available" : "", czNewer ? SelfUpdate.howToUpdate() : ""));
+        String czSaid = czNewer ? " (" + czLatest + " is available)" : czLatest != null ? " (the latest)" : SelfUpdate.checks() ? "" : " (the update check is off)";
+        checks.add(new Check("codezaiku " + FamiliarMain.VERSION + czSaid, false, !czNewer, czNewer ? czLatest + " is available" : "", czNewer ? SelfUpdate.howToUpdate() : ""));
         // ResearchZosho, the research library, is a separate program: say whether it is here, whether its daemon answers, and whether a newer release exists
         String rzHave = ResearchZoshoInstall.installedVersion();
         if (rzHave == null) {
@@ -138,6 +148,8 @@ final class Doctor {
             checks.add(new Check("researchzosho " + rzHave + (answers ? ", daemon answering at " + LibraryBridge.url() : ", daemon not answering at " + LibraryBridge.url()),
                     false, !newer, newer ? latest + " is available" : "", newer ? "codezaiku update now  (has ResearchZosho's own updater install it; the library and settings stay)" : answers ? "" : "the library is installed but not running: `researchzosho service install` starts it now and at every login, `researchzosho serve` runs it in this terminal"));
         }
+        String shared = ResearchZoshoInstall.livesInOurFolderSaid();
+        if (!shared.isEmpty()) checks.add(new Check("researchzosho's files", false, true, shared, ""));
         // no drive: when this machine can serve one on demand, that is the fix to name (ModelServer); the docker line otherwise
         // A hosted API the person chose (the Claude API, Bedrock) that refused has said what is wrong in its own words: the fix
         // is to put that right, not to serve a model on this machine instead.
@@ -181,9 +193,12 @@ final class Doctor {
         String brave = Config.get("CODEZAIKU_BRAVE_KEY");
         boolean haveBrave = brave != null && !brave.isBlank();
         boolean haveGoogle = WebSearchTool.googleConfigured();
-        boolean searxAnswers = httpOk(searx + "/search?q=probe&format=json");
+        // Without a search, and with no key: doctor searched "probe", which the SearXNG passed on to every engine it has, and sent that
+        // request as it sends the drive's, with the drive's key (CODEZAIKU_API_KEY) to whatever answered at the search address.
+        WebSearchTool.SearxCheck sx = haveGoogle || haveBrave ? null : WebSearchTool.searxngCheck(searx);
+        boolean searxAnswers = sx != null && sx.ready();
         checks.add(new Check(haveGoogle ? "web search: Google through a Serper or SerpApi key, paid per search" + (haveBrave ? ", then Brave" : "") : haveBrave ? "web search: Brave Search key set" : "web search: SearXNG at " + searx, false, haveGoogle || haveBrave || searxAnswers,
-                haveBrave || searxAnswers ? "" : "research runs search the web with it; without it they only reach Wikipedia, Crossref and OpenAlex",
+                haveGoogle || haveBrave ? "" : searxAnswers ? sx.said() : sx.said() + "; research runs search the web with it, and without it they only reach Wikipedia, Crossref and OpenAlex",
                 "either a Brave Search API key (free plan at https://brave.com/search/api/): codezaiku config set CODEZAIKU_BRAVE_KEY <key>\n"
                 + "      or a SearXNG server with its JSON API turned on: codezaiku config set CODEZAIKU_SEARXNG http://<host>:8888\n"
                 + "      `codezaiku setup` asks for either."));
@@ -265,9 +280,12 @@ final class Doctor {
                             HttpRequest.newBuilder(URI.create(base + "/v1/chat/completions"))
                                     .timeout(Duration.ofSeconds(20))
                                     .header("Content-Type", "application/json"))
-                            .POST(HttpRequest.BodyPublishers.ofString(body)).build(),
+                            .POST(HttpRequest.BodyPublishers.ofString(DriveClient.routed(base, body, model))).build(),   // a router's list of providers to leave out goes with it
                     HttpResponse.BodyHandlers.ofString());
-            return classify(r.statusCode(), r.body());
+            String nobody = DriveClient.nobodyServes(base, model, r.statusCode(), r.body());
+            return nobody != null ? new ChatProbe(false, nobody) : classify(r.statusCode(), r.body());
+        } catch (DriveClient.NotServed e) {
+            return new ChatProbe(false, e.getMessage());   // nobody the router may use serves the model: nothing was sent
         } catch (Exception e) {
             return new ChatProbe(false, "nothing answered /v1/models or /v1/chat/completions");
         }

@@ -22,6 +22,7 @@ import java.util.stream.Stream;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.codezaiku.exec.Sandbox;
 import org.codezaiku.exec.Shell;
 
 /**
@@ -137,7 +138,8 @@ public final class BootCheck {
         try {
             // `exec env <cmd>`: env makes any VAR=val prefix in cmd valid (exec alone rejects it), and exec
             // lets destroyForcibly + the descendants kill reach the real server, not just a wrapping shell.
-            proc = Shell.pb("cd " + sh(root.toString()) + " && exec env " + cmd)
+            Sandbox.firstCommand(root);                  // a closed network's first command: the Gradle fetch, once
+            proc = Sandbox.in(root).shell("cd " + sh(root.toString()) + " && exec env " + cmd)
                     .redirectErrorStream(true)
                     .start();
             Thread drain = drain(proc, out);

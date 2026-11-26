@@ -102,6 +102,7 @@ public final class V1Server {
         String reply;
         try (LibraryIndex index = new LibraryIndex(FamiliarMain.libraryIndexDir())) {
             DriveClient drive = new DriveClient(driveUrl, model);
+            FamiliarMain.sandboxFor(root, driveUrl, null);
             LspClient lsp = LspClient.forProject(root, ProjectFacts.language(root));
             FamiliarLoop.Result r = new FamiliarLoop(drive, ToolRegistry.readOnly(root, lsp),
                     root, goal, maxTurns, new Library(), index)
@@ -119,6 +120,7 @@ public final class V1Server {
             // Valid SSE, one content chunk. Honest limitation: the loop's answer exists only when
             // task_done lands, so this streams availability, not tokens.
             ex.getResponseHeaders().set("Content-Type", "text/event-stream");
+            nothingLoaded(ex);
             ex.sendResponseHeaders(200, 0);
             try (OutputStream os = ex.getResponseBody()) {
                 os.write(sse(chunk("assistant", null, null)));
@@ -200,9 +202,21 @@ public final class V1Server {
         return o.toString();
     }
 
+    /**
+     * Every answer says it loads nothing: this server serves no page, only JSON a program reads, and a browser that opens one of its
+     * answers shows it as the text it is, with nothing in it run or fetched (the web chat's pages hold their own policy, WebChat.POLICY).
+     */
+    static final String POLICY = "default-src 'none'; base-uri 'none'; form-action 'none'";
+
+    private static void nothingLoaded(HttpExchange ex) {
+        ex.getResponseHeaders().set("Content-Security-Policy", POLICY);
+        ex.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+    }
+
     private static void respond(HttpExchange ex, int code, String type, String body) throws IOException {
         byte[] b = body.getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().set("Content-Type", type);
+        nothingLoaded(ex);
         ex.sendResponseHeaders(code, b.length);
         try (OutputStream os = ex.getResponseBody()) { os.write(b); }
     }

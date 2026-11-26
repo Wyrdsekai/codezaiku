@@ -345,6 +345,61 @@ public final class ChatConsent implements ToolRegistry.Listener {
     }
 
     /**
+     * A command of this chat was refused a host by the sandbox's closed network: whether the person lets that host in for the rest of
+     * this chat. Asked in every mode that runs commands, yolo too: a yes lets the chat's commands send anything to that host, which is
+     * the person's code if a command sends it. "never" is kept for the session and not asked again; a yes lasts until the chat ends,
+     * and the sandbox.hosts setting makes it permanent.
+     */
+    public boolean letHostIn(String host, int port, String command, boolean remote) {
+        if (mode == Mode.PLAN) return false;
+        String key = "net:" + host + ":" + port;
+        if (Boolean.FALSE.equals(standing.get(key))) return false;
+        String where = port == 443 || port == 80 ? host : host + ":" + port;
+        List<String> preview = new ArrayList<>();
+        preview.add("A command asked to reach " + where + (remote ? ", a git remote of this project" : "") + ":");
+        preview.add("  " + (command == null || command.length() <= 200 ? command : command.substring(0, 200) + "…"));
+        preview.add("With a yes, the commands of this chat may send anything to " + where + ", the project's code included, until the chat ends.");
+        preview.add("To let it in for good: codezaiku config set sandbox.hosts " + where);
+        return switch (prompter.ask("let this chat's commands reach " + where, preview)) {
+            case YES, YES_ALWAYS, YES_ALL -> true;
+            case NO -> false;
+            case NO_ALWAYS -> { standing.put(key, false); yield false; }
+        };
+    }
+
+    /**
+     * A push, or a pull request to open, that CodeZaiku would carry out itself outside the sandbox with the person's credentials
+     * ({@code GitOutside}): asked every time in every mode that acts, yolo too, since it sends the project's work off this machine.
+     * Null is a yes; otherwise the refusal the model reads. "always" holds for the session for the same {@code key} (the same
+     * repository and branch, or the same repository's pull requests), never for a force push; plan mode pushes nothing.
+     */
+    public String gitAct(String key, String what, List<String> preview) {
+        if (mode == Mode.PLAN) return "plan mode — nothing is pushed or opened. Say what you would push or open instead.";
+        Boolean remembered = standing.get("git:" + key);
+        if (remembered != null) return remembered ? null : denial(what);
+        boolean force = key.endsWith(" force");
+        return switch (prompter.ask(what, preview)) {
+            case YES, YES_ALL -> null;
+            case YES_ALWAYS -> { if (!force) standing.put("git:" + key, true); yield null; }
+            case NO -> denial(what);
+            case NO_ALWAYS -> { standing.put("git:" + key, false); yield denial(what); }
+        };
+    }
+
+    /**
+     * A command changed the repository's own git settings, hooks or info, which CodeZaiku has already put back: whether the person keeps
+     * the command's version ({@code GitDirGuard}). Asked in every mode that runs commands, yolo too: git on this machine obeys those
+     * places outside the sandbox. Null keeps it; nothing is remembered, so every change is put to the person.
+     */
+    public String gitKeep(String key, String what, List<String> preview) {
+        if (mode == Mode.PLAN) return "plan mode";
+        return switch (prompter.ask(what, preview)) {
+            case YES, YES_ALWAYS, YES_ALL -> null;
+            case NO, NO_ALWAYS -> "no";
+        };
+    }
+
+    /**
      * The key for a standing answer, and the text the person sees.
      *
      * <p>For shell it is the command's <b>first two words</b> — enough that "always allow

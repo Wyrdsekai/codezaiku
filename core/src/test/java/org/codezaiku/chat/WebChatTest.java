@@ -54,7 +54,7 @@ class WebChatTest {
             ChatSession earlier = ChatSession.start(a, "what is this project?"); earlier.log("user", "what is this project?"); earlier.log("agent", "A folder with nothing in it yet."); earlier.save();
             // opening a project starts its chat: the loop talks through the page
             String page = get(port, "/chat?project=alpha");
-            assertTrue(page.contains("id=\"composer\"") && page.contains("/chat/log") && page.contains(">beta</button>") && page.contains("id=\"side\"") && page.contains("data-say=\"/undo\""), "the page: the composer, the poll, the switch to the other project in the menu, the menu's own buttons: " + page.substring(0, Math.min(600, page.length())));
+            assertTrue(page.contains("id=\"composer\"") && page.contains("/static/cz-chat.js") && get(port, "/static/cz-chat.js").contains("/chat/log") && page.contains(">beta</button>") && page.contains("id=\"side\"") && page.contains("data-say=\"/undo\""), "the page: the composer, the poll, the switch to the other project in the menu, the menu's own buttons: " + page.substring(0, Math.min(600, page.length())));
             assertTrue(get(port, "/projects").contains("\"id\":\"alpha\""), "the menu's dots come from /projects");
             until(port, "alpha", "> ");   // the loop's own prompt, shown as pending
             JsonNode seeded = until(port, "alpha", "A folder with nothing in it yet.");
@@ -137,7 +137,7 @@ class WebChatTest {
             assertEquals(403, plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/chat/say")).header("Cookie", "cz=" + ada).header("Content-Type", "application/x-www-form-urlencoded").POST(HttpRequest.BodyPublishers.ofString("project=alpha&say=hello")).build(), HttpResponse.BodyHandlers.ofString()).statusCode(), "a viewer cannot type");
             assertEquals(200, plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/chat/log?project=alpha")).header("Cookie", "cz=" + ada).GET().build(), HttpResponse.BodyHandlers.ofString()).statusCode(), "but can watch");
             assertEquals(403, plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/people/add")).header("Cookie", "cz=" + ada).header("Content-Type", "application/x-www-form-urlencoded").POST(HttpRequest.BodyPublishers.ofString("name=eve&password=longenough&role=owner")).build(), HttpResponse.BodyHandlers.ofString()).statusCode(), "nor name people");
-            var out = plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/logout")).header("Cookie", "cz=" + ada).GET().build(), HttpResponse.BodyHandlers.ofString());
+            var out = plain.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/logout")).header("Cookie", "cz=" + ada).POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
             assertTrue(out.headers().firstValue("Set-Cookie").orElse("").contains("Max-Age=0"));
             String kept = WebChat.tokenKept(tmp.resolve("home/.codezaiku/web/token")); assertEquals(kept, WebChat.tokenKept(tmp.resolve("home/.codezaiku/web/token")), "a kept token stays the same"); assertTrue(kept.matches("[a-z0-9-]{23}"), kept);
         } finally { web.stop(); }

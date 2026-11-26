@@ -18,6 +18,7 @@ import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Pattern;
 import org.codezaiku.Config;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -144,6 +145,71 @@ public final class WebSearchTool implements Tool {
         String e = Config.get("CODEZAIKU_SEARXNG");
         return (e == null || e.isBlank()) ? "http://localhost:8888" : e.replaceAll("/+$", "");
     }
+
+    /** What the search check found: whether the SearXNG can be searched as a run searches it, and a line that says so. */
+    public record SearxCheck(boolean ready, String said) { }
+
+    /**
+     * Whether a SearXNG at {@code base} answers in the form a run reads, found without making it search: a search with no words
+     * ({@code /search?format=json}), which SearXNG refuses with "No query" in JSON when its JSON output is on and with 403 when it is
+     * off, and asks no engine either way; then its settings ({@code /config}) for its version and the engines a plain search uses.
+     * doctor and setup searched "probe" and "test" until 0.3.20, and the SearXNG passed the word on to every engine it has. This does
+     * not show that the engines give results now: a search does, and the first search of a run says so when they do not.
+     */
+    public static SearxCheck searxngCheck(String base) {
+        String b = base == null ? "" : base.strip().replaceAll("/+$", "");
+        HttpResponse<String> r;
+        try {
+            r = HTTP.send(HttpRequest.newBuilder(URI.create(b + "/search?format=json")).timeout(Duration.ofSeconds(10))
+                    .header("Accept", "application/json").GET().build(), HttpResponse.BodyHandlers.ofString());
+        } catch (Exception e) {
+            return new SearxCheck(false, "nothing answered at " + b);
+        }
+        int code = r.statusCode();
+        boolean json = false;
+        try { JsonNode d = M.readTree(r.body()); json = d.isObject() && (d.has("error") || d.has("results")); } catch (Exception notJson) { }
+        if (code == 403) return new SearxCheck(false, "it answers, but its JSON output is off: add json under search.formats in its settings.yml");
+        if (code == 429) return new SearxCheck(false, "its limiter refused this machine: turn the limiter off, or let this machine's address through");
+        if (!json || (code != 400 && code != 200)) return new SearxCheck(false, "what answered at " + b + " is not a SearXNG with its JSON output on (HTTP " + code + ")");
+        String version = "", engines = "";
+        try {
+            HttpResponse<String> c = HTTP.send(HttpRequest.newBuilder(URI.create(b + "/config")).timeout(Duration.ofSeconds(10))
+                    .header("Accept", "application/json").GET().build(), HttpResponse.BodyHandlers.ofString());
+            if (c.statusCode() == 200) {
+                JsonNode d = M.readTree(c.body());
+                version = d.path("version").asText("").replaceFirst("\\+.*$", "");
+                if (d.path("engines").isArray()) {
+                    int n = 0;
+                    for (JsonNode e : d.path("engines")) {
+                        if (!e.path("enabled").asBoolean(false)) continue;
+                        for (JsonNode cat : e.path("categories")) if (cat.asText().equals("general")) { n++; break; }
+                    }
+                    if (n == 0) return new SearxCheck(false, "it answers in JSON, but no engine is on for a plain search, so every search would come back empty");
+                    engines = ", with " + n + " engine" + (n == 1 ? "" : "s") + " for a plain search";
+                }
+            }
+        } catch (Exception settingsUnread) { }
+        return new SearxCheck(true, "SearXNG" + (version.isEmpty() ? "" : " " + version) + " answers in JSON" + engines + "; checked without searching");
+    }
+
+    /**
+     * A search's words with nothing in them that SearXNG reads as a command (ported from ResearchZosho 0.8.1). SearXNG splits the words
+     * at white space and reads each part by its first character, wherever the part stands ({@code searx/query.py}, 2026.7.26):
+     * {@code !name} picks an engine or a category, switched off or not ({@code !bd}, {@code !images}); {@code !!name} sends the search
+     * to another site, and {@code !!} alone to the first result; {@code :code} sets the language; {@code <3} or {@code <850} sets the
+     * time limit. A model's words, or a page's that a model repeats, could so send a search to an engine the person never chose
+     * ({@code !bd weather} made a SearXNG call Baidu, an engine switched off, 2026-11-20). The marks are taken off the front of every
+     * part, and the part searches as the word it is: {@code !bd weather} is sent as {@code bd weather}. The white space is Python's,
+     * which SearXNG splits on.
+     */
+    public static String plain(String words) {
+        if (words == null) return "";
+        return COMMAND.matcher(words).replaceAll("$1").strip();
+    }
+
+    /** The white space Python's {@code \s} matches in text: what SearXNG splits a search's words on. */
+    private static final String SPACE = "\\t\\n\\x0B\\f\\r\\x1C-\\x1F \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000";
+    private static final Pattern COMMAND = Pattern.compile("(^|[" + SPACE + "])[!:<]+");
 
     /**
      * Brave Search API, first choice when a key is configured. Measured reason (2026-08-29,
@@ -362,7 +428,8 @@ public final class WebSearchTool implements Tool {
             String fb = fallbackSearch(query, limit);
             if (fb != null) return steered(query, fb);
         }
-        String url = endpoint() + "/search?format=json&q=" + URLEncoder.encode(query, StandardCharsets.UTF_8);
+        // the words as words: nothing in them picks an engine, a language or a time limit (plain)
+        String url = endpoint() + "/search?format=json&q=" + URLEncoder.encode(plain(query), StandardCharsets.UTF_8);
         JsonNode body = null;
         // The free upstream engines rate-limit under sustained load, and SearXNG then SUSPENDS them —
         // every engine down comes back as an empty result list, which reads exactly like "the web does not
@@ -406,8 +473,9 @@ public final class WebSearchTool implements Tool {
                 return "SEARCH BACKEND DEGRADED: no results came back because the upstream engines are "
                         + "currently rate-limited or blocked (" + down + "). This is a TRANSIENT infrastructure "
                         + "problem, not evidence that the information does not exist: do NOT conclude the answer "
-                        + "is unavailable and do NOT answer from memory. Try a different phrasing, or fetch a "
-                        + "likely source URL directly with web_fetch (e.g. the relevant Wikipedia page).";
+                        + "is unavailable and do NOT answer from memory. Try a different phrasing, or open with "
+                        + "web_fetch a source the task itself names: an address written in it, or the Wikipedia "
+                        + "article of a name it states.";
             }
             return "no results for: " + query;
         }

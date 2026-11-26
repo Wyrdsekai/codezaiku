@@ -99,6 +99,10 @@ will not execute `codezaiku.bat`, and does not resolve a `C:\...` path.
 The reference platform. Needs a JDK 21+, and `git`, `curl`, `docker` for the surfaces that use them.
 `codezaiku doctor` reports anything missing.
 
+A coding job's commands are sandboxed to the project folder with Landlock, on kernel 5.13 and later. `python3`
+applies the rules (10 ms a command); without it, or on an older kernel, there is no sandbox and the job's first
+lines say so. See *Sandbox* in [CONFIGURATION.md](CONFIGURATION.md).
+
 ## Docker
 
 ```bash
@@ -137,6 +141,18 @@ release tarball is the same artifact Linux and Windows use:
 ```bash
 curl -fsSL https://codezaiku.org/install | sh
 ```
+
+A coding job's commands are sandboxed to the project folder with `sandbox-exec` (6 ms a command), under a
+profile written for the project: everything refused, then the project, the job's own folders, the system and
+the toolchains on `PATH`. A command can still read the environment of other programs running under your
+account, so keep keys in the settings file rather than exported in a shell. See *Sandbox* in
+[CONFIGURATION.md](CONFIGURATION.md).
+
+On a hosted model a command's network is closed, as on Linux: it reaches the package registries and the hosts you
+named through CodeZaiku, and no other machine. Two differences: it still reaches every service of this Mac, and a
+server it starts can be reached from your network unless `codezaiku config set sandbox.listen closed` (then no test
+may start a server). See "A job's commands and the network" in [SECURITY.md](../SECURITY.md). Closing the network adds
+nothing measurable to a command's time.
 
 Or unpack the tarball by hand — it runs straight out of it:
 
@@ -219,6 +235,12 @@ of intrusion", and `doctor` lists docker, the search backend and the vulnerabili
 unavailable rather than omitting them. A check that cannot run says so.
 
 ## Windows 11
+
+**No sandbox on native Windows.** A coding job's commands are sandboxed on Linux and macOS. On Windows neither an
+AppContainer nor a restricted token, the two things a program can apply without administrator rights, lets Git
+Bash start (tried on Windows 11 build 26200). A job on a local model runs its commands unsandboxed and says so in
+its first lines; a job on a hosted model runs no commands. Under WSL2 the Linux sandbox works (Landlock on kernel
+6.18-microsoft-standard-WSL2), so run CodeZaiku there to have it.
 
 **Native Windows works, measured on Windows 11 (10.0.26200) with JDK 25** — **17 passed, 0 failed,
 1 skipped**; the skip is cancellation reporting, which the platform makes unavailable (below). Native Windows needs no port: the

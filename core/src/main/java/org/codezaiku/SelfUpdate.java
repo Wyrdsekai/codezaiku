@@ -35,9 +35,10 @@ import java.util.regex.Pattern;
  * live under ~/.codezaiku and are not touched.
  *
  * <p>{@code CODEZAIKU_UPDATE}: {@code check} (default) says when a newer release exists; {@code auto} lets a chat
- * swap a newer release in when it starts, for the next start; {@code off} does neither. {@code codezaiku update now}
- * does it by hand. A run from the source tree never updates. Only CodeZaiku's files are replaced here: ResearchZosho
- * is updated by its own updater ({@link ResearchZoshoUpdate}).
+ * swap a newer release in when it starts, for the next start; {@code off} does neither, and asks GitHub nothing by itself:
+ * not for CodeZaiku's latest release and not for ResearchZosho's. {@code codezaiku update} and {@code update now} ask in
+ * every mode, because a person asked by name. A run from the source tree never updates. Only CodeZaiku's files are replaced
+ * here: ResearchZosho is updated by its own updater ({@link ResearchZoshoUpdate}).
  *
  * <p>Other programs update CodeZaiku too (Wyrdsekai does), so an update holds a lock file in the state folder from its
  * start to its end, and checks the version again under it against the files, which another update may have replaced.
@@ -59,6 +60,12 @@ public final class SelfUpdate {
         String m = Config.get("CODEZAIKU_UPDATE", "check").toLowerCase(Locale.ROOT).strip();
         return m.equals("auto") || m.equals("off") ? m : "check";
     }
+
+    /**
+     * Whether CodeZaiku asks GitHub by itself for the latest releases (from doctor and a chat's banner, in the terminal and in the web
+     * app): in check and auto, never in off. Until 0.3.20 off stopped only the automatic update, and both checks were still sent.
+     */
+    public static boolean checks() { return !mode().equals("off"); }
 
     /** The install root: the parent of the lib/ directory holding this jar; null when running from the source tree. */
     public static Path root() {
@@ -274,10 +281,22 @@ public final class SelfUpdate {
         }
     }
 
+    /**
+     * GitHub's API, where the latest releases are asked for. The suite points it at a port nothing listens on, so no test asks
+     * GitHub, and the tests of the update check at a stand-in of their own.
+     */
+    static String api() { return System.getProperty("codezaiku.github.api", "https://api.github.com"); }
+
     /** The latest release's version from GitHub, or null. */
-    static String latestVersion() {
+    static String latestVersion() { return latestRelease(REPO); }
+
+    /**
+     * The latest release of {@code repo} on GitHub ("Wyrdsekai/codezaiku"), or null: one GET, under CodeZaiku's own client name.
+     * ResearchZosho's latest release is asked through here too; it went out under Java's own name ("Java/25") until 0.3.20.
+     */
+    static String latestRelease(String repo) {
         try {
-            HttpResponse<String> r = HTTP.send(HttpRequest.newBuilder(URI.create("https://api.github.com/repos/" + REPO + "/releases/latest")).timeout(Duration.ofSeconds(10))
+            HttpResponse<String> r = HTTP.send(HttpRequest.newBuilder(URI.create(api() + "/repos/" + repo + "/releases/latest")).timeout(Duration.ofSeconds(10))
                     .header("User-Agent", "CodeZaiku/" + FamiliarMain.VERSION).header("Accept", "application/vnd.github+json").GET().build(), HttpResponse.BodyHandlers.ofString());
             if (r.statusCode() != 200) return null;
             var m = Pattern.compile("\"tag_name\"\\s*:\\s*\"v?([0-9][^\"]*)\"").matcher(r.body());
@@ -288,8 +307,12 @@ public final class SelfUpdate {
     static Path latestCache() { return Config.home().resolve("codezaiku-latest.txt"); }
     private static volatile boolean refreshing;
 
-    /** The latest release's version, from a cache refreshed in the background at most once a day; null until known. Never blocks. */
+    /**
+     * The latest release's version, from a cache refreshed in the background at most once a day; null until known. Never blocks.
+     * Null with the check off, and nothing is asked: what was known before it was turned off is not said either.
+     */
     public static String latestCached() {
+        if (!checks()) return null;
         try {
             Path c = latestCache();
             long age = Files.exists(c) ? System.currentTimeMillis() - Files.getLastModifiedTime(c).toMillis() : Long.MAX_VALUE;
@@ -424,7 +447,7 @@ public final class SelfUpdate {
         return o + "-" + a;
     }
 
-    private static void fetch(String url, Path to) throws IOException {
+    static void fetch(String url, Path to) throws IOException {
         try {
             HttpResponse<Path> r = HTTP.send(HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofMinutes(5))
                     .header("User-Agent", "CodeZaiku/" + FamiliarMain.VERSION).GET().build(), HttpResponse.BodyHandlers.ofFile(to));

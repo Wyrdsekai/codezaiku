@@ -55,6 +55,10 @@ public final class WebFetchTool implements Tool {
                 + "mention it, from anywhere in the page — not just the opening.";
     }
 
+    /** It opens the address it is given: only one the person, a search, a page or a project file gave ({@link GivenAddresses}). */
+    @Override public boolean opensAddresses() { return true; }
+    @Override public Set<String> addressArguments(JsonNode args) { return Set.of("url"); }
+
     @Override public ObjectNode parametersSchema(ObjectMapper j) {
         ObjectNode p = j.createObjectNode();
         p.put("type", "object");
@@ -99,6 +103,9 @@ public final class WebFetchTool implements Tool {
         Fetch.Result resp;
         try {
             resp = Fetch.get(url, Duration.ofSeconds(30));
+        } catch (Outbound.NotOpened e) {
+            fetched.remove(url + "|" + findArg);   // not read: a later call of the same address, once given, is a first reading
+            return e.getMessage();
         } catch (IllegalArgumentException e) {
             return "ERROR: " + e.getMessage() + " — " + url + " is not a source this tool will read.";
         } catch (Exception e) {
@@ -124,6 +131,7 @@ public final class WebFetchTool implements Tool {
         // unreadable" — two JA academic papers lost that way on the keigo shelf.
         byte[] bytes = resp.body();
         DocText.Doc doc = DocText.convert(bytes, url);
+        if ("html".equals(doc.kind())) GivenAddresses.linksOf(new String(bytes, StandardCharsets.UTF_8), url);   // a page read: its links may be opened next
         if (doc.kind().startsWith("pdf-unreadable")) {
             return "ERROR: PDF at " + url + " could not be converted (" + doc.kind() + ")";
         }

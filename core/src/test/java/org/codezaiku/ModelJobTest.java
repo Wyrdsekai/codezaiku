@@ -42,7 +42,7 @@ class ModelJobTest {
         Config.set("CODEZAIKU_MODEL", "local-model");
     }
 
-    @AfterEach void realHomeBack() throws Exception { System.setProperty("user.home", realHome); Config.unset("CODEZAIKU_DRIVE"); }
+    @AfterEach void realHomeBack() throws Exception { System.setProperty("user.home", realHome); Config.invalidate(); }   // the next read loads the real home's settings; nothing is changed there
 
     /** A model server that finishes every job on its first turn and reports its usage; every request is kept. */
     static HttpServer answering(List<JsonNode> requests) throws Exception {

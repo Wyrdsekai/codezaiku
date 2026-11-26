@@ -1,5 +1,6 @@
 package org.codezaiku.tools;
 
+import org.codezaiku.exec.Sandbox;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -43,7 +44,7 @@ public final class SyntaxCheck {
         }
 
         try {
-            Process p = new ProcessBuilder(cmd).directory(root.toFile()).redirectErrorStream(true).start();
+            Process p = Sandbox.in(root).command(cmd).redirectErrorStream(true).start();
             String out;
             try (var in = p.getInputStream()) {
                 out = new String(in.readAllBytes());

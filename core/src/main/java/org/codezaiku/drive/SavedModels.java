@@ -33,6 +33,11 @@ public final class SavedModels {
     private SavedModels() { }
 
     public static final String DEFAULT = "default";
+
+    /** Whether the model at this address is a metered API, as against a server of one's own: what a job sends there leaves the person's machines. */
+    public static boolean hosted(String drive) {
+        return DriveClient.hostedApi(drive) || Claude.is(drive) || OpenAI.is(drive) || Bedrock.is(drive);
+    }
     static final String PREFIX = "CODEZAIKU_MODEL_";
     private static final List<String> FIELDS = List.of("URL", "ID", "PRICES", "EFFORT", "CAP", "NOTE", "TIER");
 
@@ -43,7 +48,7 @@ public final class SavedModels {
         public String tier() { return tierSet != null && !tierSet.isBlank() ? tierSet.toUpperCase(Locale.ROOT) : ModelTiers.of(model); }
         public String host() { String h = DriveClient.hostOf(drive); return h == null ? (drive == null ? "" : drive) : h; }
         /** A metered API, as against a server of one's own. */
-        public boolean hosted() { return DriveClient.hostedApi(drive) || Claude.is(drive) || OpenAI.is(drive) || Bedrock.is(drive); }
+        public boolean hosted() { return SavedModels.hosted(drive); }
         /**
          * What tokens cost on this entry, in dollars; 0 when no prices are known. {@code usage}: prompt tokens (which include the cached
          * ones), tokens read from the server's cache, tokens written to it, completion tokens. A token written to the cache is priced as
@@ -225,7 +230,7 @@ public final class SavedModels {
     static String freeTwin(Entry e, Auto.Job job) {
         if (e == null || job == null || job.interactive() || e.model() == null || e.model().endsWith(":free")) return null;
         String host = e.host();
-        if (host == null || !host.endsWith("openrouter.ai")) return null;
+        if (host == null || !DriveClient.hostIs(host, "openrouter.ai")) return null;
         String twin = e.model() + ":free";
         return DriveClient.OpenRouterModels.knows(twin) ? twin : null;
     }

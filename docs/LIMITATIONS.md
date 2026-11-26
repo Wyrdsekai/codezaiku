@@ -168,6 +168,30 @@ a large repo.
 
 ---
 
+## The sandbox: what it does not cover
+
+A coding job's commands run in an operating-system sandbox on Linux and macOS (*Sandbox* in
+[CONFIGURATION.md](CONFIGURATION.md)). It limits which files a command reaches. It does not cover:
+
+- **The network, on a local model.** There a command reaches the internet and the ports of this machine, and a service
+  on a local port that runs commands for whoever connects is a way around the sandbox. A job on a hosted model has no
+  network of its own: see "A job's commands and the network" in [SECURITY.md](../SECURITY.md).
+- **This Mac's own services, and a way in, on macOS.** Even with the network closed, a command on macOS reaches every
+  service listening on the Mac's own addresses, and a server it starts on every address can be reached from your
+  network unless `sandbox.listen` is `closed` (then no test may start a server). On Linux neither is so.
+- **Names of files, on Linux.** A command cannot list a folder outside the project or read a file there, but it
+  can test whether a path it guesses exists.
+- **Other programs' environment, on macOS.** A command can read the arguments and the environment of other
+  programs running under your account, and of the services launchd runs for you (`launchctl print`). A key in a
+  settings file is out of its reach; a key exported in a running program's environment is not. The job's first lines
+  say when the environment CodeZaiku was started from holds one.
+- **Windows.** There is no sandbox on native Windows; see [PLATFORMS.md](PLATFORMS.md).
+
+What it costs: on Linux a command cannot list the machine's processes (`ps`, a program built with the address
+sanitizer and Node's `process.memoryUsage()` need `CODEZAIKU_SANDBOX_READ=/proc`), cannot create a UNIX-domain
+socket (Python 3.14's process pools need `CODEZAIKU_SANDBOX_SOCKETS=open`), and `sudo` does nothing; on macOS POSIX
+shared memory is refused. The first build of each project downloads its dependencies into the project's own cache.
+
 ## Things we deliberately do not claim
 
 | Not claimed | Why |

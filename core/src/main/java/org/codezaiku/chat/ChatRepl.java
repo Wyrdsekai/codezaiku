@@ -1,8 +1,12 @@
 package org.codezaiku.chat;
 
+import org.codezaiku.exec.GitDirGuard;
+import org.codezaiku.exec.GitOutside;
+import org.codezaiku.exec.Sandbox;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -17,6 +21,9 @@ import org.codezaiku.loop.FamiliarLoop;
 import org.codezaiku.lsp.LspClient;
 import org.codezaiku.shape.ProjectFacts;
 import org.codezaiku.tools.ToolRegistry;
+import org.codezaiku.tools.GivenAddresses;
+import org.codezaiku.tools.Outbound;
+import org.codezaiku.tools.PathScope;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
@@ -32,6 +39,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
@@ -93,11 +101,15 @@ public final class ChatRepl {
     /** The saved model this session starts on (codezaiku chat --model <name>). */
     public ChatRepl entry(SavedModels.Entry e) { this.entry = e; return this; }
 
-    /** The tokens so far, on the ledger against the model that answered them, and the count begins again. */
+    /**
+     * The tokens so far, through a router who served them, and how many answers came without counts, on the ledger against the model
+     * that answered them (where a saved model's monthly cap reads them), and the count begins again.
+     */
     private void settleSpend() {
-        if (chatUsage[0] + chatUsage[3] == 0) return;
+        DriveClient.Tally tally = DriveClient.take(chatUsage);
+        if (chatUsage[0] + chatUsage[3] == 0 && tally.unreported() == 0) return;
         SavedModels.Entry e = entry != null ? entry : SavedModels.choose(driveUrl, model).entry();
-        try { Spend.record("chat", root, e, chatUsage.clone(), e.cost(chatUsage)); } catch (IOException ex) { /* the ledger is a convenience, never a reason to stop */ }
+        try { Spend.record("chat", root, e, chatUsage.clone(), e.cost(chatUsage), 0, null, null, e.model(), null, tally.servedBy(), tally.unreported()); } catch (IOException ex) { /* the ledger is a convenience, never a reason to stop */ }
         Arrays.fill(chatUsage, 0);
     }
     private final int maxTurns;
@@ -150,6 +162,13 @@ public final class ChatRepl {
     private final AtomicBoolean abandoned = new AtomicBoolean();
     /** An io given from outside (the web page's); null means the terminal's own. */
     private ChatIo givenIo;
+    /**
+     * The conversation's job, for what a project file may give ({@link PathScope.Job}): begun with the conversation, holding every file
+     * its turns wrote; and the conversation it is for. Each turn's tools are part of it.
+     */
+    private PathScope.Job conversation;
+    private Object conversationOf;
+
     /** A note carried into the next message once, from {@code /carry}: what to keep in mind, for example where the person just came from. */
     private volatile String carried;
     /** The project {@code /switch} named: the loop ends and whoever runs it starts the chat there, carrying where this one got to. */
@@ -265,8 +284,21 @@ public final class ChatRepl {
     /** Runs until the person leaves. Returns a process exit code. */
     public int run() throws IOException {
         DriveClient.countInto(chatUsage);
+        // a host the closed network refused a command of this chat is put to the person; a yes lasts until the chat ends
+        Sandbox.asker(root, consent::letHostIn);
+        // a push or a pull request to open is put to the person, every time; what their own hook said of a push is shown to them
+        GitOutside.asker(root, new GitOutside.Asker() {
+            @Override public String ask(String key, String what, List<String> preview) { return consent.gitAct(key, what, preview); }
+            @Override public void told(String line) { for (String l : line.split("\n")) io.println("     " + l); }
+        });
+        GitDirGuard.asker(root, consent::gitKeep);         // what a command changes in the repository's own settings is put back; the person may keep it
         try { return runChat(); }
-        finally { DriveClient.stopCounting(); settleSpend(); }
+        finally {
+            Sandbox.asker(root, null); GitOutside.asker(root, null); GitDirGuard.asker(root, null);
+            List<String> left = GitDirGuard.ended(root, 0, false);             // only what was put back after the last command, which nobody was asked about
+            if (io != null) for (String l : left) io.println(l);
+            DriveClient.stopCounting(); settleSpend();
+        }
     }
 
     private int runChat() throws IOException {
@@ -290,7 +322,7 @@ public final class ChatRepl {
         tasks = new ChatTasks(ChatSession.storeDir(root).resolve("tasks"), line -> {
             // May arrive while the person is typing; the io picks the safe way to show it.
             if (io != null) io.notifyLine(line);
-        });
+        }, root);
         // MCP servers this chat consumes (CODEZAIKU_MCP_SERVERS: name=command;name2=command2).
         // Started once per session; a broken entry is reported, not fatal.
         mcpClients = McpClient.fromConfig(
@@ -314,6 +346,7 @@ public final class ChatRepl {
                     if (!command(io, line)) break;
                     continue;
                 }
+                GivenAddresses.personSaid(line);   // the person's message: an address in it may be opened (a carried note is not theirs to give)
                 String note = carried;
                 if (note != null) { carried = null; line = "[Carried over, for context: " + note + "]\n\n" + line; }   // once, into this message
                 turn(io, drive, lsp, library, index, line);   // drive is a field: /model swaps it
@@ -361,6 +394,7 @@ public final class ChatRepl {
             }
             try {
                 String content = Files.readString(f);
+                if (conversation != null && conversation.asItWas(f)) GivenAddresses.received(content);   // a file as it was before this conversation began
                 boolean cut = content.length() > AT_FILE_MAX_CHARS;
                 if (cut) content = content.substring(0, AT_FILE_MAX_CHARS);
                 b.append("[attached ").append(rel).append(cut ? " — first " + AT_FILE_MAX_CHARS + " chars]" : "]")
@@ -395,7 +429,10 @@ public final class ChatRepl {
     /** One git/shell helper for the small commands; empty string on failure. */
     private String sh(String... cmd) {
         try {
-            var p = new ProcessBuilder(cmd).directory(root.toFile()).redirectErrorStream(true).start();
+            Sandbox.Launch l = Sandbox.in(root);
+            Path who = Sandbox.found().on() && cmd.length > 1 && cmd[1].equals("commit") ? committerFile() : null;
+            if (who != null) l.read(who).env(env -> env.put("GIT_CONFIG_GLOBAL", who.toString()));
+            var p = l.command(cmd).redirectErrorStream(true).start();
             String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             p.waitFor();
             return out.strip();
@@ -427,6 +464,59 @@ public final class ChatRepl {
         return null;
     }
 
+    private String sandboxSaid;
+
+    /**
+     * How this chat's commands run, said at the start and again when a change of model changes it: a chat that goes from a
+     * local model to a hosted one on a machine with no sandbox loses its commands for as long as it stays there.
+     */
+    private void saySandbox(ChatIo io) {
+        boolean hosted = SavedModels.hosted(driveUrl);
+        Sandbox.model(root, hosted);
+        List<String> lines = Sandbox.lines(root, hosted);
+        String all = String.join("\n", lines);
+        if (all.equals(sandboxSaid)) return;
+        sandboxSaid = all;
+        for (String line : lines) io.println(line);
+        Sandbox.say(root, io::println);                   // the line of the chat's first command: the Gradle fetch, when one is made
+    }
+
+    /**
+     * The person's own name and address, for a commit they asked this chat to make, as a git settings file the sandboxed git
+     * reads in place of the one in their home: a sandboxed command has a home of its own and finds no identity there, and the
+     * commit is theirs. The file sits outside the folders the model's commands can read, and only the chat's own git is shown it.
+     * Null when they have set none, or it cannot be written; git then says so itself.
+     */
+    private static Path committerFile() {
+        try {
+            String name = gitGlobal("user.name"), email = gitGlobal("user.email");
+            if (name.isEmpty() && email.isEmpty()) return null;
+            Path dir = Config.home().resolve("sandbox");
+            Files.createDirectories(dir);
+            Path file = dir.resolve("committer.gitconfig");
+            Files.writeString(file, "");
+            for (String[] kv : new String[][]{{"user.name", name}, {"user.email", email}}) {
+                if (kv[1].isEmpty()) continue;
+                Process p = new ProcessBuilder("git", "config", "--file", file.toString(), kv[0], kv[1]).redirectErrorStream(true).start();
+                p.getInputStream().readAllBytes();
+                if (!p.waitFor(10, TimeUnit.SECONDS) || p.exitValue() != 0) return null;
+            }
+            return file;
+        } catch (IOException e) {
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+    }
+
+    /** One value of the person's own git settings: read here, outside the sandbox, by a command that runs nothing of the project's. */
+    private static String gitGlobal(String key) throws IOException, InterruptedException {
+        Process p = new ProcessBuilder("git", "config", "--global", "--get", key).redirectError(ProcessBuilder.Redirect.DISCARD).start();
+        String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).strip();
+        return p.waitFor(10, TimeUnit.SECONDS) && p.exitValue() == 0 ? out : "";
+    }
+
     private void banner(ChatIo io) {
         io.println("codezaiku chat — " + root);
         // Running `./codezaiku chat` from inside bin/ makes bin/ the project. Correct, and
@@ -439,6 +529,7 @@ public final class ChatRepl {
             io.println("        for the whole project, run from " + above);
         }
         io.println("drive " + driveUrl + " · " + consent.mode() + " — " + consent.mode().description());
+        saySandbox(io);
         String self = SelfUpdate.maybeAuto();
         if (self.isEmpty()) self = SelfUpdate.updateNotice();
         if (!self.isEmpty()) io.println(self);
@@ -517,6 +608,7 @@ public final class ChatRepl {
             String ans = a.strip();
             if (ans.isEmpty() || ans.equalsIgnoreCase("go") || ans.equalsIgnoreCase("y") || ans.equalsIgnoreCase("yes") || ans.equalsIgnoreCase("ok")) return plan;
             if (ans.equalsIgnoreCase("skip")) return "";
+            GivenAddresses.personSaid(ans);   // the person's change to the plan is their words
             changes = changes.isEmpty() ? ans : changes + "\n" + ans;
         }
         return "";
@@ -547,6 +639,7 @@ public final class ChatRepl {
             if (Files.isRegularFile(f)) {
                 try {
                     String t = Files.readString(f);
+                    if (conversation != null && conversation.asItWas(f)) GivenAddresses.received(t);   // the instruction file as it was when the conversation began
                     if (t.length() > 3_000) t = t.substring(0, 3_000) + "\n…(truncated — read "
                             + name + " for the rest)";
                     // reference data, not an instruction channel: the project's file says how its code is done; the person's message says
@@ -686,6 +779,7 @@ public final class ChatRepl {
                     io.println("      /research go     files the brief with the daemon for the deep run (go depth | go broad)");
                     io.println("      /research off    discards it");
                     // orientation: the first turn is the topic itself — the shelves, one general search, a question back
+                    GivenAddresses.personSaid(arg);
                     if (ioRef != null && drive != null) turn(ioRef, drive, lspRef, libraryRef, indexRef, arg);
                 }
             }
@@ -708,14 +802,21 @@ public final class ChatRepl {
             case "/cost" -> {
                 long pt = DriveClient.SESSION_PROMPT_TOKENS.get();
                 long ct = DriveClient.SESSION_COMPLETION_TOKENS.get();
+                // answers the model server sent without token counts: counted as nothing (no figure is known, and none is guessed), and said
+                int unreported = DriveClient.unreported(chatUsage);
                 if (pt + ct == 0) {
-                    io.println("    no token usage reported yet (local drives report it too — after the first turn)");
+                    io.println(unreported > 0 ? "    nothing counted: " + Spend.unreportedLine(unreported) + ", and CodeZaiku does not guess them"
+                            : "    no token usage reported yet (local drives report it too — after the first turn)");
                 } else {
                     io.println(String.format("    this session: %,d prompt + %,d completion = %,d tokens", pt, ct, pt + ct));
                     SavedModels.Entry priced = entry != null ? entry : SavedModels.choose(driveUrl, model).entry();
                     if (priced.prices() != null) io.println("    since this model was chosen: " + Spend.usageLine(chatUsage, priced.cost(chatUsage), true) + " at " + priced.describe() + "'s prices");
                     else io.println("    (a metered drive bills these; `codezaiku model set <name> --prices in/out` puts a price on them)");
+                    if (unreported > 0) io.println("    since this model was chosen, " + Spend.unreportedLine(unreported) + ": they are not in these figures, so the figures are less than what was used");
                 }
+                // through a router: who served this model's requests since it was chosen
+                String servedBy = Spend.servedLine(DriveClient.servedBy(chatUsage));
+                if (!servedBy.isEmpty()) io.println("    since this model was chosen, " + servedBy);
             }
             case "/tasks" -> {
                 var all = tasks.all();
@@ -1014,6 +1115,7 @@ public final class ChatRepl {
             LoggerFactory.getLogger(ChatRepl.class)
                     .info("chat session {} in {}", session.id(), root);
         }
+        if (conversationOf != session) { conversationOf = session; conversation = new PathScope.Job(); }   // one conversation, one job: a file an earlier turn wrote gives no address
         session.log("user", text);
         session.topic(session.turns() == 0 ? text : null);
 
@@ -1022,6 +1124,7 @@ public final class ChatRepl {
         // applied to chat — and it saves the read turns, which on a small local drive is the
         // difference between seconds and half a minute to the first useful token.
         String attachments = expandAtFiles(text);
+        saySandbox(io);   // the model may have changed since the last message: the tools below are made for the one it is on
 
 
         // Full tool set, always. What the agent may DO is decided in the moment by the person,
@@ -1030,7 +1133,8 @@ public final class ChatRepl {
         var seen = new LinkedHashSet<String>();
         ToolRegistry tools = consent.mode() == ChatConsent.Mode.PLAN
                 ? ToolRegistry.readOnly(root, lsp)
-                : ToolRegistry.standard(root, lsp);
+                : ToolRegistry.standard(root, lsp).withGit(root, true);    // push, fetch and pull requests, done by CodeZaiku on the person's yes
+        tools.scope().job(conversation);
         // Web joins CHAT's registries only — the coding/run verbs keep their measured tool set
         // (adding tools there would silently change every benchmark). Both web tools are
         // read-shaped (searching is looking), so they ride at every rung including plan; what a
@@ -1046,7 +1150,7 @@ public final class ChatRepl {
             tools.add(new RememberTool(memory));
             // Long work without holding the conversation. Consent-wise this IS shell (canonical
             // in ChatConsent); journal-wise the step is declared not-coverable (see Narrator).
-            tools.add(new RunBackgroundTool(tasks));
+            if (Sandbox.commandsRun(root)) tools.add(new RunBackgroundTool(tasks));
             tools.add(new DelegateTool(tasks, root, driveUrl, model));
         }
         for (var mc : mcpClients) {
@@ -1124,6 +1228,19 @@ public final class ChatRepl {
                     if (!showThinking) return;
                     if (!thinking.getAndSet(true)) io.printThinkingStart();
                     io.printThinking(piece);
+                },
+                // A stream that breaks is a failed call: the reply is asked for again whole. What it had shown stays on the screen (a
+                // terminal cannot take printed text back), so it is marked as broken off, and it no longer counts as shown: the answer
+                // that comes is printed once, at the end of the turn, in full. Without this the part shown was taken for the answer
+                // when the answer began with it, and the answer was never printed.
+                partial -> {
+                    synchronized (streamed) {
+                        int at = streamed.lastIndexOf(partial);
+                        if (at >= 0 && at + partial.length() == streamed.length()) streamed.setLength(at);
+                    }
+                    ticker.quiet();
+                    io.println("");
+                    io.println("  (the reply broke off here; asking for it again)");
                 });
 
         FamiliarLoop.Result result;
@@ -1206,13 +1323,17 @@ public final class ChatRepl {
                 && (shown.endsWith(sum) || sum.endsWith(shown) || sum.contains(shown));
         if (!alreadyShown) io.println(summary);
         io.println("");
-        io.println("\u001b[2m  " + (abandoned.get() ? "stopped" : "done") + " · " + narrator.steps() + " step(s) · " + Ticker.elapsed(ticker.startedAt()) + "\u001b[0m");
+        // "done" only when the model finished the turn; "stopped" when the person stopped it; "ended" for the rest (the model answered
+        // without acting, the turn limit, a model server that kept failing), whose reason is the line above. All read "done" before.
+        io.println("\u001b[2m  " + (abandoned.get() ? "stopped" : result.done() ? "done" : "ended") + " · " + narrator.steps() + " step(s) · " + Ticker.elapsed(ticker.startedAt()) + "\u001b[0m");
         io.println("");
 
         seen.forEach(session::sawFile);
         session.turnDone();
         session.log("agent", result.summary());
+        for (Outbound.Refusal r : tools.refused()) session.log("refused", r.line());   // a request not sent, with the tool, the host and the rule
         if (continueWith != null) {
+            GivenAddresses.personSaid(continueWith);
             session.turnDone();
             session.save();
             turn(io, drive, lsp, library, index, "Continue the work you were doing, with this change: " + continueWith

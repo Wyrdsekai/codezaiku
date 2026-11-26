@@ -31,7 +31,7 @@ class AcpSavedModelOptionTest {
         Config.set("CODEZAIKU_MODEL", "local-model");
     }
 
-    @AfterEach void realHomeBack() throws Exception { System.setProperty("user.home", realHome); Config.unset("CODEZAIKU_DRIVE"); }
+    @AfterEach void realHomeBack() throws Exception { System.setProperty("user.home", realHome); Config.invalidate(); }   // the next read loads the real home's settings; nothing is changed there
 
     private static JsonNode parse(String s) throws Exception { return new ObjectMapper().readTree(s); }
 

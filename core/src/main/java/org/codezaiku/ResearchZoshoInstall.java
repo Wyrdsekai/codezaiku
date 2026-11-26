@@ -6,6 +6,7 @@ import java.io.PrintStream;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -17,6 +18,7 @@ import java.io.UncheckedIOException;
 import java.security.NoSuchAlgorithmException;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import org.codezaiku.research.LibraryBridge;
 import org.codezaiku.research.ResearchMemory;
@@ -71,9 +73,12 @@ public final class ResearchZoshoInstall {
                          : prefix.resolve("share").resolve("researchzosho").resolve("bin").resolve("researchzosho");
     }
 
+    /** Where the installed command is looked for. The tests stand in for it, so that no test runs a ResearchZosho of the machine. */
+    static Supplier<Path> whereInstalled = ResearchZoshoInstall::installed;
+
     /** The installed command's version ("0.1.2"), or null when none is installed or it does not say. */
     public static String installedVersion() {
-        Path launcher = installed();
+        Path launcher = whereInstalled.get();
         return launcher == null ? null : installedVersion(launcher);
     }
 
@@ -88,11 +93,39 @@ public final class ResearchZoshoInstall {
         } catch (Exception e) { return null; }
     }
 
+    /**
+     * Names only ResearchZosho makes in its home. One of them in CodeZaiku's folder, with no {@code ~/.researchzosho}, is a ResearchZosho
+     * from before 0.8.3 that still keeps its files there (until then it lived in CodeZaiku's folder whenever that folder was there first).
+     */
+    static final List<String> ITS_NAMES = List.of("researchzosho.pid", "latest-version.txt", "site-list", "help", "labse", "likeness", "metricx",
+            "searxng", "shelf", "helpers.secret", "databases.json", "dna", "recalls", "podcastindex", "career-cache", "comic", "share.json", "prefs");
+
+    /** Whether a ResearchZosho from before 0.8.3 keeps its files in CodeZaiku's folder: read from the names there, nothing changed. */
+    static boolean livesInOurFolder() {
+        Path home = Path.of(System.getProperty("user.home"));
+        Path ours = home.resolve(".codezaiku");
+        if (Files.isDirectory(home.resolve(".researchzosho")) || !Files.isDirectory(ours)) return false;
+        for (String n : ITS_NAMES) if (Files.exists(ours.resolve(n), LinkOption.NOFOLLOW_LINKS)) return true;
+        return Files.exists(ours.resolve("logs").resolve("librarian-serve.log"), LinkOption.NOFOLLOW_LINKS);
+    }
+
+    /** The line doctor and `model serve status` say when it does; "" otherwise. */
+    static String livesInOurFolderSaid() {
+        if (!livesInOurFolder()) return "";
+        return "ResearchZosho keeps its files in CodeZaiku's folder (" + Path.of(System.getProperty("user.home")).resolve(".codezaiku")
+                + "), as its versions before 0.8.3 did. From 0.8.3 it moves them to ~/.researchzosho by itself at its next start "
+                + "(researchzosho home move --dry-run shows what moves); CodeZaiku leaves them as they are.";
+    }
+
     static Path latestCache() { return Config.home().resolve("research").resolve("researchzosho-latest.txt"); }
     private static volatile boolean refreshing;
 
-    /** The latest release's version, from a cache refreshed in the background at most once a day; null until known. Never blocks. */
+    /**
+     * The latest release's version, from a cache refreshed in the background at most once a day; null until known. Never blocks.
+     * Under CodeZaiku's update setting: null with it off, and nothing is asked.
+     */
     public static String latestCached() {
+        if (!SelfUpdate.checks()) return null;
         try {
             Path c = latestCache();
             long age = Files.exists(c) ? System.currentTimeMillis() - Files.getLastModifiedTime(c).toMillis() : Long.MAX_VALUE;
@@ -116,21 +149,21 @@ public final class ResearchZoshoInstall {
         return 0;
     }
 
-    /** One line when a newer ResearchZosho than the installed one is released, from the cache; "" otherwise or when unknown. */
+    /**
+     * One line when a newer ResearchZosho than the installed one is released, from the cache; "" otherwise or when unknown. GitHub is
+     * asked only where ResearchZosho is installed: until 0.3.20 the check went out on every chat's start, installed or not.
+     */
     public static String updateNotice() {
-        String have = installedVersion(), latest = latestCached();
-        if (have == null || latest == null || compareVersions(latest, have) <= 0) return "";
+        if (!SelfUpdate.checks()) return "";
+        String have = installedVersion();
+        if (have == null) return "";
+        String latest = latestCached();
+        if (latest == null || compareVersions(latest, have) <= 0) return "";
         return "ResearchZosho " + latest + " is available (installed: " + have + "). `codezaiku update now` has ResearchZosho's own updater install it; the library and settings stay.";
     }
 
-    /** The latest release's version from GitHub, or null. */
-    static String latestVersion() {
-        try (InputStream in = new URL("https://api.github.com/repos/" + REPO + "/releases/latest").openStream()) {
-            String body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-            var m = Pattern.compile("\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"").matcher(body);
-            return m.find() ? m.group(1) : null;
-        } catch (IOException e) { return null; }
-    }
+    /** The latest release's version from GitHub, or null: asked as CodeZaiku's own is, under CodeZaiku's client name. */
+    static String latestVersion() { return SelfUpdate.latestRelease(REPO); }
 
     /**
      * Download, verify, unpack and put on the path, where no ResearchZosho is installed yet. Returns the launcher. Throws
@@ -203,9 +236,12 @@ public final class ResearchZoshoInstall {
         }
     }
 
+    /** One file of the release, under CodeZaiku's own client name as the update checks send it; a file: address (the test hook's) is copied. */
     static void fetch(String url, Path to) throws IOException {
-        try (InputStream in = new URL(url).openStream()) { Files.copy(in, to); }
-        catch (IOException e) { throw new IOException("download failed: " + url); }
+        try {
+            if (url.startsWith("file:")) { try (InputStream in = new URL(url).openStream()) { Files.copy(in, to); } }
+            else SelfUpdate.fetch(url, to);
+        } catch (IOException e) { throw new IOException("download failed: " + url); }
     }
 
     static String sha256(Path f) throws IOException {

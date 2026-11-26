@@ -1,5 +1,6 @@
 package org.codezaiku.verify;
 
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -8,10 +9,9 @@ import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.codezaiku.shape.ProjectFacts;
-import org.codezaiku.exec.Shell;
+import org.codezaiku.exec.Sandbox;
 import org.codezaiku.tools.ProjectEnv;
 
-import java.io.File;
 /**
  * The drive gate's cheap, model-blind "are the project's own tests GREEN right now?" check: resolve the
  * real (split-brain-safe) work dir + the stack's test command from {@link org.codezaiku.shape.ProjectFacts}
@@ -101,7 +101,7 @@ public final class ProjectTests {
             // 127 and the caller read that as the SUITE failing — every project on macOS reporting
             // red whether or not it passed. Timeout picks a mechanism that exists on this host.
             int secs = RUN_BUDGET_MS / 1000;
-            Sh r = sh(work.toString(), ProjectEnv.prelude(projectRoot), Timeout.wrap(secs, testCmd + " 2>&1"));
+            Sh r = sh(projectRoot, work.toString(), ProjectEnv.prelude(projectRoot), Timeout.wrap(secs, testCmd + " 2>&1"));
             output = r.out;
             if (r.exit == -1) return new Run(Verdict.notRun(), command, output);          // we never got to run it
             // A suite that collected NOTHING did not fail — it did not run. pytest exits 5 for "no
@@ -203,7 +203,10 @@ public final class ProjectTests {
     private static Sh sh(String cwd, String command) { return sh(cwd, "", command); }
 
     /** {@code prelude}: the shell text that switches the project's environment on, or nothing. */
-    private static Sh sh(String cwd, String prelude, String command) {
+    private static Sh sh(String cwd, String prelude, String command) { return sh(Path.of(cwd), cwd, prelude, command); }
+
+    /** {@code project}: the folder the command is sandboxed to; {@code cwd}: the folder in it that the tests start in. */
+    private static Sh sh(Path project, String cwd, String prelude, String command) {
         try {
             // The working directory is set on the PROCESS, never with a `cd` inside the command string.
             // On Windows `bash` resolves to C:\Windows\System32\bash.exe — the WSL launcher — whenever
@@ -212,7 +215,8 @@ public final class ProjectTests {
             // not found", so runnerMissing() did not fire: the oracle reported ran=true with NO counts,
             // turning a passing suite into testsPassed=0 / status=failed. ProcessBuilder's directory is
             // translated by the launcher, which is why the model's own ShellTool never hit this.
-            Process p = Shell.pb(prelude + "( " + command + " )")
+            Sandbox.firstCommand(project);               // a closed network's first command: the Gradle fetch, once
+            Process p = Sandbox.in(project).shell(prelude + "( " + command + " )")
                     .directory(new File(cwd))
                     .redirectErrorStream(true).start();
             String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);

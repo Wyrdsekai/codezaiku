@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import org.codezaiku.Config;
 import org.codezaiku.FamiliarMain;
+import org.codezaiku.exec.GitOutside;
 import org.codezaiku.run.ResultDocument;
 import org.codezaiku.run.WorkspaceFiles;
 import org.codezaiku.tools.ShellTool;
@@ -339,8 +340,16 @@ public final class AcpServer {
             if (window[0] > 0 && used > 0) sessionUpdate(s.id, usageUpdate(used, window[0]));
         });
         var before = WorkspaceFiles.snapshot(s.cwd);
+        long startedAt = System.currentTimeMillis();
         FamiliarMain.Tracked t = null;
         String failure = null;
+        // a push or a pull request CodeZaiku would make outside the sandbox (only where git.push lists the repository) is put to the client,
+        // as git writes in the shell are
+        GitOutside.hostAsker(s.cwd, (key, what, preview) -> {
+            ObjectNode q = J.createObjectNode();
+            q.put("question", String.join("\n", preview));
+            return askPermission(s, "permit_git_" + System.nanoTime(), key.startsWith("gh ") ? "pull_requests" : "git_push", q, what);
+        });
         try {
             t = FamiliarMain.runLoopTracked(
                     s.cwd, text, Config.get("CODEZAIKU_DRIVE", "http://localhost:8200"),
@@ -351,6 +360,7 @@ public final class AcpServer {
             failure = e.toString();
         } finally {
             DriveClient.USAGE_SINK.remove();
+            GitOutside.hostAsker(s.cwd, null);
         }
 
         boolean cancelled = s.isCancelled();
@@ -381,6 +391,10 @@ public final class AcpServer {
                 .host(t != null && t.run() != null ? t.run().host() : null)
                 .usage(t != null && t.run() != null ? t.run().usage() : null)
                 .cost(t != null && t.run() != null && t.run().priced() ? t.run().cost() : null)
+                .servedBy(t != null && t.run() != null ? t.run().servedBy() : null)
+                .networkRefused(ResultDocument.refusedSince(s.cwd, startedAt))
+                .git(ResultDocument.gitSince(s.cwd, startedAt))
+                .gitPutBack(ResultDocument.putBackSince(s.cwd, startedAt))
                 .verdict(verdict)
                 .build();
 

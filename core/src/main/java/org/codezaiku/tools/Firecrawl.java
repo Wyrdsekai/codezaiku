@@ -33,10 +33,17 @@ public final class Firecrawl {
 
     public static boolean on() { String k = Config.get(KEY); return k != null && !k.isBlank(); }
 
-    /** The page as Firecrawl's browser saw it, as a fetch result holding markdown; null without a key, on a failure, or when Firecrawl could not read it either. */
+    /**
+     * The page as Firecrawl's browser saw it, as a fetch result holding markdown; null without a key, on a failure, or when Firecrawl could
+     * not read it either. While a model's call is carried out, the page's address handed to Firecrawl has to be a given address
+     * ({@link Outbound#readerRefuses}), and it is handed over in the spelling it was given in: Firecrawl would otherwise open for the model
+     * what CodeZaiku itself does not.
+     */
     public static Fetch.Result scrape(String url, Duration timeout) {
         String key = Config.get(KEY);
         if (key == null || key.isBlank() || url == null || url.isBlank()) return null;
+        if (Outbound.readerRefuses(url) != null) return null;
+        if (Outbound.current() != null) url = GivenAddresses.asRequested(url);
         try {
             var body = M.createObjectNode().put("url", url).put("onlyMainContent", true).put("timeout", (int) Math.min(timeout.toMillis(), 60_000));
             body.putArray("formats").add("markdown");

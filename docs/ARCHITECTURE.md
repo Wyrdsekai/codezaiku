@@ -265,8 +265,10 @@ otherwise.
 - **No harness gate on model actions.** The harness never intercepts an action and rejects it by rule.
   Where a choice needs constraining, it is constrained by *evidence* — the model may disambiguate among
   things a deterministic sensor already flagged, never nominate one itself. §6 covers why.
-- **Not sandboxed by containers.** Runs execute on the host, bounded by timeouts, path scoping and the
-  guard stack rather than by isolation.
+- **Sandboxed by the operating system, not by containers.** A coding job's commands run on the host under
+  Landlock (Linux) or `sandbox-exec` (macOS), limited to the project folder and the job's own folders; see
+  *Sandbox* in CONFIGURATION.md. The operations surface runs on its target on purpose, bounded by timeouts and
+  the guard stack.
 - **No UI.** The interfaces are the CLI, MCP (stdio JSON-RPC), ACP and HTTP (`serve`). Anything richer
   belongs in a client built against those, which is why none ships here.
 

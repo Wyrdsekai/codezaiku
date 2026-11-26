@@ -101,7 +101,7 @@ class AutoTest {
     @TempDir Path home;
     private String realHome;
     @BeforeEach void scratchHome() throws Exception { realHome = System.getProperty("user.home"); System.setProperty("user.home", home.toString()); Files.createDirectories(home.resolve(".codezaiku")); Config.set("CODEZAIKU_DRIVE", "http://localhost:8200"); Config.set("CODEZAIKU_MODEL", "qwen3.8-27b"); }
-    @AfterEach void realHomeBack() throws Exception { System.setProperty("user.home", realHome); Config.unset("CODEZAIKU_DRIVE"); }
+    @AfterEach void realHomeBack() throws Exception { System.setProperty("user.home", realHome); Config.invalidate(); }   // the next read loads the real home's settings; nothing is changed there
 
     @Test
     void autoIsTheDefaultOnceThereIsAChoiceAndCandidatesComeFromTheSettings(@TempDir Path project) throws Exception {

@@ -330,7 +330,8 @@ public final class Config {
         return k.toLowerCase(Locale.ROOT).replace('_', '.');
     }
 
-    static synchronized void invalidate() {
+    /** Forget what was read, so the next read loads the settings file of the home as it is now. Changes no file. */
+    public static synchronized void invalidate() {
         FILE.clear();
         loaded = false;
         loadedFrom = null;

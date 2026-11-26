@@ -7,7 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import org.codezaiku.exec.Shell;
+import org.codezaiku.exec.Sandbox;
 
 /**
  * The CLI / process archetype gate (non-HTTP): runs an ordered sequence of real commands — build,
@@ -51,8 +51,7 @@ public final class CliGate implements Gate {
     private StepRun run(Path root, CliStep s) {
         log.info("cli gate[{}] step {}: {}", name, s.id(), s.cmd());
         try {
-            Process p = Shell.pb(s.cmd())
-                    .directory(root.toFile())
+            Process p = Sandbox.in(root).shell(s.cmd())
                     .redirectErrorStream(true)
                     .start();
             String out;
@@ -99,8 +98,7 @@ public final class CliGate implements Gate {
     /** Run a derive command at gate-time and return its first non-blank output line (the ground truth). */
     private String runCapture(Path root, String cmd) {
         try {
-            Process p = Shell.pb(cmd)
-                    .directory(root.toFile()).redirectErrorStream(true).start();
+            Process p = Sandbox.in(root).shell(cmd).redirectErrorStream(true).start();
             String out;
             try (var in = p.getInputStream()) { out = new String(in.readAllBytes()); }
             p.waitFor(30, TimeUnit.SECONDS);

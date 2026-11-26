@@ -1,12 +1,19 @@
 package org.codezaiku.run;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.codezaiku.FamiliarMain;
+import org.codezaiku.loop.FamiliarLoop;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -158,5 +165,34 @@ class RunResultContractTest {
         assertFalse(d.get("filesComplete").asBoolean(),
                 "no ledger and no baseline means the file list is not authoritative");
         assertTrue(d.get("filesSource").asText().contains("no git"), d.get("filesSource").asText());
+    }
+
+    /**
+     * Through a router, who served the run's requests is one field added to the document, {@code servedBy} (provider → requests), and
+     * nothing else in it changes: the same run without the tally gives the document as it was, key for key and value for value; a run
+     * whose answers named nobody has no such field. {@code provider} stays what the caller passed with {@code --provider}.
+     */
+    @Test void namesWhoServedTheRunInOneFieldAndChangesNoOther(@TempDir Path ws) {
+        long[] usage = {412300, 361000, 0, 9800};
+        Map<String, Integer> served = new LinkedHashMap<>();
+        served.put("DeepInfra", 7); served.put("Novita", 2);
+        FamiliarLoop.Result done = new FamiliarLoop.Result(true, "Created mul.py", 8);
+        var withServed = new FamiliarMain.Tracked(done, List.of("mul.py"), true,
+                new FamiliarMain.ModelRun("deepseek", "deepseek/deepseek-v4.1-flash", "openrouter.ai", usage, 0.0412, true, null, served));
+        var without = new FamiliarMain.Tracked(done, List.of("mul.py"), true,
+                new FamiliarMain.ModelRun("deepseek", "deepseek/deepseek-v4.1-flash", "openrouter.ai", usage, 0.0412, true, null));
+        var s = state(ws, "--text", "t", "--provider", "router", "--task-id", "wyrd-7");
+        ObjectNode d = s.document("untested", withServed, false);
+        assertEquals("{\"DeepInfra\":7,\"Novita\":2}", d.get("servedBy").toString(), "provider → requests, the most first");
+        assertEquals("router", d.get("provider").asText(), "the caller's own word stays where it was");
+        ObjectNode before = s.document("untested", without, false);
+        assertFalse(before.has("servedBy"), "no tally, no field: " + before);
+        ObjectNode rest = d.deepCopy(); rest.remove("servedBy");
+        assertEquals(before, rest, "every other key, with its value and shape, is the document as it was");
+        List<String> keys = new ArrayList<>(); d.fieldNames().forEachRemaining(keys::add);
+        List<String> keysBefore = new ArrayList<>(); before.fieldNames().forEachRemaining(keysBefore::add);
+        List<String> added = new ArrayList<>(keys); added.removeAll(keysBefore);
+        assertEquals(List.of("servedBy"), added, "one field is added");
+        assertEquals(keysBefore, keys.subList(0, keysBefore.size()), "after the ones a host already reads, in their order");
     }
 }

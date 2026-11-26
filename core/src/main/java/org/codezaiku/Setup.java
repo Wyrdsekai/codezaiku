@@ -1,8 +1,12 @@
 package org.codezaiku;
 
+import org.codezaiku.tools.WebSearchTool;
+
+import org.codezaiku.drive.DriveClient;
 import org.codezaiku.drive.SavedModels;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -105,12 +109,20 @@ public final class Setup {
             }
             @Override public String chat(String base, String model, String key) {
                 try {
-                    String body = "{\"model\":" + J.writeValueAsString(model) + ",\"max_tokens\":400,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word ready.\"}]}";   // a reasoning model thinks first; 64 tokens left no room for the word
+                    ObjectNode body = J.createObjectNode();
+                    body.put("model", model); body.put("max_tokens", 400);   // a reasoning model thinks first; 64 tokens left no room for the word
+                    body.putArray("messages").addObject().put("role", "user").put("content", "Reply with the single word ready.");
+                    DriveClient.routed(body, base);   // a router is told which providers to leave out, on this hello as on every request of a job
+                    // and when nobody is left to serve the model, the hello is not sent: the person reads which setting allows them, as a job says it
+                    String nobody = DriveClient.nobodyServes(base, model);
+                    if (nobody != null) return "!" + nobody.replaceFirst("\\.$", "");
                     var b = HttpRequest.newBuilder(URI.create(Config.driveBase(base) + "/v1/chat/completions")).timeout(Duration.ofSeconds(120))
-                            .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body));
+                            .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(J.writeValueAsString(body)));
                     if (key != null && !key.isBlank()) b.header("Authorization", "Bearer " + key.strip());
                     HttpResponse<String> r = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
                     if (r.statusCode() != 200) {
+                        String refused = DriveClient.nobodyServes(base, model, r.statusCode(), r.body());   // the router's own word that nobody is left, said as a job says it
+                        if (refused != null) return "!" + refused.replaceFirst("\\.$", "");
                         String said = r.body() == null ? "" : r.body().replaceAll("\\s+", " ").strip();
                         if (said.length() > 160) said = said.substring(0, 160) + "…";
                         return "!the server answered HTTP " + r.statusCode() + (said.isEmpty() ? (r.statusCode() == 404 ? ": it has no chat for this model" : "") : ": " + said);
@@ -118,13 +130,8 @@ public final class Setup {
                     return helloReply(r.body());
                 } catch (Exception e) { return "!" + e.getMessage(); }
             }
-            @Override public boolean searxng(String base) {
-                try {
-                    HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(base.replaceAll("/+$", "") + "/search?q=test&format=json"))
-                            .timeout(Duration.ofSeconds(15)).header("Accept", "application/json").GET().build(), HttpResponse.BodyHandlers.ofString());
-                    return r.statusCode() == 200 && r.body().contains("\"results\"");
-                } catch (Exception e) { return false; }
-            }
+            // without a search: a search for "test" was passed on by the SearXNG to every engine it has (WebSearchTool.searxngCheck)
+            @Override public boolean searxng(String base) { return WebSearchTool.searxngCheck(base).ready(); }
             @Override public boolean brave(String key) {
                 try {
                     HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create("https://api.search.brave.com/res/v1/web/search?q=test&count=1"))
@@ -321,6 +328,8 @@ public final class Setup {
             if (probe.searxng(s)) { Config.set("CODEZAIKU_SEARXNG", s); out.println("   SearXNG answers at " + s + "."); }
             else out.println("   Nothing answered a JSON search at " + s + " (SearXNG needs json in search.formats); not saved.");
         } else if (!s.isBlank()) {
+            // A key can only be tried by a search, which Brave counts: one, said before it is sent, so a mistyped key is found now
+            out.println("   Trying the key with one search (the word \"test\"), which Brave counts against your plan.");
             if (probe.brave(s)) { Config.set("CODEZAIKU_BRAVE_KEY", s); out.println("   Brave Search accepts the key."); }
             else out.println("   Brave Search did not accept that key; not saved.");
         } else out.println("   The built-in fallback it is; `codezaiku config set CODEZAIKU_BRAVE_KEY <key>` any time.");

@@ -110,9 +110,10 @@ the subprocess inherits it — see [MODELS.md](MODELS.md#using-a-hosted-endpoint
 complete may not complete here. Read that before deciding which tasks to route this way.
 
 **Egress is gated by Wyrdsekai, not by CodeZaiku.** Wyrdsekai's coding backends run behind an egress
-gate that is on by default. CodeZaiku does not sandbox itself: it runs commands on the host, bounded
-by timeouts, path scoping and its own guard stack. Those are different guarantees, and the gate is
-the one restricting what a task can reach on the network.
+gate that is on by default. CodeZaiku's own sandbox limits which files a coding job's commands can
+reach (the project folder and the job's own folders, on Linux and macOS); it does not limit the
+network. Those are different guarantees, and the gate is the one restricting what a task can reach on
+the network.
 
 **Git writes are off unless you ask for them.** By default CodeZaiku edits the working tree and does
 not commit. See *Controlling git writes* in

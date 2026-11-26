@@ -21,6 +21,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.Assumptions;
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.StandardCopyOption;
 /**
  * The model server on demand, on all three platforms: the row for the memory, the files an install writes, and the install
  * itself with every seam faked — the platform included, so a Linux host exercises the macOS and Windows paths too.
@@ -176,6 +184,88 @@ class ModelServerTest {
         }
     }
 
+    /** What another program's installer adds to this folder's proxy: an embeddings server beside the model, and the group that keeps it loaded. */
+    private static final String THEIR_ENTRIES = "  \"embed\":\n    cmd: DIR/run-embed.sh ${PORT}\n    cmdStop: docker stop other-embed\n    proxy: http://127.0.0.1:${PORT}\n    ttl: 0\n"
+            + "groups:\n  \"embeddings\":\n    swap: false\n    exclusive: false\n    members: [\"embed\"]\n";
+
+    @Test
+    void anInstallSavedWithAStopCommandThatStopsNothingIsPutRightOnce(@TempDir Path home) throws Exception {
+        String realHome = System.getProperty("user.home");
+        System.setProperty("user.home", home.toString());
+        Config.invalidate();
+        try {
+            List<List<String>> ran = fakeMachine(ModelServer.Os.linux, new boolean[1], new ArrayList<>());
+            Path dir = ModelServer.dir(); Files.createDirectories(dir);
+            Path unit = home.resolve(".config/systemd/user/codezaiku-model.service");
+            var mine = ModelServer.plan(ModelServer.Os.linux, ModelServer.rowFor(16), ModelServer.modelsDir().resolve("gpt-oss-20b-F16.gguf"), dir, unit, "all", 20, false);
+            // the fault as found on a machine both programs set up: this program's start script, and a config another program rewrote with its own container's name
+            Files.writeString(dir.resolve("run.sh"), mine.runScript());
+            String theirs = THEIR_ENTRIES.replace("DIR", dir.toString());
+            Files.writeString(dir.resolve("run-embed.sh"), "#!/bin/sh\nexec docker run --rm --name other-embed image\n");
+            String wrong = mine.configYaml().replace("docker stop " + ModelServer.CONTAINER, "docker stop other-model") + theirs;
+            Files.writeString(dir.resolve("config.yaml"), wrong);
+            Files.createDirectories(unit.getParent()); Files.writeString(unit, mine.unitText());
+            String said = ModelServer.repairStop();
+            assertTrue(said.contains("was never stopped") && !said.startsWith("!"), said);
+            assertEquals(wrong.replace("docker stop other-model", "docker stop " + ModelServer.CONTAINER), Files.readString(dir.resolve("config.yaml")), "that one line and nothing else: the other program's entries stay");
+            assertTrue(ran.contains(List.of("systemctl", "--user", "restart", "codezaiku-model")), "the proxy rereads its config only on a restart: " + ran);
+            assertTrue(ran.contains(List.of("docker", "stop", ModelServer.CONTAINER)), "the model the old command left running is stopped: " + ran);
+            ran.clear();
+            assertEquals("", ModelServer.repairStop(), "once");
+            assertTrue(ran.isEmpty(), ran.toString());
+            // the unit that runs this folder's proxy may be the other program's
+            Files.move(unit, unit.resolveSibling("other-model.service"));
+            assertEquals("other-model", ModelServer.proxyUnit());
+            ModelServer.os = ModelServer.Os.macos;
+            Files.writeString(dir.resolve("config.yaml"), wrong);
+            assertEquals("", ModelServer.repairStop(), "only where the server is a container");
+        } finally {
+            System.setProperty("user.home", realHome);
+            Config.invalidate();
+        }
+    }
+
+    @Test
+    void anInstallKeepsWhatAnotherProgramAddedToTheProxy(@TempDir Path home) throws Exception {
+        String realHome = System.getProperty("user.home");
+        System.setProperty("user.home", home.toString());
+        Config.invalidate();
+        try {
+            fakeMachine(ModelServer.Os.linux, new boolean[1], new ArrayList<>());
+            Path dir = ModelServer.dir(); Files.createDirectories(dir);
+            String theirs = THEIR_ENTRIES.replace("DIR", dir.toString());
+            // a folder another program's installer wrote: its model under its container's name, and its embeddings server beside it
+            Files.writeString(dir.resolve("config.yaml"), "# theirs\nmodels:\n  \"their-model\":\n    cmd: " + dir.resolve("run.sh") + " ${PORT}\n    cmdStop: docker stop other-model\n    ttl: 600\n" + theirs);
+            Files.writeString(dir.resolve("run.sh"), "#!/bin/sh\nexec docker run --rm --name other-model image\n");
+            Files.writeString(dir.resolve("run-embed.sh"), "#!/bin/sh\nexec docker run --rm --name other-embed image\n");
+            assertEquals(theirs, ModelServer.keptEntries(Files.readString(dir.resolve("config.yaml"))), "everything after the first model");
+            assertEquals("", ModelServer.keptEntries("models:\n  \"one\":\n    cmd: x\n    ttl: 1\n"), "a config with one model holds nothing more");
+            // asked for a server of its own (--own), over the folder the other program wrote
+            assertEquals("gpt-oss-20b", ModelServer.install(null, "all", 20, false, true, new PrintStream(new ByteArrayOutputStream(), true)));
+            String y = Files.readString(dir.resolve("config.yaml"));
+            assertTrue(y.contains("\"gpt-oss-20b\":") && !y.contains("their-model"), "the model is this install's: " + y);
+            assertTrue(y.endsWith(theirs), "the embeddings server and its group are kept as they were: " + y);
+            assertTrue(Files.readString(dir.resolve("run.sh")).contains("--name " + ModelServer.CONTAINER) && y.contains("cmdStop: docker stop " + ModelServer.CONTAINER + "\n"), "the start script and the stop command name the same container");
+            assertTrue(y.contains("cmdStop: docker stop other-embed\n"), "and so do the other program's");
+            assertEquals("", ModelServer.repairStop());
+        } finally {
+            System.setProperty("user.home", realHome);
+            Config.invalidate();
+        }
+    }
+
+    @Test
+    void theStatusSaysTheModelIsLoadedOnlyWhenTheModelIs() {
+        // the proxy's list as it stands on a machine where another program runs its embeddings server through the same proxy
+        String onlyEmbed = "{\"running\":[{\"model\":\"embed\",\"state\":\"ready\",\"ttl\":0}]}";
+        String both = "{\"running\":[{\"model\":\"embed\",\"state\":\"ready\"},{\"model\":\"gpt-oss-20b\",\"state\":\"ready\"}]}";
+        assertEquals("no (the memory is free; the next request starts it; the proxy also runs embed, which is not this model)", ModelServer.loadedSaid(onlyEmbed, "gpt-oss-20b"));
+        assertEquals("yes (the memory is in use; the proxy also runs embed, which is not this model)", ModelServer.loadedSaid(both, "gpt-oss-20b"));
+        assertEquals("yes (the memory is in use)", ModelServer.loadedSaid("{\"running\":[{\"model\":\"gpt-oss-20b\"}]}", "gpt-oss-20b"));
+        assertEquals("no (the memory is free; the next request starts it)", ModelServer.loadedSaid("{\"running\":[]}", "gpt-oss-20b"));
+        assertEquals("no (the memory is free; the next request starts it)", ModelServer.loadedSaid(null, "gpt-oss-20b"));
+    }
+
     @Test
     void onMacOsInstallFetchesTheMetalBuildSizesByUnifiedMemoryAndLoadsALaunchAgent(@TempDir Path home) throws Exception {
         String realHome = System.getProperty("user.home");
@@ -268,7 +358,7 @@ class ModelServerTest {
         assertNull(ModelServer.unsupported(), ModelServer.unsupported());
         assertEquals(192, (int) ModelServer.budgetGb(), "what the kernel says is set aside for the card");
         assertEquals("ROCm in Docker", ModelServer.backend());
-        assertTrue(ModelServer.offer().startsWith("Serve qwen3.8-27b on this machine on demand (ROCm in Docker): it downloads once (about 14 GB)"), ModelServer.offer());
+        assertTrue(ModelServer.offer().startsWith("Serve qwen3.8-27b on this machine on demand (ROCm in Docker): it downloads once (about 16 GB)"), ModelServer.offer());
         var p = ModelServer.plan(ModelServer.Os.linux, ModelServer.rowFor(192), tmp.resolve("m.gguf"), tmp, tmp.resolve("u"), "all", 20, false, ModelServer.gpu().build());
         assertTrue(p.runScript().contains("exec docker run --rm --name codezaiku-model --device /dev/kfd --device /dev/dri --group-add video -p 127.0.0.1:$1:8080"), p.runScript());
         assertTrue(p.runScript().contains("ghcr.io/ggml-org/llama.cpp:server-rocm \\\n  -m /m/m.gguf --host 0.0.0.0 --port 8080 --jinja -c 131072 --parallel 4 -ngl 99 --flash-attn on"), p.runScript());
@@ -344,14 +434,38 @@ class ModelServerTest {
     }
 
     @Test
+    void theOfferSaysTheSizeOfTheFileFromItsRowAndAsksNobody() {
+        boolean[] started = {false};
+        List<List<String>> ran = fakeMachine(ModelServer.Os.linux, started, new ArrayList<>());
+        ModelServer.Runner machine = ModelServer.runner;
+        // what doctor runs when no model answers: the machine's own commands answer, and a request for the file's size gets nothing
+        ModelServer.runner = cmd -> cmd.get(0).startsWith("curl") ? new ModelServer.Result(0, "") : machine.run(cmd);
+        String offer = ModelServer.offer();
+        assertTrue(offer.startsWith("Serve gpt-oss-20b on this machine on demand (CUDA in Docker): it downloads once (about 14 GB)"), offer);
+        assertEquals(List.of(), ran.stream().filter(c -> c.get(0).startsWith("curl") || String.join(" ", c).contains("huggingface")).toList(),
+                "nothing is asked of Hugging Face to say how big the file is");
+    }
+
+    /** What curl -sIL -w "\n%{http_code}" prints for a row's file on Hugging Face: its own sha256 and size on the first answer, then 200. */
+    static String hfHead(String sha256, long bytes) {
+        return "HTTP/2 302\nx-repo-commit: 0000\nx-linked-size: " + bytes + "\nx-linked-etag: \"" + sha256 + "\"\n\nHTTP/2 200\ncontent-length: " + bytes + "\n\n200";
+    }
+
+    /** Hugging Face as it is today for every row: the file at each revision and on main is the one pinned. */
+    static ModelServer.Result huggingFaceAsPinned(String url) {
+        for (ModelServer.Row r : ModelServer.ROWS) if (url.equals(r.url()) || url.equals(r.mainUrl())) return new ModelServer.Result(0, hfHead(r.sha256(), r.bytes()));
+        return new ModelServer.Result(0, "200");
+    }
+
+    @Test
     void checkReadsEveryRowAndPinnedBuildAndNamesWhatIsGone() {
         ModelServer.os = ModelServer.Os.linux;
-        ModelServer.runner = cmd -> new ModelServer.Result(0, cmd.get(cmd.size() - 1).contains("gpt-oss") ? "404" : "200");
+        ModelServer.runner = cmd -> { String u = cmd.get(cmd.size() - 1); return u.contains("gpt-oss") ? new ModelServer.Result(0, "404") : huggingFaceAsPinned(u); };
         var out = new ByteArrayOutputStream();
         assertEquals(1, ModelServer.check(new PrintStream(out, true)));
         String o = out.toString();
-        assertTrue(o.contains("GONE 404  https://huggingface.co/unsloth/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-F16.gguf"), o);
-        assertTrue(o.contains("ok   200  https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_M.gguf"), o);
+        assertTrue(o.contains("GONE 404  https://huggingface.co/unsloth/gpt-oss-20b-GGUF/resolve/a1b6de7b9f9540e2e00885ca1a96614a187c9c3a/gpt-oss-20b-F16.gguf"), o);
+        assertTrue(o.contains("ok   200  https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_M.gguf"), o);
         assertTrue(o.contains("llama-swap_255_windows_amd64.zip") && o.contains("llama-b10929-bin-win-vulkan-x64.zip"), o);
         assertTrue(o.contains("1 missing"), o);
     }
@@ -361,12 +475,95 @@ class ModelServerTest {
         ModelServer.os = ModelServer.Os.linux;
         ModelServer.checkBackoffMs = 0;
         var calls = new AtomicInteger();
-        ModelServer.runner = cmd -> { String u = cmd.get(cmd.size() - 1); if (u.contains("gemma-4-E2B")) calls.incrementAndGet(); return new ModelServer.Result(0, u.contains("gemma-4-E2B") ? "429" : "200"); };
+        ModelServer.runner = cmd -> { String u = cmd.get(cmd.size() - 1); if (u.contains("gemma-4-E2B")) calls.incrementAndGet(); return u.contains("gemma-4-E2B") ? new ModelServer.Result(0, "429") : huggingFaceAsPinned(u); };
         var out = new ByteArrayOutputStream();
         assertEquals(0, ModelServer.check(new PrintStream(out, true)), "a 429 is not a missing file: the release gate does not fail on it");
         String o = out.toString();
         assertEquals(3, calls.get(), "asked three times before giving up on the host");
-        assertTrue(o.contains("WAIT 429  https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"), o);
+        assertTrue(o.contains("WAIT 429  https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/0314792d7f1f7e229411f620751375812bb9faf2/gemma-4-E2B-it-Q4_K_M.gguf"), o);
         assertTrue(o.contains("1 not checked") && !o.contains("GONE") && !o.contains(" missing:"), o);
+    }
+
+    @Test
+    void everyFileTheOfferCanNameHasARevisionAHashAndASize() {
+        for (ModelServer.Row r : ModelServer.ROWS) {
+            assertTrue(r.revision().matches("[0-9a-f]{40}"), r.name() + ": a commit, never a branch: " + r.revision());
+            assertTrue(r.sha256().matches("[0-9a-f]{64}"), r.name());
+            assertTrue(r.bytes() > 1_000_000_000L, r.name() + ": " + r.bytes());
+            assertTrue(r.url().equals("https://huggingface.co/" + r.hf() + "/resolve/" + r.revision() + "/" + r.file()), r.url());
+            assertEquals(r.sha256(), ModelServer.sums.get(r.file()), "the download is checked against the row's sha256");
+        }
+        // every amount of memory the offer looks at lands on one of these rows, or on none
+        for (int gb = 0; gb <= 512; gb++) { ModelServer.Row r = ModelServer.rowFor(gb); assertTrue(r == null || ModelServer.ROWS.contains(r)); }
+    }
+
+    @Test
+    void checkComparesEachRowAtItsRevisionAndSaysWhenMainHasMovedOn() {
+        ModelServer.os = ModelServer.Os.linux;
+        ModelServer.Row nine = ModelServer.ROWS.get(2), two = ModelServer.ROWS.get(4);
+        String other = "1bce504dfecd84153666928a41d8a66706f0158d3a317bc5196b72819d7dc529";
+        ModelServer.runner = cmd -> {
+            String u = cmd.get(cmd.size() - 1);
+            if (u.equals(nine.url())) return new ModelServer.Result(0, hfHead(other, nine.bytes()));      // the file at the pinned revision is not the pinned one
+            if (u.equals(two.mainUrl())) return new ModelServer.Result(0, hfHead(other, 3_200_000_000L));   // a newer file on main: said, not a failure
+            return huggingFaceAsPinned(u);
+        };
+        var out = new ByteArrayOutputStream();
+        assertEquals(1, ModelServer.check(new PrintStream(out, true)), "a pinned file that is not the one pinned stops the release");
+        String o = out.toString();
+        assertTrue(o.contains("DIFF 200  " + nine.url() + "  (Hugging Face gives sha256 " + other + ", " + nine.bytes() + " bytes; the row pins sha256 " + nine.sha256()), o);
+        assertTrue(o.contains("note gemma-4-E2B-it-Q4_K_M.gguf on main is now sha256 " + other + " (3200000000 bytes); the row stays at 0314792d7f1f"), o);
+        assertTrue(o.contains("1 changed") && !o.contains("missing"), o);
+
+        // main moved on and nothing else: the gate passes, and says so
+        ModelServer.runner = cmd -> { String u = cmd.get(cmd.size() - 1); return u.equals(two.mainUrl()) ? new ModelServer.Result(0, hfHead(other, 3_200_000_000L)) : huggingFaceAsPinned(u); };
+        out.reset();
+        assertEquals(0, ModelServer.check(new PrintStream(out, true)), out.toString());
+        assertTrue(out.toString().contains("note gemma-4-E2B-it-Q4_K_M.gguf on main is now"), out.toString());
+
+        // Hugging Face says nothing of the file's hash or size: not taken for a match
+        ModelServer.runner = cmd -> new ModelServer.Result(0, "HTTP/2 200\n\n200");
+        out.reset();
+        assertEquals(1, ModelServer.check(new PrintStream(out, true)));
+        assertTrue(out.toString().contains("Hugging Face gives no sha256, no size"), out.toString());
+    }
+
+    @Test
+    void installFetchesTheFileAtItsRevisionAndRefusesOtherBytesBeforeTheyAreInPlace(@TempDir Path home) throws Exception {
+        String realHome = System.getProperty("user.home"), realHf = System.getProperty("codezaiku.huggingface");
+        System.setProperty("user.home", home.toString());
+        Config.invalidate();
+        List<String> asked = new ArrayList<>();
+        HttpServer hf = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        hf.createContext("/", x -> {   // Hugging Face as it was after 2026-11-11 at main: the same name, other bytes
+            asked.add(x.getRequestURI().getPath());
+            byte[] b = "the file re-made under the same name".getBytes(StandardCharsets.UTF_8);
+            x.sendResponseHeaders(200, b.length);
+            try (var o = x.getResponseBody()) { o.write(b); }
+        });
+        hf.start();
+        try {
+            System.setProperty("codezaiku.huggingface", "http://127.0.0.1:" + hf.getAddress().getPort());
+            fakeMachine(ModelServer.Os.linux, new boolean[]{false}, new ArrayList<>());
+            // curl's part: fetch the address into the .part file and move it into place, as the real downloader does; nothing else is reached
+            ModelServer.downloader = (url, dest) -> {
+                if (!url.startsWith("http://127.0.0.1:")) throw new IOException("a test reaches no network: " + url);
+                Path part = dest.resolveSibling(dest.getFileName() + ".part");
+                HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create(url)).GET().build(), HttpResponse.BodyHandlers.ofFile(part));
+                Files.move(part, dest, StandardCopyOption.REPLACE_EXISTING);
+            };
+            ModelServer.Row row = ModelServer.rowFor(16);
+            String r = ModelServer.install(null, "all", 20, false, new PrintStream(new ByteArrayOutputStream(), true));
+            assertEquals(List.of("/" + row.hf() + "/resolve/" + row.revision() + "/" + row.file()), asked, "the address names the row's revision");
+            assertTrue(r.startsWith("!checksum mismatch for " + row.file() + "; refusing to install"), r);
+            assertFalse(Files.exists(ModelServer.modelsDir().resolve(row.file())), "the refused file is not left in place");
+            assertFalse(Files.exists(ModelServer.modelsDir().resolve(row.file() + ".part")));
+            assertFalse(Files.exists(ModelServer.dir().resolve("config.yaml")), "nothing of the install was written");
+        } finally {
+            hf.stop(0);
+            if (realHf == null) System.clearProperty("codezaiku.huggingface"); else System.setProperty("codezaiku.huggingface", realHf);
+            System.setProperty("user.home", realHome);
+            Config.invalidate();
+        }
     }
 }

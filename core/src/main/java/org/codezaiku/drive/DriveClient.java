@@ -18,6 +18,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 import java.io.BufferedReader;
@@ -35,10 +37,14 @@ import org.codezaiku.drive.aws.AwsCredentials;
 import org.codezaiku.drive.anthropic.Claude;
 import org.codezaiku.drive.aws.Bedrock;
 import org.codezaiku.drive.openai.OpenAI;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 /**
  * Thin client over the llama.cpp drive at :8200 (OpenAI-compatible).
  *
@@ -265,6 +271,96 @@ public final class DriveClient {
     /** The array this thread's tokens are counted into now, or null: for a caller that counts a second drive's calls apart and then restores this. */
     public static long[] counting() { return COUNT.get(); }
 
+    /**
+     * What a job's token count cannot hold, kept beside it ({@link #countInto}) and found by it, so every job that counts its tokens has
+     * this too, an overseer's calls counted apart have theirs, and it goes when the count does: who served each request through a router
+     * (provider → requests; through OpenRouter a model is served by one of several providers and the router picks), and how many answers
+     * came without token counts from the server, which are counted as nothing rather than guessed.
+     */
+    private static final class JobTally {
+        final Map<String, Integer> servedBy = new LinkedHashMap<>();
+        int unreported;
+    }
+    private static final Map<long[], JobTally> TALLY = new WeakHashMap<>();
+
+    /** Who served the requests counted into {@code usage} through a router: provider → requests, the most first; empty when no answer named one. */
+    public static Map<String, Integer> servedBy(long[] usage) {
+        if (usage == null) return Map.of();
+        synchronized (TALLY) { JobTally t = TALLY.get(usage); return t == null ? Map.of() : mostFirst(t.servedBy); }
+    }
+
+    /** How many answers counted into {@code usage} came without token counts from the server: their tokens are in no figure. */
+    public static int unreported(long[] usage) {
+        if (usage == null) return 0;
+        synchronized (TALLY) { JobTally t = TALLY.get(usage); return t == null ? 0 : t.unreported; }
+    }
+
+    /** Both, for a record. */
+    public record Tally(Map<String, Integer> servedBy, int unreported) { }
+
+    /** Both, and they begin again: for a count that goes on after its record is written (the chat's, at a change of model). */
+    public static Tally take(long[] usage) {
+        if (usage == null) return new Tally(Map.of(), 0);
+        synchronized (TALLY) { JobTally t = TALLY.remove(usage); return t == null ? new Tally(Map.of(), 0) : new Tally(mostFirst(t.servedBy), t.unreported); }
+    }
+
+    /** This thread's job had an answer without token counts. */
+    private static void unreportedForJob() {
+        long[] job = COUNT.get();
+        if (job != null) synchronized (TALLY) { TALLY.computeIfAbsent(job, k -> new JobTally()).unreported++; }
+    }
+
+    private static Map<String, Integer> mostFirst(Map<String, Integer> tally) {
+        if (tally == null || tally.isEmpty()) return Map.of();
+        List<Map.Entry<String, Integer>> all = new ArrayList<>(tally.entrySet());
+        all.sort(Map.Entry.<String, Integer>comparingByValue().reversed());   // a stable sort: providers with as many requests stay in the order they first served
+        Map<String, Integer> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Integer> e : all) out.put(e.getKey(), e.getValue());
+        return Collections.unmodifiableMap(out);
+    }
+
+    /**
+     * The request header that asks OpenRouter to say how it routed a request. Its documentation ("Router metadata",
+     * openrouter.ai/docs/guides/features/router-metadata, and the API reference of a chat completion, read 2026-11-24): with
+     * {@code X-OpenRouter-Metadata: enabled} the answer carries {@code openrouter_metadata}, and on a stream it comes on the final chunk
+     * before {@code data: [DONE]}; the default is disabled. Without it the documented answer names no provider.
+     */
+    static final String ROUTER_METADATA = "X-OpenRouter-Metadata";
+
+    /** A request bound for the router asks it to say who served it; a request to any other host is left as it is. */
+    private HttpRequest.Builder askWhoServes(HttpRequest.Builder b) { return openRouter() ? b.header(ROUTER_METADATA, "enabled") : b; }
+
+    /**
+     * The provider that served a completion, as the router names it in its answer: the endpoint marked selected among
+     * {@code openrouter_metadata.endpoints.available} (the same page: "The entry with selected: true is the one that served the
+     * request"; its API reference defines {@code EndpointInfo} as provider, model, selected). Null when the answer names none: the
+     * reference's schema of an answer and of a stream's chunk has no other field that names a provider (a {@code provider} at the top
+     * appears only in the streaming page's example of an error), and an answer replayed from the router's cache carries no metadata.
+     * The name is the router's text: kept to one short line of printable characters before it is written anywhere.
+     */
+    static String whoServed(JsonNode answer) {
+        if (answer == null) return null;
+        for (JsonNode e : answer.path("openrouter_metadata").path("endpoints").path("available")) {
+            if (e.path("selected").asBoolean(false)) { String who = providerName(e.path("provider")); if (who != null) return who; }
+        }
+        return null;
+    }
+
+    private static String providerName(JsonNode n) {
+        if (n == null || !n.isTextual()) return null;
+        String s = n.asText().replaceAll("[\\p{Cntrl}\\p{Cf}\\p{Zl}\\p{Zp}]+", " ").replaceAll("\\s+", " ").strip();
+        if (s.length() > 60) s = s.substring(0, 60).strip();
+        return s.isEmpty() ? null : s;
+    }
+
+    /** A request this drive sent to the router was served by {@code who}: counted for the job this thread works for. Nothing for any other host, or no name. */
+    private String served(String who) {
+        if (who == null || !openRouter()) return null;
+        long[] job = COUNT.get();
+        if (job != null) synchronized (TALLY) { TALLY.computeIfAbsent(job, k -> new JobTally()).servedBy.merge(who, 1, Integer::sum); }
+        return who;
+    }
+
     /** Per-request HTTP timeout. Five minutes suits every drive we had — until a 744B with
      *  CPU-resident experts needed 10-20 min per long generation and every call "failed" at
      *  exactly 300s (measured 2026-08-31: 8 identical 5-minute-spaced failures ended the run).
@@ -463,7 +559,10 @@ public final class DriveClient {
     private boolean warmUp() {
         long t0 = System.currentTimeMillis();
         try {
-            String body = "{\"model\":" + json.writeValueAsString(model) + ",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}";
+            ObjectNode one = json.createObjectNode().put("model", model);
+            one.putArray("messages").addObject().put("role", "user").put("content", "hi");
+            one.put("max_tokens", 1);
+            String body = routed(json.writeValueAsString(one));   // a router is told which providers to leave out, on this one token too
             HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions"))).timeout(Duration.ofMinutes(10))
                     .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build();
             HttpResponse<String> resp = send(req);
@@ -540,9 +639,26 @@ public final class DriveClient {
      */
     public static void streamTo(Consumer<String> sink,
                                 Consumer<String> thinking) {
+        streamTo(sink, thinking, null);
+    }
+
+    /**
+     * As above, with who is told when a stream breaks after part of the reply was shown ({@code broken} gets that part): the stream is
+     * a failed call, the reply is asked for again whole, and the part already on the screen is not the answer. Without it nothing is
+     * told, and the part stays as it was shown.
+     */
+    public static void streamTo(Consumer<String> sink, Consumer<String> thinking, Consumer<String> broken) {
         onDelta = sink;
         onThink = sink == null ? null : thinking;
+        onBroken = sink == null ? null : broken;
     }
+    private static volatile Consumer<String> onBroken;
+
+    /**
+     * The server would not take {@code stream_options} (a 4xx that names it): from here this drive's streams go without it, and their
+     * token counts are whatever the server sends of its own accord.
+     */
+    private volatile boolean streamUsageRefused = false;
 
     private static boolean streamingOn() {
         // Off unless asked for, as in ResearchZosho (decided 2026-09-18). The status line says what is happening
@@ -717,23 +833,33 @@ public final class DriveClient {
             // OpenRouter routes a request among providers: only one that takes every field sent (the tools) may get it
             if (openRouter() && tools != null && !tools.isEmpty()) body.putObject("provider").put("require_parameters", true);
         }
+        // the providers a router is to leave out are added where the body is sent (routed), on the plain request and on the stream alike
         body.put("stream", streamingOn());
         try {
             String payload = json.writeValueAsString(body);
             if (streamingOn()) {
-                ObjectNode streamed = chatStreaming(payload);
+                // A stream is asked for its token counts the way OpenAI's API documents it (stream_options.include_usage: one more
+                // chunk before [DONE] with the usage of the whole request), which llama.cpp's server, Ollama, DeepSeek, Gemini and Groq
+                // take as well; OpenRouter takes the field and sends the counts on its last chunk either way. A server that refuses the
+                // field is asked once more without it.
+                if (!streamUsageRefused) body.putObject("stream_options").put("include_usage", true);
+                ObjectNode streamed = chatStreaming(json.writeValueAsString(body));
+                if (streamed == null && streamUsageRefused && body.has("stream_options")) {
+                    body.remove("stream_options");
+                    streamed = chatStreaming(json.writeValueAsString(body));
+                }
                 if (streamed != null) return streamed;
                 // A failed stream falls through to the plain request rather than failing the turn:
                 // streaming is presentation, and presentation must never cost an answer.
                 body.put("stream", false);
+                body.remove("stream_options");
                 payload = json.writeValueAsString(body);
             }
             // Log the REAL outgoing request shape so we never have to infer which knob applied (L11).
             log.info("drive → {} msgs, {} req-chars, max_tokens={}, tools={}, tool_choice={}",
                     messages.size(), payload.length(), maxTokens,
                     tools == null ? 0 : tools.size(), toolChoice);
-            HttpRequest req = chatRequest(callLimit(maxTokens, payload.length()))
-                    .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
+            HttpRequest req = chatRequest(callLimit(maxTokens, payload.length()), payload);
             long sentAt = System.nanoTime();
             // Retry a 5xx: llama.cpp (--jinja) returns HTTP 500 when the MODEL emits a malformed tool call
             // (bad JSON args — an unescaped quote/newline), and that's the model's sampling, not a real
@@ -760,6 +886,7 @@ public final class DriveClient {
                 return chat(messages, tools, maxTokens, wantToolChoice, temperature, noThink);
             }
             if (resp.statusCode() != 200) {
+                notServed(resp.statusCode(), resp.body());   // the router's own word that nobody it may use is left, said in CodeZaiku's words
                 // RECOVERY (A): a 5xx whose body says the MODEL's tool call wouldn't parse is a known
                 // llama.cpp --jinja bug (ggml-org #20359/#22948): the grammar tool-call parser emits/rejects
                 // invalid JSON args for code-ish payloads (mixed quote escaping, unterminated strings),
@@ -792,7 +919,7 @@ public final class DriveClient {
         }
     }
 
-    /** A chat completion taken in: its message handed back, how it ended kept, and what it cost counted. */
+    /** A chat completion taken in: its message handed back, how it ended kept, what it cost counted, and who served it through a router. */
     private ObjectNode accept(JsonNode parsed, String raw) {
         {
             JsonNode msg = parsed.path("choices").path(0).path("message");
@@ -800,45 +927,195 @@ public final class DriveClient {
             if (!msg.isObject()) {
                 throw new IllegalStateException("no choices[0].message in response: " + raw);
             }
-            // Usage, when the server reports it. On a metered drive this line IS the meter:
-            // grep 'usage ←' over a run log and sum. Local llama.cpp reports it too — harmless.
-            JsonNode u = parsed.path("usage");
-            if (u.isObject()) {
-                // a server with a prompt cache (the Claude API) says how much of the prompt it read from the cache and how much it wrote to it
-                long cacheRead = u.path("cache_read_input_tokens").asLong(0), cacheWritten = u.path("cache_creation_input_tokens").asLong(0);
-                log.info("usage ← prompt {} completion {} total {}{}",
-                        u.path("prompt_tokens").asInt(), u.path("completion_tokens").asInt(),
-                        u.path("total_tokens").asInt(),
-                        cacheRead + cacheWritten > 0 ? " (of the prompt: " + cacheRead + " read from the cache, " + cacheWritten + " written to it)" : "");
-                SESSION_CACHE_READ_TOKENS.addAndGet(cacheRead);
-                SESSION_CACHE_WRITTEN_TOKENS.addAndGet(cacheWritten);
-                SESSION_PROMPT_TOKENS.addAndGet(u.path("prompt_tokens").asLong(0));
-                long[] acc = COUNT.get();
-                if (acc != null) {
-                    // an OpenAI-style server says what it read from its cache under prompt_tokens_details
-                    long cached = cacheRead > 0 ? cacheRead : u.path("prompt_tokens_details").path("cached_tokens").asLong(0);
-                    acc[0] += u.path("prompt_tokens").asLong(0); acc[1] += cached; acc[2] += cacheWritten; acc[3] += u.path("completion_tokens").asLong(0);
-                }
-                lastPromptTokens = u.path("prompt_tokens").asInt(0);
-                lastCompletionTokens = u.path("completion_tokens").asInt(0);
-                SESSION_COMPLETION_TOKENS.addAndGet(u.path("completion_tokens").asLong(0));
-                var usageSink = USAGE_SINK.get();
-                if (usageSink != null) {
-                    int total = u.path("total_tokens").asInt(u.path("prompt_tokens").asInt(0) + u.path("completion_tokens").asInt(0));
-                    try { usageSink.accept(total); } catch (RuntimeException e) { log.debug("usage sink failed: {}", e.toString()); }
-                }
-            }
+            // through a router, the provider that answered: counted for the job, and said on the call's line
+            counted(parsed.path("usage"), served(whoServed(parsed)), "answer");
             return (ObjectNode) msg;
         }
     }
 
-    /** The chat request's builder: the endpoint under the drive's root, the credential, and OpenRouter's own headers. */
-    private HttpRequest.Builder chatRequest(Duration timeout) {
+    /**
+     * One answer's tokens, counted the same way whichever path brought the answer (a plain turn, a stream, the recovery of a malformed
+     * call): the log line that is the meter, the session's count (/cost), the job's count (its model line, the ledger, and through the
+     * ledger a saved model's monthly cap), the last call's figures the loop calibrates on, and how full the context is. {@code u}: the
+     * answer's usage object, missing or null when the server sent none. Then nothing is counted for that answer, because no figure is
+     * known and none is guessed: the log line says so, and the job keeps how many such answers it had ({@link #unreported}) so what is
+     * said of its tokens can say they are not all there. {@code who}: the provider that served it through a router, or null.
+     */
+    private void counted(JsonNode u, String who, String what) {
+        String by = who == null ? "" : ", served by " + who;
+        if (u == null || !u.isObject()) {
+            unreportedForJob();
+            log.info("{} ← the model server sent no token counts{}; this answer's tokens are not counted", what, by);
+            return;
+        }
+        // On a metered drive this line IS the meter: grep 'usage ←' over a run log and sum. Local llama.cpp reports it too — harmless.
+        // A server with a prompt cache (the Claude API) says how much of the prompt it read from the cache and how much it wrote to it.
+        long cacheRead = u.path("cache_read_input_tokens").asLong(0), cacheWritten = u.path("cache_creation_input_tokens").asLong(0);
+        log.info("usage ← prompt {} completion {} total {}{}{}",
+                u.path("prompt_tokens").asInt(), u.path("completion_tokens").asInt(),
+                u.path("total_tokens").asInt(),
+                cacheRead + cacheWritten > 0 ? " (of the prompt: " + cacheRead + " read from the cache, " + cacheWritten + " written to it)" : "", by);
+        SESSION_CACHE_READ_TOKENS.addAndGet(cacheRead);
+        SESSION_CACHE_WRITTEN_TOKENS.addAndGet(cacheWritten);
+        SESSION_PROMPT_TOKENS.addAndGet(u.path("prompt_tokens").asLong(0));
+        long[] acc = COUNT.get();
+        if (acc != null) {
+            // an OpenAI-style server says what it read from its cache under prompt_tokens_details
+            long cached = cacheRead > 0 ? cacheRead : u.path("prompt_tokens_details").path("cached_tokens").asLong(0);
+            acc[0] += u.path("prompt_tokens").asLong(0); acc[1] += cached; acc[2] += cacheWritten; acc[3] += u.path("completion_tokens").asLong(0);
+        }
+        lastPromptTokens = u.path("prompt_tokens").asInt(0);
+        lastCompletionTokens = u.path("completion_tokens").asInt(0);
+        SESSION_COMPLETION_TOKENS.addAndGet(u.path("completion_tokens").asLong(0));
+        var usageSink = USAGE_SINK.get();
+        if (usageSink != null) {
+            int total = u.path("total_tokens").asInt(u.path("prompt_tokens").asInt(0) + u.path("completion_tokens").asInt(0));
+            try { usageSink.accept(total); } catch (RuntimeException e) { log.debug("usage sink failed: {}", e.toString()); }
+        }
+    }
+
+    /**
+     * The providers of OpenRouter that get no request of this program: the person's list in {@code CODEZAIKU_OPENROUTER_IGNORE}
+     * (OpenRouter's own provider slugs, commas or spaces between). OpenRouter hands each request to one of the providers that serve the
+     * model, and without a list any of them may get it: the code a job reads goes where the router sends it. Unset: none is left out.
+     */
+    static List<String> openRouterIgnored() { return slugs(Config.get(IGNORE)); }
+
+    /** The person's own list of providers to leave out, as the setting and as a person writes it in {@code codezaiku config set}. */
+    static final String IGNORE = "CODEZAIKU_OPENROUTER_IGNORE", IGNORE_NAME = "openrouter_ignore";
+
+    /** A list of provider slugs as a person writes it: split at commas and spaces, in small letters, each once; what is no slug is left out. */
+    static List<String> slugs(String written) {
+        List<String> out = new ArrayList<>();
+        if (written == null) return out;
+        for (String s : written.toLowerCase(Locale.ROOT).split("[,\\s]+")) if (s.matches("[a-z0-9][a-z0-9._/-]*") && !out.contains(s)) out.add(s);
+        return out;
+    }
+
+    /**
+     * Writes the left-out providers into a body bound for OpenRouter as {@code provider.ignore}, beside what its provider object already
+     * says: the request's own choices stay, and the providers it already named to leave out stay named after these. A provider field
+     * that is no object (a word, a list, a number: no form the router takes) is replaced, so a request never goes without the list.
+     */
+    static void leaveOut(ObjectNode body, List<String> slugs) {
+        if (slugs.isEmpty()) return;
+        ObjectNode provider = body.path("provider").isObject() ? (ObjectNode) body.get("provider") : body.putObject("provider");
+        Set<String> all = new LinkedHashSet<>(slugs);
+        for (JsonNode had : provider.path("ignore")) if (had.isTextual()) all.add(had.asText());
+        ArrayNode ignore = provider.putArray("ignore");
+        all.forEach(ignore::add);
+    }
+
+    /**
+     * Whether a host is the one named: the name itself or a name under it, read without the dot that may end a full name and in small
+     * letters. A name that only ends in the same letters is another host (notopenrouter.ai, my-openrouter.ai). Until this was ported
+     * from ResearchZosho 0.8.1 the test was on the end of the name: a look-alike was taken for the router, and the router written with
+     * its dot (openrouter.ai.) for another host, whose requests then went without the list of providers to leave out.
+     */
+    public static boolean hostIs(String host, String name) {
+        if (host == null || name == null) return false;
+        String h = host.strip().toLowerCase(Locale.ROOT);
+        while (h.endsWith(".")) h = h.substring(0, h.length() - 1);
+        return h.equals(name) || h.endsWith("." + name);
+    }
+
+    /** An address the tests stand in for OpenRouter's (a server on the loopback, taken for the router); null in use. */
+    static volatile String ROUTER_FOR_TESTS;
+
+    /** Whether an address is OpenRouter's, however its host is written. */
+    public static boolean openRouter(String url) {
+        String standIn = ROUTER_FOR_TESTS;
+        if (standIn != null && url != null && url.strip().startsWith(standIn)) return true;
+        return hostIs(hostOf(url), "openrouter.ai");
+    }
+
+    /**
+     * A request's body as it goes to OpenRouter: with the providers left out that are based or running in a place CodeZaiku avoids, or
+     * owned from one ({@link OpenRouterProviders#ignored}), and those the person named ({@code CODEZAIKU_OPENROUTER_IGNORE}), in the
+     * field {@code provider.ignore} (a provider's slug covers each of its variants and regions). Every body this client sends for a
+     * completion passes here, whichever path made it (a turn, its stream, a decision, the recovery of a malformed call, the one token
+     * that loads a model), so no request reaches the router without it. When the router's own list says that nobody else serves the
+     * model, the request is not sent at all ({@link NotServed}). Any other host's body is not read.
+     */
+    String routed(String payload) throws IOException { return routed(baseUrl, payload, model); }
+
+    /** The same for a body a caller writes as text and sends itself, to {@code url}; {@code model} when the body names none. */
+    public static String routed(String url, String payload, String model) throws IOException {
+        if (!openRouter(url)) return payload;
+        JsonNode read;
+        try { read = JSON.readTree(payload); } catch (IOException notJson) { return payload; }
+        if (read == null || !read.isObject()) return payload;   // no request in it (nothing, a list, a word): nothing to add the list to, and this is not the place to fail
+        ObjectNode body = (ObjectNode) read;
+        if (routed(body, url).isEmpty()) return payload;
+        String nobody = nobodyServes(url, body.path("model").asText(model));
+        if (nobody != null) throw new NotServed(nobody);
+        return JSON.writeValueAsString(body);
+    }
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /** The same on a body about to be written, for a router's address: what was left out, by slug (the places' first, then the person's own). */
+    public static List<String> routed(ObjectNode body, String url) {
+        if (!openRouter(url)) return List.of();
+        Set<String> ignore = new LinkedHashSet<>(OpenRouterProviders.ignored());
+        ignore.addAll(openRouterIgnored());
+        if (ignore.isEmpty()) return List.of();
+        List<String> out = List.copyOf(ignore);
+        leaveOut(body, out);
+        return out;
+    }
+
+    /**
+     * The sentence a person reads when every provider that serves {@code model} through the router at {@code url} is left out for the
+     * places avoided, known from the router's own list before anything is sent; null when somebody is left, when who serves it cannot
+     * be read, when no place is avoided, or when the address is no router's.
+     */
+    public static String nobodyServes(String url, String model) {
+        if (!openRouter(url) || OpenRouterProviders.ignored().isEmpty()) return null;
+        OpenRouterProviders.Served served = OpenRouterProviders.served(model);
+        return served.none() ? OpenRouterProviders.noneLeft(served) : null;
+    }
+
+    /**
+     * The same from the router's own answer, when its list could not be read first: its 404 whose words name endpoints or providers
+     * ("All providers have been ignored", pointing at its own settings page), while CodeZaiku asked it to leave some out for the places
+     * avoided. Null for any other answer. The words read are the error's message when the answer has one: a request that asks who
+     * served it ({@link #ROUTER_METADATA}) gets the routing metadata on its errors too, which names endpoints and providers whatever
+     * the error was.
+     */
+    public static String nobodyServes(String url, String model, int status, String body) {
+        if (status != 404 || !openRouter(url) || OpenRouterProviders.ignored().isEmpty() || body == null) return null;
+        String said = body;
+        try { JsonNode m = JSON.readTree(body).path("error").path("message"); if (m.isTextual()) said = m.asText(); } catch (IOException | RuntimeException notJson) { /* the words as they came */ }
+        said = said.toLowerCase(Locale.ROOT);
+        return said.contains("endpoint") || said.contains("provider") ? OpenRouterProviders.noneLeft(new OpenRouterProviders.Served(model, 0, List.of(), 0, false)) : null;
+    }
+
+    /**
+     * The router has nobody to send a request to: every provider that serves the model is in a place CodeZaiku avoids, or owned from
+     * one. The sentence is the person's to read (the chat's reply, a job's end, the result of {@code codezaiku run}), and the request is
+     * never tried again as it is.
+     */
+    public static final class NotServed extends IllegalStateException {
+        public NotServed(String said) { super(said); }
+    }
+
+    /** The router's answer that no provider is left for the request, said as what it is, with the way to allow them. Nothing for any other answer. */
+    void notServed(int status, String body) {
+        String nobody = nobodyServes(baseUrl, model, status, body);
+        if (nobody != null) throw new NotServed(nobody);
+    }
+
+    /**
+     * The chat request: the endpoint under the drive's root, the credential, OpenRouter's own headers, and the body as the router is to
+     * have it, with the providers to leave out ({@link #routed(String)}; {@link NotServed} when nobody is left, and nothing is sent).
+     */
+    private HttpRequest chatRequest(Duration timeout, String payload) throws IOException {
         HttpRequest.Builder rb = auth(HttpRequest.newBuilder(URI.create(Config.v1(baseUrl) + "/chat/completions")))
                 .timeout(timeout)
                 .header("Content-Type", "application/json");
         if (openRouter()) rb.header("HTTP-Referer", "https://codezaiku.org").header("X-Title", "CodeZaiku");
-        return rb;
+        return askWhoServes(rb).POST(HttpRequest.BodyPublishers.ofString(routed(payload))).build();
     }
 
     /** The window assumed for a hosted API that reports none. */
@@ -847,7 +1124,7 @@ public final class DriveClient {
     static final int QUICK_FLOOR = 4096;
 
     /** Whether this drive is OpenRouter, which has its own headers and routing fields. */
-    boolean openRouter() { String h = hostOf(baseUrl); return h != null && h.endsWith("openrouter.ai"); }
+    boolean openRouter() { return openRouter(baseUrl); }
 
     /** Whether this drive is a hosted API on the OpenAI-style path (not Claude's, OpenAI's own or Bedrock, which have clients of their own). */
     /** Tests set this; null reads the address. */
@@ -878,17 +1155,19 @@ public final class DriveClient {
         boolean quick = kw != null && kw.path("enable_thinking").isBoolean() && !kw.path("enable_thinking").asBoolean();
         String h = hostOf(url);
         if (h == null) return body;
+        boolean router = openRouter(url);
+        routed(body, url);   // a router is told which providers to leave out, on a body shaped here for a probe too
         if (quick && templateHost(h)) {
             // a host that runs vLLM hands the field to the model's own template, whose word for no thinking differs by model (DeepSeek's is
             // "thinking"): both are said. Without it a decision through Nebius thought through its whole budget and came back cut (2026-10-16).
             ObjectNode t = body.putObject("chat_template_kwargs"); t.put("enable_thinking", false); t.put("thinking", false);
         }
         if (quick && h.endsWith("api.deepseek.com")) body.putObject("thinking").put("type", "disabled");   // DeepSeek's own API has its own field
-        if (!h.endsWith("openrouter.ai") && body.has("reasoning_effort")) {
+        if (!router && body.has("reasoning_effort")) {
             String e = body.path("reasoning_effort").asText("");
             if (e.equals("on") || e.equals("off")) body.remove("reasoning_effort");   // the switch is OpenRouter's reasoning.enabled; other hosts take an effort only
         }
-        if (h.endsWith("openrouter.ai")) {
+        if (router) {
             Set<String> ok = OpenRouterModels.supportedParameters(body.path("model").asText(""));
             // OpenRouter's word for the effort is reasoning.effort; reasoning_effort is dropped where the model takes neither
             if (body.has("reasoning_effort")) {
@@ -909,7 +1188,7 @@ public final class DriveClient {
             // the thinking counts against the answer's budget on every hosted API, and a model that will not stop thinking (MiniMax M3 through
             // OpenRouter, 2026-10-16: a 1,200-token decision all thinking, the answer cut) must still get its answer out
             if (body.path("max_tokens").asInt(0) < QUICK_FLOOR) body.put("max_tokens", QUICK_FLOOR);
-            if (h.endsWith("openrouter.ai")) {
+            if (router) {
                 // off where the model allows it (OpenRouter's models list says), else as little as it allows
                 if (OpenRouterModels.reasoningMandatory(body.path("model").asText(""))) body.putObject("reasoning").put("effort", "low");
                 else body.putObject("reasoning").put("enabled", false);
@@ -1002,12 +1281,14 @@ public final class DriveClient {
             String payload = json.writeValueAsString(body);
             // the same limit as a working call: on a slow or busy server a long no-thinking answer (a plan) needs more than the
             // fixed five minutes, and a call that ran out of time makes the next one wait twice as long
-            HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
+            HttpRequest req = askWhoServes(auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions"))))
                     .timeout(callLimit(maxTokens, payload.length())).header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
+                    .POST(HttpRequest.BodyPublishers.ofString(routed(payload))).build();
             long sentAt = System.nanoTime();
             HttpResponse<String> resp = send(req);
             if (resp.statusCode() != 200) {
+                String nobody = nobodyServes(baseUrl, model, resp.statusCode(), resp.body());
+                if (nobody != null) { log.warn("classify: {}", nobody); return ""; }
                 log.warn("classify HTTP {}: {}", resp.statusCode(),
                         resp.body().length() > 200 ? resp.body().substring(0, 200) : resp.body());
                 return "";
@@ -1018,7 +1299,11 @@ public final class DriveClient {
             // A decision's tokens are the job's tokens too: counted like a turn's (they were not, so an overseer's plan and reviews, all
             // decisions, had no cost on the model line or in the ledger, 2026-10-18)
             { JsonNode u = parsed.path("usage"); long[] acc = COUNT.get();
-              if (acc != null && u.isObject()) { acc[0] += u.path("prompt_tokens").asLong(0); acc[1] += u.path("prompt_tokens_details").path("cached_tokens").asLong(0); acc[3] += u.path("completion_tokens").asLong(0); } }
+              if (acc != null && u.isObject()) { acc[0] += u.path("prompt_tokens").asLong(0); acc[1] += u.path("prompt_tokens_details").path("cached_tokens").asLong(0); acc[3] += u.path("completion_tokens").asLong(0); }
+              if (!u.isObject()) unreportedForJob(); }   // no figure from the server: nothing counted, and the job knows one is missing
+            // and who served it, through a router: the job's record names the provider of a decision too
+            String who = served(whoServed(parsed));
+            if (who != null) log.info("decision ← served by {}", who);
             noteSpeed(parsed, System.nanoTime() - sentAt);
             String content = msg.path("content").asText("");
             if (content.isBlank()) content = msg.path("reasoning_content").asText("");
@@ -1027,6 +1312,10 @@ public final class DriveClient {
             timeoutsInARow++;
             log.warn("the model server did not finish a no-thinking call within {} s; the next call waits up to {} s", lastCallLimit == null ? "?" : lastCallLimit.toSeconds(),
                     callLimit(driveTimeout(), driveTimeoutMax(), generatedPerSecond, promptPerSecond, maxTokens, 0, timeoutsInARow).toSeconds());
+            return "";
+        } catch (NotServed e) {
+            // nothing was sent: a decision has no answer, and the job's next turn says why in the person's words
+            log.warn("classify: {}", e.getMessage());
             return "";
         } catch (Exception e) {
             log.warn("classify() failed against {}: {}", baseUrl, e.toString());
@@ -1106,15 +1395,18 @@ public final class DriveClient {
             body.put("max_tokens", maxTokens);
             body.put("temperature", 0.7);
             body.put("stream", false);
-            HttpRequest req = auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions")))
+            HttpRequest req = askWhoServes(auth(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/chat/completions"))))
                     .timeout(driveTimeout()).header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
+                    .POST(HttpRequest.BodyPublishers.ofString(routed(json.writeValueAsString(body)))).build();   // with the router's list too: this request went without one before
             HttpResponse<String> resp = send(req);
             if (resp.statusCode() != 200) {
                 log.warn("recovery re-request returned HTTP {} — cannot salvage", resp.statusCode());
                 return null;
             }
-            JsonNode msg = json.readTree(resp.body()).path("choices").path(0).path("message");
+            JsonNode answer = json.readTree(resp.body());
+            // an answer like any other, whether or not a call is salvaged from it: its tokens counted, and through a router who served it
+            counted(answer.path("usage"), served(whoServed(answer)), "recovery");
+            JsonNode msg = answer.path("choices").path(0).path("message");
             String content = msg.path("content").asText("");
             if (content.isBlank()) content = msg.path("reasoning_content").asText("");
             ObjectNode synth = salvageToolCall(content);
@@ -1180,14 +1472,24 @@ public final class DriveClient {
 
     /** {@code idle}: how long the stream may send nothing before it is given up. */
     ObjectNode chatStreaming(String payload, Duration idle) {
-        var sink = onDelta;
-        if (sink == null) return null;
+        var screen = onDelta;
+        if (screen == null) return null;
+        // what this stream put on the screen, so that a stream that breaks can say which part is not the answer
+        StringBuilder shown = new StringBuilder();
+        Consumer<String> sink = piece -> { shown.append(piece); screen.accept(piece); };
         try {
-            HttpRequest req = chatRequest(driveTimeout())
-                    .POST(HttpRequest.BodyPublishers.ofString(payload)).build();
+            HttpRequest req = chatRequest(driveTimeout(), payload);
             HttpResponse<InputStream> resp =
                     http.send(req, HttpResponse.BodyHandlers.ofInputStream());
-            if (resp.statusCode() != 200) return null;
+            if (resp.statusCode() != 200) {
+                String said;
+                try (InputStream in = resp.body()) { said = new String(in.readNBytes(4096), StandardCharsets.UTF_8); }
+                if (resp.statusCode() / 100 == 4 && payload.contains("\"stream_options\"") && said.contains("stream_options")) {
+                    streamUsageRefused = true;
+                    log.info("the model server does not take stream_options (HTTP {}: {}); its streams are asked for without it", resp.statusCode(), said.length() > 160 ? said.substring(0, 160) : said);
+                }
+                return null;
+            }
             // The request timeout ends when the headers arrive; after that a body read waits forever. A stream that
             // sends nothing for a whole drive timeout is dead: the watchdog closes it, the read throws, and the turn
             // falls back to the plain request.
@@ -1215,14 +1517,26 @@ public final class DriveClient {
                 var toolIds = new TreeMap<Integer, String>();
                 var toolArgs = new TreeMap<Integer, StringBuilder>();
                 var summaries = new TreeMap<Integer, SummaryStream>();
+                String streamedBy = null;   // the provider the router names, on its final chunk
+                JsonNode usage = null;      // the token counts, on the last chunk that carries them
+                String finish = "";
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (!line.startsWith("data:")) continue;
                     String data = line.substring(5).strip();
                     lastEvent.set(System.nanoTime());
                     if (data.equals("[DONE]")) { finished = true; break; }
-                    JsonNode choice = json.readTree(data).path("choices").path(0);
-                    if (choice.hasNonNull("finish_reason")) finished = true;
+                    JsonNode chunk = json.readTree(data);
+                    JsonNode choice = chunk.path("choices").path(0);
+                    // A provider that fails after the reply began cannot change the 200 already sent: the error comes as a chunk, with an
+                    // error object at the top and finish_reason "error" (OpenRouter's streaming page). The call failed, as a plain answer
+                    // that carries an error is a failed call; and as every failed stream, it falls back to the plain request.
+                    if (chunk.path("error").isObject() || "error".equals(choice.path("finish_reason").asText("")))
+                        throw new IOException("the model server reported an error in the middle of the reply: " + chunk.path("error").path("message").asText("(no message)"));
+                    String named = whoServed(chunk);
+                    if (named != null) streamedBy = named;
+                    if (chunk.path("usage").isObject()) usage = chunk.path("usage");   // every chunk may carry the field, null until the last
+                    if (choice.hasNonNull("finish_reason")) { finished = true; finish = choice.path("finish_reason").asText(""); }
                     JsonNode delta = choice.path("delta");
                     String piece = delta.path("content").asText(null);
                     if (piece != null && !piece.isEmpty()) {
@@ -1280,13 +1594,22 @@ public final class DriveClient {
                         fn.put("arguments", toolArgs.getOrDefault(idx, new StringBuilder()).toString());
                     });
                 }
+                // taken in once the stream has ended whole, as a plain answer is: how it ended, its tokens counted, who served it. A
+                // stream that fails falls back to a plain request, which is the one counted and served.
+                lastFinishReason = finish;
+                counted(usage, served(streamedBy), "stream");
                 return msg;
             } finally {
                 over.set(true);
                 watchdog.interrupt();
             }
+        } catch (NotServed e) {
+            throw e;   // nothing was sent, and a plain request would not be sent either
         } catch (Exception e) {
             log.warn("streaming failed ({}), falling back to a plain request", e.toString());
+            // part of the reply is on the screen and it is not the answer: whoever shows it is told, before the reply is asked for again
+            var broken = onBroken;
+            if (broken != null && shown.length() > 0) { try { broken.accept(shown.toString()); } catch (RuntimeException ignored) { } }
             return null;
         }
     }

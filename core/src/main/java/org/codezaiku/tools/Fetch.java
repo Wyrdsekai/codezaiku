@@ -81,7 +81,7 @@ public final class Fetch {
     /** The hosts of the library's own services as a test sets them; null outside tests, when they come from the settings. */
     static volatile List<String> ownHostsForTests = null;
 
-    static List<String> ownServiceHosts() {
+    public static List<String> ownServiceHosts() {
         if (ownHostsForTests != null) return ownHostsForTests;
         List<String> out = new ArrayList<>();
         for (String key : new String[]{"CODEZAIKU_DRIVE", "CODEZAIKU_LIBRARIAN_DRIVE", "CODEZAIKU_DELEGATE_DRIVE", "CODEZAIKU_EMBED", "CODEZAIKU_RERANK", "CODEZAIKU_SEARXNG", "CODEZAIKU_JOB_DRIVES"}) {
@@ -99,15 +99,25 @@ public final class Fetch {
         return out;
     }
 
-    /** GET {@code url}, walking redirects with the check at every hop. Throws on refusal or transport failure. */
+    /**
+     * GET {@code url}, walking redirects with the check at every hop. Throws on refusal or transport failure. While a model's tool call
+     * is carried out, the first request has to be a given address, asked in the spelling it was given in, or a service CodeZaiku is
+     * written for ({@link Outbound#check}, which throws {@link Outbound.NotOpened}), and every hop is held to where that request may be
+     * sent on ({@link Outbound#hop}).
+     */
     public static Result get(String url, Duration timeout) throws Exception {
         String current = url;
+        if (Outbound.current() != null) { String as = GivenAddresses.asRequested(url); if (as != null) current = as; }
         // The request timeout covers each hop up to its response headers. The body read after that had no limit: a
         // server that sends one byte a minute held a tool call, and the turn, for as long as it liked. One deadline
         // now covers the whole fetch, every hop and the body.
         final long deadline = System.nanoTime() + totalBudget(timeout).toNanos();
+        Outbound.Way way = null;
+        URI was = null;
         for (int hop = 0; hop <= MAX_HOPS; hop++) {
             URI uri = URI.create(current);
+            way = way == null ? Outbound.check(uri) : Outbound.hop(way, was, uri);
+            was = uri;
             String why = refusal(uri);
             if (why != null) throw new IllegalArgumentException("refused: " + why);
             HttpResponse<InputStream> resp = HTTP.send(HttpRequest.newBuilder(uri)

@@ -66,6 +66,14 @@ tasks.test {
     // short-circuits it, so a test can build a loop offline. No test depends on the resolution
     // itself; anything that did would set its own value.
     environment("CODEZAIKU_CTX", "8192")
+    // Every test runs with a home of its own under the build folder, never the developer's. The tests that change settings swap
+    // user.home for a folder of their own and put it back after, and seven of them then called Config.unset on the drive to make
+    // the next read load the file again: with the real home back, that removed the developer's own drive setting at every run of
+    // the suite (found 2026-11-10, when a setting made in the morning was gone by noon). A test that forgets now changes a file
+    // under the build folder. SuiteHomeTest pins it.
+    val testHome = layout.buildDirectory.dir("test-home").get().asFile
+    doFirst { testHome.mkdirs() }
+    systemProperty("user.home", testHome.path)
     // The research pass before a plan would run inside every multi-step loop test; the test for it switches it on itself.
     environment("CODEZAIKU_RESEARCH_FIRST", "off")
     // No test reaches a library that happens to run on the machine: the bridge is pointed at a port nothing listens on.
@@ -77,9 +85,16 @@ tasks.test {
     // ~/.codezaiku/chat: two test runs had left stores there, with the ops tests' log lines inside them (2026-10-27).
     environment("CODEZAIKU_CHAT_DIR", layout.buildDirectory.dir("test-chat").get().asFile.absolutePath)
     environment("CODEZAIKU_RERANK", "off")
+    // A fallback set in this machine's own config would send a test's job, on a stand-in server that is down on purpose, to the
+    // machine's real model server, which starts its model. The tests of the fallback set one themselves (Fallback.NAMED_FOR_TESTS).
+    environment("CODEZAIKU_FALLBACK", "off")
     // Every shell command a test runs would otherwise make a project environment (a Python venv) for its temporary folder under the
     // real ~/.codezaiku/envs: the first full run after ProjectEnv made seven, 86 MB (2026-09-29). ProjectEnvTest switches it on itself.
     environment("CODEZAIKU_PROJECT_ENV", "off")
+    // The commands the tests run are not sandboxed: on a machine with Landlock or sandbox-exec every one of them would otherwise get
+    // a home, a temp folder and an environment of its own, and the tests written before the sandbox read the machine's. SandboxTest
+    // switches it on for itself.
+    environment("CODEZAIKU_SANDBOX", "off")
     environment("CODEZAIKU_ENRICH", "both")
     // The GPU readers (Gpu) look at an empty kernel tree under the build folder, never this box's /sys and /dev: the build box has an
     // Intel iGPU beside its NVIDIA card, and a test faking "no card" went on to serve on it (2026-10-20). SuiteGpuTest pins it.
@@ -87,6 +102,13 @@ tasks.test {
     doFirst { noSys.mkdirs() }
     systemProperty("codezaiku.sys", noSys.path)
     systemProperty("codezaiku.dev", noSys.path)
+    // OpenRouter's public lists of providers and of who serves a model are read by nobody in the suite: a body bound for the router
+    // gets its list of providers to leave out from the copy that ships (OpenRouterProviders). The tests of it stand in each reading.
+    systemProperty("codezaiku.openrouter.lists", "off")
+    // Nor does any test ask GitHub for the latest release: a chat's banner and doctor start the update check, and the suite points
+    // GitHub's API at a port nothing listens on (until 2026-11-26 the suite's home held a codezaiku-latest.txt that came from GitHub).
+    // The tests of the check stand GitHub in themselves (UpdateCheckTest).
+    systemProperty("codezaiku.github.api", "http://127.0.0.1:9")
 }
 
 application {

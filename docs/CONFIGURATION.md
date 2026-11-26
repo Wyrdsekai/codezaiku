@@ -71,7 +71,7 @@ Two details that matter if you are wiring this up:
 | `CODEZAIKU_API_KEY` | unset | Credential for the model endpoint, sent as `Authorization: Bearer <key>` on every request including the health probe (the Claude API gets it in its own `x-api-key` header). Needed by most hosted providers; leave unset for a local llama.cpp or Ollama, which want no header. Accepts the key bare or already prefixed with `Bearer `. `codezaiku config list` reports whether it is set, never its value. |
 | `CODEZAIKU_SARIF` | unset | Path to write findings as **SARIF 2.1.0**. Off unless set. Upload it to GitHub code scanning and findings appear on the pull request; DefectDojo, the VS Code SARIF viewer and most vulnerability managers ingest the same file. Unanchored findings are written without a line region rather than at a guessed line. |
 | `CODEZAIKU_REVIEW_PASSES` | `1` | How many independent passes `review` makes before merging findings. Raising it trades time for recall by unioning repeated passes: roughly a third of PRs yield findings on some runs and not others. It also multiplies false positives and costs N× the model time — hence off by default. Capped at 5. See LIMITATIONS.md for the measured figures. |
-| `CODEZAIKU_SEARXNG` | `http://localhost:8888` | Search backend for the research surface. Needs `json` in its `search.formats` — it is off by default in SearXNG. |
+| `CODEZAIKU_SEARXNG` | `http://localhost:8888` | Search backend for the research surface. Needs `json` in its `search.formats` — it is off by default in SearXNG. `doctor` and `setup` check it without searching: a search with no words, which SearXNG answers with "No query" in JSON when its JSON output is on, and its `/config`, for its version and the engines a plain search uses. No engine is asked, and no key is sent. |
 | `CODEZAIKU_OPS_AUTHORITY` | `propose` | Highest rung the operator may act at: `observe` < `localize` < `propose` < `guarded` < `unattended`. Start at `propose`. |
 | `CODEZAIKU_OPS_HALT` | unset | Set to `on` to force everything to `observe`. The kill switch. |
 | `CODEZAIKU_OPS_ROLLBACK` | `on` | Snapshot before a destructive fix and restore if verification fails. Leave it on. |
@@ -135,7 +135,7 @@ export CODEZAIKU_OPS_AUDIT=$HOME/.codezaiku/audit.jsonl
 | `CODEZAIKU_RESEARCH_POOL` | `~/.codezaiku/research/findings.jsonl` | Accumulated findings. **Use a separate pool per experiment arm** — a shared pool carries one arm's findings into another and invalidates the comparison. |
 | `CODEZAIKU_LIBRARIAN_URL` | `http://127.0.0.1:4649` | Where ResearchZosho's daemon answers. The chat pushes what the library holds into each turn, `/librarian` asks it, `/research go` files runs with it. Without a daemon, none of that happens and the research memory is what you have. `CODEZAIKU_LIBRARIAN_PORT` changes only the port. |
 | `CODEZAIKU_LIBRARIAN_TOKEN` | — | A write token for the daemon, needed to file research runs from the chat. `codezaiku install researchzosho` makes one; by hand: `researchzosho reader token did:key:local-codezaiku` after `researchzosho reader allow did:key:local-codezaiku write codezaiku`. |
-| `CODEZAIKU_UPDATE` | `check` | `check`: `doctor` and the chat say when a newer CodeZaiku is released. `auto`: a chat swaps a newer release in at its start, for the next start (tarball installs on Linux and macOS; a Debian install uses apt). `off`. `codezaiku update now` does it by hand. This setting is CodeZaiku's alone: ResearchZosho has its own, `RESEARCHZOSHO_UPDATE`, and its own service updates it. |
+| `CODEZAIKU_UPDATE` | `check` | `check`: `doctor` and the chat say when a newer CodeZaiku is released. To know, they ask GitHub's API for CodeZaiku's latest release, at most once a day: one request to `api.github.com`, which carries CodeZaiku's version as its client name (`CodeZaiku/<version>`) and nothing else, sent when `doctor` runs or a chat starts (in the web app, when a project's chat page opens); the answer is kept in `~/.codezaiku/codezaiku-latest.txt`. Where ResearchZosho is installed (its `researchzosho` command is on the PATH or where its installer puts it), they ask for its latest release the same way. `auto`: the same requests, and a chat swaps a newer release in at its start, for the next start; the web app, left running, asks once a day at a quiet moment and does the same (tarball installs on Linux and macOS; a Debian install uses apt). The new release is downloaded from GitHub with its `SHA256SUMS`. `off`: CodeZaiku asks GitHub nothing by itself, and `doctor` and the chat say nothing about new releases; `codezaiku config set update off` sets it. In every mode, `codezaiku update` asks GitHub for the latest release when you run it, and `codezaiku update now` downloads it. This setting is CodeZaiku's alone: ResearchZosho has its own, `RESEARCHZOSHO_UPDATE`, and its own service updates it. |
 | `CODEZAIKU_GAPREFLECT` | on | Gap-reflection loop. Measured *unproven* (see LIMITATIONS.md); left on because it shows no harm. |
 
 ## Driving CodeZaiku from another program
@@ -159,6 +159,51 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 | `CODEZAIKU_READ_CAP` | `12000` | Chars a single `read_file` may return. Above it the tool returns the file's first lines for structure and asks the model to `grep -n` then read a range. **Measured, not guessed**: against a 30k cap this was ~24% cheaper in tokens at identical task success, because a large file enters the conversation once and is then re-sent on every later turn. See LIMITATIONS.md. |
 | `CODEZAIKU_FAMILIAR_MEMORY_DIR` | `~/.codezaiku/familiar-memory` | Where per-project conventions are kept. |
 | `CODEZAIKU_OCEAN_DIR` | auto | Location of the knowledge library's search index (Lucene, words only; no embedding model). |
+| `CODEZAIKU_GIT_PUSH` | off | What `code`, `run`, MCP and ACP jobs may do with the project's remotes (over ACP the client is asked as well, each time). `off`: no git tools. `read`: fetch and read pull requests. A list of repositories, `host/owner/name` with `*` for the owner or the name: also push to them and open pull requests there, never a force push: `codezaiku config set git.push "github.com/me/proj, github.com/me/*"`. The chat asks you every time whatever this says. See "Push, fetch and pull requests" in [SECURITY.md](../SECURITY.md). |
+
+## Sandbox
+
+The commands a coding job runs (the shell tool, the project's tests and checks, git, language servers, a weights
+workspace's Python) run in an operating-system sandbox: Landlock on Linux 5.13 and later, `sandbox-exec` on macOS.
+A command reads and writes the project folder and the job's own folders, reads the system's folders and the
+toolchains found on `PATH`, and gets "permission denied" for the rest of the machine's files, your home folder
+included. `codezaiku doctor` says which sandbox the machine has, and every job says it in its first lines.
+
+Each project gets a home, a temp folder and package caches of its own under `~/.codezaiku/envs/`, so `~/.gradle`,
+`~/.m2`, `~/.npm`, pip's and cargo's caches are not read. The first build of a project therefore downloads its
+build tool and dependencies again (a Gradle wrapper build with JUnit: 167 MB and 9 seconds on a fast line; 1 second
+after that). Set `CODEZAIKU_SANDBOX_CACHE` to share one cache folder between projects.
+
+Variables whose names look like credentials (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*PASSWORD*`, cloud credentials) or
+whose values look like one are not passed to a sandboxed command; nor are the addresses of your session's services
+(the SSH agent, the session bus, `DOCKER_HOST`) or CodeZaiku's own settings. Of your git settings a command gets your
+name and address (`user.name`, `user.email`, the project's own first), so `git commit` works, also in git's
+`GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, so a command's own `-c user.name=…` does not change who a commit is by;
+nothing else of them. No credential helper is asked from inside, the system's included (on a Mac, the keychain's, which
+Apple's git names): a command has no credential to give or to get. Pushing, fetching and pull requests are done by
+CodeZaiku itself, with your own settings and credentials: see `CODEZAIKU_GIT_PUSH`.
+
+Where the machine has no sandbox (Windows outside WSL2, a kernel without Landlock, `CODEZAIKU_SANDBOX=off`), a job
+on a local model runs its commands unsandboxed and says so; a job on a hosted model runs no commands: the shell and
+the other tools that run a program are not offered, and the first lines say why and what to do. On Windows, run
+CodeZaiku inside WSL2 to have the sandbox.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `CODEZAIKU_SANDBOX` | on | `off` runs commands unsandboxed. A job on a hosted model then runs none. |
+| `CODEZAIKU_SANDBOX_CACHE` | unset | A folder for the package caches of every project's sandbox (Gradle, Maven, npm, yarn, pip, cargo, Go modules). Unset, each project keeps its own. |
+| `CODEZAIKU_SANDBOX_ENV` | unset | Names of variables to pass although they look like credentials, comma-separated: `NPM_TOKEN,GH_TOKEN`. |
+| `CODEZAIKU_SANDBOX_READ` | unset | More folders a command may read, comma-separated: a toolchain the rules did not find, a data folder. `/proc` here opens the machine's process list, which `ps`, a program built with the address sanitizer and Node's `process.memoryUsage()` need. |
+| `CODEZAIKU_SANDBOX_WRITE` | unset | More folders a command may read and write. |
+| `CODEZAIKU_SANDBOX_SOCKETS` | closed | Linux. Closed, a command cannot create a UNIX-domain socket, which keeps it from the Docker socket, the desktop session's bus and anything else that listens on a socket file. Python 3.14's process pools and `multiprocessing.Manager` need one: `open` allows them, and those services are then reachable. On macOS a command may use socket files inside its own folders only. |
+| `CODEZAIKU_SANDBOX_NETWORK` | auto | Linux and macOS. `auto`: on a hosted model a command has no network of its own and reaches the package registries and the hosts you named through CodeZaiku, which writes down every try; on a local model the network is as before. `closed` and `open` do one or the other whatever the model. On macOS a closed network still reaches this Mac's own services. See "A job's commands and the network" in [SECURITY.md](../SECURITY.md). |
+| `CODEZAIKU_SANDBOX_HOSTS` | unset | Hosts a command may reach where its network is closed, comma-separated: `github.com`, `api.example.org:8443`, `*.example.net`. A host alone means ports 443 and 80. In the chat a yes to the question about a refused host lets it in until the chat ends. |
+| `CODEZAIKU_SANDBOX_LISTEN` | open | macOS, where a command's network is closed. `open`: a command may start a server, so a project's tests that start one work, and while it listens on every address it can be reached from your network. `closed`: a command may not listen for connections, which shuts that door; a test that starts a server and a Gradle build then fail. On Linux a server a command starts is reached only by the project's other commands, whatever this says. |
+
+What the sandbox does not limit: the network on a local model (a command can reach the internet and services on this
+machine's ports; `sandbox.network closed` closes it), this Mac's own services on macOS even with the network closed, and
+the names of files outside the project on Linux (a command can test whether a path exists, not list a folder or read a
+file). See [LIMITATIONS.md](LIMITATIONS.md).
 
 ## Remote and container targets
 
@@ -174,14 +219,14 @@ See **[DEPLOYING_AS_A_BACKEND.md](DEPLOYING_AS_A_BACKEND.md)** for the full cont
 | key | what it does |
 |---|---|
 | `CODEZAIKU_CHAT_MODE` | Default consent mode for `chat`: `plan` · `ask` (default) · `auto-edit` · `yolo`. |
-| `CODEZAIKU_CHAT_MAX_TURNS` | Loop-turn cap per chat turn for unattended runs; `0` = unlimited (the default — interactively, YOU are the cap). |
+| `CODEZAIKU_CHAT_MAX_TURNS` | Loop-turn cap per chat turn for unattended runs; `0` = unlimited (the default — interactively, YOU are the cap). Either way, a turn ends when the model has answered three times in a row in words without calling a tool, and the chat shows what it said: CodeZaiku asks for a tool call, and a model server that does not hold the model to that would otherwise be asked again and again. |
 | `CODEZAIKU_CHAT_DIR` | Where sessions, project memory and the undo journal live (default `~/.codezaiku/chat`). |
 | `CODEZAIKU_UNDO_DEPTH` | How many agent steps `/undo` can walk back (default 10, or the turn cap if higher). |
 | `CODEZAIKU_SEARXNG` | SearXNG endpoint for `web_search`. Setting it (or the Brave key) is what puts web tools into chat. |
 | `CODEZAIKU_SERPER_KEY` | Serper key (serper.dev): Google's own results, used first for web search when set. Paid per search after the free credits, about a tenth of a cent each; a research run makes tens of searches. Google releases only the top three links of a search at once since 2026-10-30; the rest are asked for with Serper's free second call, and an address still unreleased is shown as a Google redirect with the site's readable name. |
 | `CODEZAIKU_SERPAPI_KEY` | SerpApi key (serpapi.com): Google's own results, used first when set and no Serper key is. Paid per search after the free hundred a month, about one and a half cents each; most addresses come as Google's unreleased redirects today, so Serper is the better key. |
 | `CODEZAIKU_FIRECRAWL_KEY` | Firecrawl key (firecrawl.dev): a page a plain fetch cannot read, built by scripts, a bot wall or a 403, is read through Firecrawl's browser instead and the source line says so. Paid per page after the free credits, at most twenty pages a run. |
-| `CODEZAIKU_BRAVE_KEY` | Brave Search API key — the search backend after a Google key when one is set, before SearXNG; SearXNG is the fallback on any failure. |
+| `CODEZAIKU_BRAVE_KEY` | Brave Search API key — the search backend after a Google key when one is set, before SearXNG; SearXNG is the fallback on any failure. A key given to `setup` is tried with one search for the word "test", which Brave counts against your plan; setup says so before it sends it. `doctor` only looks whether a key is set. |
 
 Every search and every page read through a service is counted, by month and by service, with the credits the paid ones charge, in `search-tally.json` in the settings folder; `codezaiku doctor` says what the month cost so far ("This month, 2026-10: 123 searches through Serper, 123 credits; 40 through Brave; 12 pages through Firecrawl, 12 credits.").
 | `CODEZAIKU_FALLBACK_SEARCH` | `on` — when neither Brave nor SearXNG answers, `web_search` uses Wikipedia plus Crossref and OpenAlex (reference pages and papers by DOI). `off` disables it. `scholar_search`, the literature by DOI, is offered in every research run regardless. |
@@ -189,8 +234,9 @@ Every search and every page read through a service is counted, by month and by s
 | `CODEZAIKU_FETCH_MAX_BYTES` | The largest document `web_fetch` reads (default 25 MB); the body and its decompression are capped. |
 | `CODEZAIKU_RESEARCH_WORKERS` / `_WORKER_TURNS` / `_ROUNDS` | Fan-out research: parallel sub-researchers (4), their turn budget (14), critic rounds (2). |
 | `CODEZAIKU_DELEGATE_DRIVE` / `CODEZAIKU_DELEGATE_MODEL` | Sub-agents from `delegate` run HERE instead of the chat's drive — frontier judgment, local labor. |
-| `CODEZAIKU_STREAM` | Unset: the chat shows the whole reply when it is ready (the default). `on`: the reply as it is written. `all`: also the model's thinking, dimmed. |
+| `CODEZAIKU_STREAM` | Unset: the chat shows the whole reply when it is ready (the default). `on`: the reply as it is written. `all`: also the model's thinking, dimmed. A streamed reply's tokens are counted as a whole reply's are. A reply that breaks off part-way is marked where it broke and asked for again whole. |
 | `CODEZAIKU_MCP_SERVERS` | `name=command;name2=command2` — spawns MCP stdio servers whose tools join chat as `mcp_<server>_<tool>`, consent-gated per call. |
+| `CODEZAIKU_MCP_LINKS` | The MCP servers, by name, whose answers' web addresses the model may open: `codezaiku config set mcp.links "search, docs"`. Unset, no server's are; see SECURITY.md, "Other MCP servers". |
 | `CODEZAIKU_MCP_TIMEOUT_SECONDS` | How long a call to an MCP server waits with no answer and no progress notification. Default 60. |
 | `CODEZAIKU_ACP_MCP_MAX_TOOLS` | How many tools the MCP servers an ACP client passes may add to a session. Default 40. |
 | `CODEZAIKU_V1_PORT` | Port for `codezaiku v1` (default 7071). |
@@ -209,7 +255,12 @@ Every search and every page read through a service is counted, by month and by s
 | `CODEZAIKU_THINKING_BUDGET` | The most tokens a model may think before each reply, for a server that takes such a limit (llama.cpp's `thinking_budget_tokens`). The thinking ends there and the reply goes on. Unset: no limit. |
 | `model.<name>.url` / `.id` / `.prices` / `.effort` / `.cap` / `.note` | A saved model (0.3.13), written by `codezaiku model add <name> <address> [<id>] [--prices in/out[/cache]] [--effort e] [--cap dollars] [--note text]` and chosen per job with `--model <name>`. `url` is the address (a host word becomes one), `id` the model id the server selects by, `prices` dollars per million tokens, `effort` the model's own level, `cap` dollars a month after which a job on it is refused. The drive and model settings are the saved model called `default`. |
 | `auto` / `auto.wait_minutes` / `auto.max_dollars` / `auto.local_only` | Best judgement (0.3.13). `auto` is on by default: with a second model saved, a job that names no model is given to the saved model that clears its tier and the wait at the lowest price, and the pick is printed with its reasoning. `auto.wait_minutes` (5) is the wait accepted for a job somebody is waiting for; `auto.max_dollars` caps a job's estimated cost; `auto.local_only` keeps every job on local models. A project with the file `.codezaiku/private` in it (`codezaiku model private <dir> on`) is read by local models only. `model.<name>.tier` (A, B, C) overrides the measured default for the model's family. |
+| `fallback` | The saved model a job runs on when the one it would run on does not answer or is busy: `codezaiku config set fallback local`. Checked once at the start of a `code`, `run`, `review`, `research` or `decompose` job and of a chat, and only when this is set. Busy means a llama.cpp server with every slot working; behind llama-swap only a model already loaded is asked, so the check never starts one. A hosted API is not asked. The fallback may be a weaker model: a line before the work names the one that runs. Unset or `off`: no check. See [MODELS.md](MODELS.md). |
+| `CODEZAIKU_MODEL_NETWORK` | Whether the model server `codezaiku model serve install` sets up on Linux can reach the network. Unset or `closed`: its container has no way out to the network, which the install tries before it finishes; where that does not hold on the machine, the install sets it up the earlier way and says why. `open`: the earlier way, for a model server that has to reach a network: `codezaiku config set model_network open`, then `codezaiku model serve install`. `codezaiku model serve status` says which way it is set up. ResearchZosho has the same setting under the same name. See "A model on your own machine" in [SECURITY.md](../SECURITY.md). |
 | `key.<host>` | The key for one host, written by `codezaiku model key <host> …` (`key.openrouter.ai`, `key.api.anthropic.com`): sent to that host and to no other. A host with no key of its own gets `CODEZAIKU_API_KEY`. |
+| `CODEZAIKU_AVOID_PLACES` | The places whose providers never serve a model reached through OpenRouter, as country codes with commas between them: `codezaiku config set avoid_places "CN, HK, MO"`. Unset: `CN, HK, MO, CU, IR, KP, RU, VE` (China with Hong Kong and Macau, Cuba, Iran, North Korea, Russia, Venezuela), the countries of concern of the United States Department of Justice's data security rule (28 CFR 202.601, in effect since 2025-04-08). `none`: no place. Every request to OpenRouter leaves out the providers that OpenRouter's own list says are based or run there; when none is left for a model, nothing is sent and the job says so. See [SECURITY.md](../SECURITY.md). |
+| `CODEZAIKU_AVOID_BY_OWNER` | Whether a provider owned by a company based in an avoided place is left out too, whatever place it states for itself (a Singapore-registered arm of a company based in mainland China, for one). The owners come from a dated table that ships with the program, each row with its public source. `on` unless set; `off` lets those providers serve. |
+| `CODEZAIKU_OPENROUTER_IGNORE` | More OpenRouter providers to leave out of every request, by OpenRouter's own names for them, with commas or spaces between: `codezaiku config set openrouter_ignore "fireworks, together"`. Unset: none besides the places'. |
 | `CODEZAIKU_CTX` | Force the context window when a server does not report one (`/v1/models` `context_length` is read automatically). On the Claude API the default is the model's own window, and at most 200,000 tokens. |
 
 A hosted drive is just `CODEZAIKU_DRIVE=https://api.anthropic.com` (no path) plus

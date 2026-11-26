@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.20
+
+What's new: a sandbox for the commands a coding job runs, leak protection for hosted models, an avoid list for hosted providers, a fallback model, and bug fixes for the browser chat and for counting cost.
+
+### New
+
+- Sandbox (Linux, macOS): the commands a coding job runs are held to the project folder by the operating system.
+- Leak protection: on a hosted model, a job's commands have no network of their own. They reach the package registries (PyPI, npm, Maven, Gradle, crates.io, Go) and the hosts you name, and CodeZaiku writes down every one.
+- Leak protection: CodeZaiku opens only web addresses you gave it or that a search or a page returned, and the browser chat's pages load nothing from outside.
+- Leak protection: what a job writes into your project's own git settings and hooks is put back after the command. The chat asks whether you want to keep it.
+- Leak protection (Linux): `codezaiku model serve install` sets the model on your machine up so that nothing can leave your machine through it. Run it again to change an install you already have; `model serve status` says which you have.
+- Push, fetch and pull requests: CodeZaiku does them itself, with your own git login. In the chat it asks before every push.
+- Avoid list: on OpenRouter, a model is not served by providers based in, or owned from, the countries on the avoid list (SECURITY.md has the list). `codezaiku model list` shows how each model is served, and a job's record names the providers that served it.
+- A fallback model: `codezaiku config set fallback local`. A job whose model does not answer, or is busy, runs on the fallback and says so.
+- A uv or Gradle project still builds on a hosted model: CodeZaiku fetches the Python or Gradle the project asks for before the job starts.
+- SECURITY.md has a new section, "What leaves your machine": what CodeZaiku sends out and to whom, measured on real runs.
+
+### Bug fixes
+
+- Chat in the browser: a link in a model's reply could make the page load a picture from another site. It no longer can. If you use the chat in the browser, update.
+- Cost: when the chat showed a reply as it was written, its tokens and cost were not counted. They now count in `/cost`, in what a job cost and against a model's monthly limit.
+- Chat: a reply that broke off part-way was taken for the whole reply. The chat now marks where it stopped and shows the whole reply once it comes.
+- Review: findings a model made in its last turns were not recorded.
+- `model serve status` said the model was loaded when another program's model was.
+- Beside ResearchZosho: an idle model could stay loaded on the graphics card, and `model serve uninstall` deleted ResearchZosho's files in the model folder. Both now touch only what CodeZaiku installed.
+- Search: a model could choose the search engine through its search words.
+- Update check: with `CODEZAIKU_UPDATE=off`, `doctor` and the chat still asked GitHub once a day for the latest version. With `off`, CodeZaiku now asks nothing unless you run `codezaiku update`.
+- Update check: CodeZaiku asked GitHub about ResearchZosho even when ResearchZosho was not installed. It now asks only when it is.
+- Chat: when a model kept answering without acting, the chat asked it again without end, and on a paid model every ask costs. The turn now ends after three such answers and shows what the model said.
+- Model on your machine: since 11 November, `codezaiku model serve install` on a machine with 24 GB or more for the model downloaded 16.5 GB and then refused it ("checksum mismatch"), because the file had been replaced upstream under the same name. Each model is now downloaded at the version it was measured at. If this happened to you, update and run `codezaiku model serve install` again; the refused file was not kept.
+- Doctor and setup: checking your SearXNG made it search for "probe" or "test" on every engine it uses, and `doctor` sent the key in `CODEZAIKU_API_KEY` along with that request. They now check it without a search and send no key. If your SearXNG runs on another machine and you keep a key in `CODEZAIKU_API_KEY`, replace that key.
+- Doctor: with no model answering, `codezaiku doctor` asked Hugging Face for the size of the model it offers. It now knows the size and asks nothing.
+- Chat: a turn that ended without the model finishing it said "done" in its last line. It now says "ended".
+
 ## 0.3.19
 
 What's new: A safety fix for the chat in the browser, and the web app updates itself too.

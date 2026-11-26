@@ -45,7 +45,10 @@ public final class ReportFindingTool implements Tool {
     /** Everything reported this run, in call order. */
     public List<ReviewReport.Finding> findings() { return List.copyOf(findings); }
 
-    @Override public String name() { return "report_finding"; }
+    /** The tool's name: a review's closing turns offer it and the finishing tool alone ({@code FamiliarLoop}). */
+    public static final String NAME = "report_finding";
+
+    @Override public String name() { return NAME; }
 
     @Override public String description() {
         return "Report ONE defect you found. Call this once per defect, as soon as you find it. "

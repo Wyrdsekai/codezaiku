@@ -127,6 +127,8 @@ public final class RunVerb {
         volatile FamiliarMain.Tracked tracked;
         volatile String error;
         volatile ProjectTests.Verdict verdict;
+        /** When the run began: the network's refused tries are those of its commands from then on. */
+        final long startedAt = System.currentTimeMillis();
 
         State(Args a, Path workspace, PrintStream out) {
             this.a = a;
@@ -181,6 +183,10 @@ public final class RunVerb {
                     .host(t != null && t.run() != null ? t.run().host() : null)
                     .usage(t != null && t.run() != null ? t.run().usage() : null)
                     .cost(t != null && t.run() != null && t.run().priced() ? t.run().cost() : null)
+                    .servedBy(t != null && t.run() != null ? t.run().servedBy() : null)
+                    .networkRefused(ResultDocument.refusedSince(workspace, startedAt))
+                    .git(ResultDocument.gitSince(workspace, startedAt))
+                    .gitPutBack(ResultDocument.putBackSince(workspace, startedAt))
                     .verdict(verdict)
                     .build();
         }

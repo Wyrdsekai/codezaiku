@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import org.codezaiku.exec.Sandbox;
 import org.codezaiku.exec.Shell;
 
 /**
@@ -47,8 +48,7 @@ public final class BehaviorDoorGate implements Gate {
         int total = spec.claims().size();
         try {
             log.info("gate[{}] booting on free port {} : {}", spec.name(), port, cmd);
-            proc = Shell.pb(cmd)
-                    .directory(projectRoot.toFile())
+            proc = Sandbox.in(projectRoot).shell(cmd)
                     .redirectErrorStream(true)
                     .start();
             drainAsync(proc, bootLog);
@@ -155,9 +155,7 @@ public final class BehaviorDoorGate implements Gate {
     /** Derive a real-input ground-truth at gate-time (run in the project) — first non-blank output line. */
     private String runCapture(String cmd) {
         try {
-            Process p = Shell.pb(cmd)
-                    .directory((certifyRoot == null ? Path.of(".") : certifyRoot).toFile())
-                    .redirectErrorStream(true).start();
+            Process p = Sandbox.in(certifyRoot).shell(cmd).redirectErrorStream(true).start();
             String out;
             try (var in = p.getInputStream()) { out = new String(in.readAllBytes()); }
             p.waitFor(30, TimeUnit.SECONDS);

@@ -53,7 +53,68 @@ public final class PathScope {
         // root itself is reached through a symlink the comparison must already be canonical or every
         // resolved path looks like an escape.
         this.root = realOf(root.toAbsolutePath().normalize());
+        Job running = Job.RUNNING.get();
+        this.job = running != null ? running : new Job();
     }
+
+    // ---- the job: when it began, and what it wrote -----------------------------------------------
+    /**
+     * A job, for what its files may give ({@link GivenAddresses}): a file of the project gives the addresses written in it only as it was
+     * before the job began. A file the job wrote or changed gives nothing, or a model would write an address into a file and read it back;
+     * so does one changed after the job began by any means (a command's {@code sed}, {@code git checkout}), which its modification time
+     * shows; so does what CodeZaiku keeps in the project's {@code .codezaiku} folder, which is the model's own output (a delegated job's
+     * log, the chat's records).
+     *
+     * <p>One job may span several registries: the chat's turns are one conversation, and a job a model starts from inside another (a
+     * delegated one, a research pass) is part of it. A loop that runs marks its job on the thread ({@link #enter}), and a scope made on
+     * that thread or a thread it starts takes the same job.
+     */
+    public static final class Job {
+        static final InheritableThreadLocal<Job> RUNNING = new InheritableThreadLocal<>();
+        /** How close to the job's start a file's time may be and still count as changed by it: file systems keep times to a second or two. */
+        static final long MARGIN_MS = 2_000;
+        final long began;
+        private final Set<Path> wrote = Collections.synchronizedSet(new LinkedHashSet<>());
+
+        public Job() { this(System.currentTimeMillis()); }
+        Job(long began) { this.began = began; }
+
+        /** A job marked on a thread, until it is closed. */
+        public interface Entered extends AutoCloseable { @Override void close(); }
+
+        /** This job, on this thread and the threads it starts, until the returned handle is closed. */
+        public static Entered enter(Job j) {
+            Job was = RUNNING.get();
+            RUNNING.set(j);
+            return () -> { if (was == null) RUNNING.remove(); else RUNNING.set(was); };
+        }
+
+        void wrote(Path real) { wrote.add(real); }
+
+        /** Whether this file is as it was before the job began: the job did not write it, it was not changed since, and it is no record of CodeZaiku's own. */
+        public boolean asItWas(Path file) {
+            try {
+                if (file == null || !Files.isRegularFile(file)) return false;
+                Path real = file.toRealPath();
+                if (wrote.contains(real)) return false;
+                for (Path p : real) if (p.toString().equals(".codezaiku")) return false;
+                return Files.getLastModifiedTime(real).toMillis() < began - MARGIN_MS;
+            } catch (IOException | RuntimeException e) {
+                return false;
+            }
+        }
+    }
+
+    private volatile Job job;
+
+    /** The job this scope's writes belong to. */
+    public Job job() { return job; }
+
+    /** Makes this scope part of {@code j}: the chat hands each turn's scope its conversation. */
+    public PathScope job(Job j) { if (j != null) this.job = j; return this; }
+
+    /** Whether a file is as it was before this scope's job began ({@link Job#asItWas}). */
+    public boolean asItWas(Path file) { return job.asItWas(file); }
 
     /** {@code toRealPath()} where the path exists, the closest existing ancestor otherwise. */
     private static Path realOf(Path p) {
@@ -185,7 +246,10 @@ public final class PathScope {
 
     /** Record a file this run created or modified, as a path relative to the root. */
     public void recordWrite(String relative) {
-        if (relative != null && !relative.isBlank()) written.add(relative.replace('\\', '/'));
+        if (relative != null && !relative.isBlank()) {
+            written.add(relative.replace('\\', '/'));
+            job.wrote(realOf(root.resolve(relative.replace('\\', '/')).toAbsolutePath().normalize()));
+        }
     }
 
     /** Record an absolute path; ignored if it somehow lies outside the root rather than being coerced. */

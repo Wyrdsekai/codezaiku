@@ -21,7 +21,8 @@ import java.util.Map;
 
 /**
  * What the jobs cost (0.3.13): one line per job in {@code ~/.codezaiku/spend.jsonl} — when, which kind of job (code, review, research,
- * chat, run, acp, mcp) and where, which saved model, host and model id, the tokens and the dollars at the entry's prices — so a person
+ * chat, run, acp, mcp) and where, which saved model, host and model id, the tokens and the dollars at the entry's prices, and through a
+ * router the providers that served its requests — so a person
  * sees what a month on a host came to, and a cap on a saved model refuses a job before it starts. The figures are CodeZaiku's
  * arithmetic on the servers' usage counts at the prices the person wrote down, not the host's bill.
  */
@@ -49,6 +50,17 @@ public final class Spend {
      * changed on the way, if it did (a free twin that stayed overloaded, swapped for the paid one).
      */
     public static synchronized void record(String kind, Path where, SavedModels.Entry entry, long[] usage, double cost, long secs, String status, String raised, String modelUsed, String note) throws IOException {
+        record(kind, where, entry, usage, cost, secs, status, raised, modelUsed, note, Map.of(), 0);
+    }
+
+    /**
+     * As above, with who served the job's requests through a router ({@code servedBy}: provider → requests, as the router named them;
+     * {@link DriveClient#servedBy}), kept on the line as {@code served} when there were any; and how many of its answers came without
+     * token counts from the server ({@link DriveClient#unreported}), kept as {@code unreported} when there were any: their tokens are in
+     * no figure of the line, which then says less than the job used.
+     */
+    public static synchronized void record(String kind, Path where, SavedModels.Entry entry, long[] usage, double cost, long secs, String status, String raised, String modelUsed, String note,
+                                           Map<String, Integer> servedBy, int unreported) throws IOException {
         ObjectNode o = M.createObjectNode();
         if (note != null && !note.isBlank()) o.put("note", note);
         if (raised != null && !raised.isBlank()) o.put("raised", raised);
@@ -58,6 +70,8 @@ public final class Spend {
         o.put("entry", entry.name() == null ? "" : entry.name()); o.put("host", entry.host()); o.put("model", modelUsed == null ? entry.model() : modelUsed);
         o.put("prompt", usage[0]); o.put("cached", usage[1]); o.put("written", usage[2]); o.put("completion", usage[3]);
         o.put("cost", Math.round(cost * 10000) / 10000.0); o.put("priced", entry.prices() != null);
+        if (servedBy != null && !servedBy.isEmpty()) { ObjectNode s = o.putObject("served"); servedBy.forEach(s::put); }
+        if (unreported > 0) o.put("unreported", unreported);
         Files.createDirectories(file().getParent());
         Files.writeString(file(), o.toString() + "\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
     }
@@ -157,5 +171,19 @@ public final class Spend {
     /** "12,345 prompt (9,000 from the cache) + 678 completion tokens, $0.13". */
     public static String usageLine(long[] u, double cost, boolean priced) {
         return String.format(Locale.ROOT, "%,d prompt%s + %,d completion tokens%s", u[0], u[1] > 0 ? String.format(Locale.ROOT, " (%,d from the cache)", u[1]) : "", u[3], priced ? ", " + dollars(cost) : "");
+    }
+
+    /** "3 answers came without token counts from the model server": what a figure of tokens leaves out; "" when nothing. */
+    public static String unreportedLine(int unreported) {
+        if (unreported <= 0) return "";
+        return unreported == 1 ? "1 answer came without token counts from the model server" : unreported + " answers came without token counts from the model server";
+    }
+
+    /** "served by DeepInfra (7 requests), Fireworks (1 request)": who served a job's requests through a router; "" when no answer named one. */
+    public static String servedLine(Map<String, Integer> servedBy) {
+        if (servedBy == null || servedBy.isEmpty()) return "";
+        List<String> each = new ArrayList<>();
+        servedBy.forEach((who, n) -> each.add(who + " (" + n + (n == 1 ? " request)" : " requests)")));
+        return "served by " + String.join(", ", each);
     }
 }

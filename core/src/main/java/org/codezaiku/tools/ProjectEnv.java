@@ -1,6 +1,7 @@
 package org.codezaiku.tools;
 
 import org.codezaiku.Config;
+import org.codezaiku.exec.Sandbox;
 import org.codezaiku.exec.Shell;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,7 +85,7 @@ public final class ProjectEnv {
         Path pyBin = pythonBin(py);
         if (pyBin == null) {
             try {
-                Process p = Shell.pb("python3 -m venv --system-site-packages " + quote(py.toString()) + " >/dev/null 2>&1 || python -m venv --system-site-packages "
+                Process p = Sandbox.in(projectRoot).shell("python3 -m venv --system-site-packages " + quote(py.toString()) + " >/dev/null 2>&1 || python -m venv --system-site-packages "
                         + quote(py.toString()) + " >/dev/null 2>&1").redirectErrorStream(true).start();
                 p.getInputStream().readAllBytes();
                 if (!p.waitFor(180, TimeUnit.SECONDS)) p.destroyForcibly();
@@ -113,7 +114,7 @@ public final class ProjectEnv {
     }
 
     /** The file in each environment that names its project. */
-    static final String PROJECT_FILE = "project.txt";
+    public static final String PROJECT_FILE = "project.txt";
 
     /**
      * Remove the environments whose project folder no longer exists, so they do not pile up. Only folders directly under the envs

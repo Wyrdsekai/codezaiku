@@ -9,10 +9,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.codezaiku.drive.DriveClient;
 import org.codezaiku.library.Library;
 import org.codezaiku.library.LibraryIndex;
+import org.codezaiku.review.ReportFindingTool;
 import org.codezaiku.shape.ProjectShape;
 import org.codezaiku.tools.TaskBlockedTool;
 import org.codezaiku.tools.TaskDoneTool;
 import org.codezaiku.tools.ToolRegistry;
+import org.codezaiku.tools.PathScope;
 import org.codezaiku.verify.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -62,7 +64,7 @@ import org.codezaiku.FamiliarMain;
 import org.codezaiku.research.LibraryBridge;
 import org.codezaiku.verify.ProjectTests;
 import org.codezaiku.Config;
-import org.codezaiku.exec.Shell;
+import org.codezaiku.exec.Sandbox;
 import org.codezaiku.tools.ProjectEnv;
 
 import java.time.LocalDateTime;
@@ -235,6 +237,7 @@ public final class FamiliarLoop {
         this.driveGate = false;
         this.bootGate = false;
         this.deadlineTurn = true;
+        this.reportMode = true;
         return this;
     }
     /**
@@ -304,6 +307,16 @@ public final class FamiliarLoop {
     /** Last turn offers only task_done. Set by research() and report() — NOT tied to researchMode, because
      *  the failure it prevents (budget spent, nothing written) is not specific to research. */
     private boolean deadlineTurn = false;
+    /**
+     * A review: its findings are recorded by the reporting tool, never by the summary. A model that reads and verifies until the last
+     * turn has nowhere to put what it found once that turn offers the finishing tool alone: a review of twenty-one bundles on a hosted
+     * model (2026-11-20) used all thirty turns of every bundle, wrote "six findings reported" in its summaries, and recorded none. So
+     * the turns before the last are reporting turns ({@link #reportClosing}).
+     */
+    private boolean reportMode = false;
+    private boolean reportingNoted = false;
+    /** How many turns before a review's last one offer the reporting tool and the finishing tool alone. */
+    static final int REPORT_CLOSING_TURNS = 5;
 
     /** The coding loop proper: the run builds or changes a project. Off in research, review, chat and single-file artifact runs. */
     private boolean coding = true;
@@ -417,6 +430,29 @@ public final class FamiliarLoop {
      *  misconfigured HOSTED drive 404'd and the loop spun 2,600+ turns in seconds. Against a
      *  paid API that pattern is a money pump; against any drive it is noise. */
     static final int MAX_CONSECUTIVE_DRIVE_FAILURES = 8;
+
+    /**
+     * Replies in words in a row, with no tool call, after which a chat's turn ends. A chat asks for a tool call (tool_choice
+     * "required"), and its answer to the person comes as task_done's summary: a server that honours the choice cannot send words
+     * alone, so words alone mean the server let them through, and the loop asked "You must act by calling a tool." again, with no
+     * limit, because a chat has no turn limit of its own (the person is its cap). On a server that ignores the choice and a model
+     * that keeps answering in words that was request after request: 5,108 in three minutes on a stand-in (2026-11-26), each one paid
+     * on a hosted model, whose monthly cap is checked when a chat starts and not in the middle of a turn. Three: the first reply and
+     * two asks again. On a server that forces the call (llama.cpp) no reply in words was seen in any log but a reply cut off at the
+     * output limit. Through a stand-in server that let words through, a 27B answered in words once in 34 requests (18 chat turns,
+     * 2026-11-26) and acted at the first ask again. So one ask is what was needed, the second is a spare, and every ask after it is
+     * one more request with the whole conversation in it.
+     */
+    static final int CHAT_WORDS_WITHOUT_ACTION = 3;
+    /** Replies in words with no tool call in a row, this turn of a chat; a reply that calls a tool starts it again from nothing. */
+    private int wordsWithoutAction = 0;
+    static final String WORDS_WITHOUT_ACTION = "The model answered without acting";
+
+    /** What the person reads when a chat's turn ends that way: what happened, and what the model said. */
+    static String wordsWithoutActionReport(int replies, String said) {
+        return WORDS_WITHOUT_ACTION + ": its last " + replies + " replies were words with no tool call, so this turn ended here "
+                + "instead of asking it again. What it said:\n" + (said == null || said.isBlank() ? "(nothing)" : said);
+    }
 
     /**
      * How long a turn waits for a model server that went away — refused, cut off, restarting or loading its model — before it counts as
@@ -693,7 +729,7 @@ public final class FamiliarLoop {
         try {
             // the time limit through Timeout: macOS has no `timeout` (a bare `timeout N` there fails with 127, and every check read as failed
             // on the macOS run of the export suite, 2026-10-04); Timeout falls back to gtimeout, then perl's alarm
-            ProcessBuilder pb = Shell.pb(ProjectEnv.prelude(projectRoot) + "cd " + ProjectEnv.quote(projectRoot.toString())
+            ProcessBuilder pb = Sandbox.in(projectRoot).shell(ProjectEnv.prelude(projectRoot) + "cd " + ProjectEnv.quote(projectRoot.toString())
                     + " && " + Timeout.wrap((int) CHECK_TIMEOUT_SEC, cmd)).redirectErrorStream(true);
             pb.directory(projectRoot.toFile());
             Process p = pb.start();
@@ -1072,6 +1108,23 @@ public final class FamiliarLoop {
             if (was != null) dropped += was.asText("").length();
         }
         return dropped;
+    }
+
+    /** A review's reporting turns: the last {@link #REPORT_CLOSING_TURNS} before its final turn, in a run long enough to have read first. */
+    boolean reportClosing(int turn) {
+        return reportMode && maxTurns >= REPORT_CLOSING_TURNS * 2 && turn >= maxTurns - REPORT_CLOSING_TURNS && turn < maxTurns;
+    }
+
+    /** The tool array reduced to a review's two finishing tools, the reporting tool and task_done; all of it when the reporting tool is not there. */
+    private ArrayNode onlyReporting(ArrayNode all) {
+        ArrayNode two = all.arrayNode();
+        boolean reporter = false;
+        for (JsonNode t : all) {
+            String n = t.path("function").path("name").asText();
+            if (ReportFindingTool.NAME.equals(n)) { two.add(t); reporter = true; }
+            else if (TaskDoneTool.NAME.equals(n)) two.add(t);
+        }
+        return reporter ? two : all;
     }
 
     /** The tool array reduced to task_done alone (deadline turn) — keeps tool_choice="required" valid. */
@@ -1850,7 +1903,9 @@ public final class FamiliarLoop {
         try {
             Path probe = Path.of(devAnswersPath).getParent().resolve("artifact_probe.py");
             if (!Files.exists(probe)) return null;
-            ProcessBuilder pb = Shell.pb("timeout 240 python3 " + probe.toAbsolutePath() + " " + projectRoot.toAbsolutePath());
+            // the fixture's own script, read from beside the answers: that folder is open to this one command, not to the model's
+            ProcessBuilder pb = Sandbox.in(projectRoot).read(probe.toAbsolutePath().getParent())
+                    .shell("timeout 240 python3 " + probe.toAbsolutePath() + " " + projectRoot.toAbsolutePath());
             if (cpuOnly) pb.environment().put("CUDA_VISIBLE_DEVICES", ""); // mid-run: never contend with training
             pb.directory(projectRoot.toFile());
             pb.redirectErrorStream(true);
@@ -1943,7 +1998,8 @@ public final class FamiliarLoop {
         try {
             Path scorer = Path.of(devAnswersPath).getParent().resolve("artifact_score.py");
             if (!Files.exists(scorer)) return -1;
-            ProcessBuilder pb = Shell.pb("timeout 300 python3 " + scorer.toAbsolutePath() + " " + projectRoot.toAbsolutePath());
+            ProcessBuilder pb = Sandbox.in(projectRoot).read(scorer.toAbsolutePath().getParent())
+                    .shell("timeout 300 python3 " + scorer.toAbsolutePath() + " " + projectRoot.toAbsolutePath());
             pb.environment().put("CUDA_VISIBLE_DEVICES", "");   // CPU: a 0.5B on ~20 dev rows is seconds, no GPU contention
             pb.directory(projectRoot.toFile());
             pb.redirectErrorStream(true);
@@ -2802,7 +2858,17 @@ public final class FamiliarLoop {
     public record Result(boolean done, String summary, int turns) {
     }
 
+    /**
+     * The loop, with its job marked on the thread ({@link PathScope.Job#enter}): a job this one starts (a delegated one, a research pass)
+     * is part of it, so a file this job wrote gives no addresses there either.
+     */
     public Result run() {
+        PathScope scope = tools.scope();
+        if (scope == null) return runInJob();
+        try (PathScope.Job.Entered ignored = PathScope.Job.enter(scope.job())) { return runInJob(); }
+    }
+
+    private Result runInJob() {
         ArrayNode toolSchemas = tools.toolsArray(j);
         if (coding) {
             deliverables = Deliverables.of(goal, projectRoot);
@@ -3166,7 +3232,18 @@ public final class FamiliarLoop {
                     messages.add(ask);
                 }
             }
+            // A review's reporting turns: what was found is recorded now, while there are turns to record it in.
+            boolean reporting = reportClosing(turn) && !exhausted && onlyReporting(toolSchemas).size() < toolSchemas.size();
+            if (reporting && !reportingNoted) {
+                reportingNoted = true;
+                log.info("  ↳ reporting turns {}–{} of {}: only {} and task_done are offered", turn, maxTurns - 1, maxTurns, ReportFindingTool.NAME);
+                ObjectNode ask = history.addObject().put("role", "user").put("content", "The reading is done. Report now: call `" + ReportFindingTool.NAME
+                        + "` once for each defect you found, with the offending line copied exactly as `existing_code`, then call task_done. "
+                        + "If the change is sound, call task_done and say so.");
+                messages.add(ask);   // the request for this turn is already assembled
+            }
             ArrayNode turnTools = (deadlineTurn && (turn >= maxTurns || exhausted)) || codingDeadline(turn) ? onlyTaskDone(toolSchemas)
+                    : reporting ? onlyReporting(toolSchemas)
                     : handOverMode ? onlyThese(toolSchemas, HAND_OVER_TOOLS)
                     : writeDue != null ? writeOnlyOf(toolSchemas, writeDue)
                     : programTurn != null ? programsOnly(toolSchemas, programTurn) : toolSchemas;
@@ -3216,6 +3293,13 @@ public final class FamiliarLoop {
                 // A single bad model response (e.g. malformed tool-call JSON the server rejected) must NOT
                 // abort the run. Nudge and skip the turn; the re-sample next turn almost always succeeds.
                 String msg = e.getMessage() == null ? "" : e.getMessage();
+                // Nobody may serve the model: every provider the router has for it is in a place CodeZaiku avoids. Nothing was
+                // sent, and nothing the model does next turn changes that: the run ends here with the sentence that says which
+                // setting allows them, on the path of a model server that cannot be used (a run's status is then "failed").
+                if (e instanceof DriveClient.NotServed) {
+                    log.error("turn {}: {}", turn, msg);
+                    return new Result(false, ResultDocument.DRIVE_UNAVAILABLE + " " + msg, turn);
+                }
                 // A PROMPT THAT DOES NOT FIT cannot be nudged into fitting. The other failures here
                 // are things the model can do differently next turn; this one is a property of the
                 // request we just built, so resending it fails identically until the budget is gone.
@@ -3345,6 +3429,15 @@ public final class FamiliarLoop {
                         || (drive.lastCompletionTokens() > 0 && drive.lastCompletionTokens() >= outBudget - 8);
                 log.warn("turn {}: assistant returned no tool_calls — content=[{}]{}", turn,
                         assistant.path("content").asText(""), cutOff ? " (cut off at max_tokens=" + outBudget + ")" : "");
+                // A chat's turn ends after a few replies in words in a row (CHAT_WORDS_WITHOUT_ACTION), with what the model said. A
+                // reply cut off at the output limit is not counted: where the call is forced it was a tool call that did not fit, and
+                // the model is told how to write it in pieces.
+                if (chatMode && !cutOff && ++wordsWithoutAction >= CHAT_WORDS_WITHOUT_ACTION) {
+                    String said = unwrapToolMarkup(assistant.path("content").asText("").strip());
+                    log.warn("turn {}: {} replies in a row in words with no tool call: the turn ends here rather than ask again", turn, wordsWithoutAction);
+                    return new Result(false, wordsWithoutActionReport(wordsWithoutAction,
+                            withDraft(said.length() >= bestChatProse.length() ? said : bestChatProse)), turn);
+                }
                 history.addObject().put("role", "user").put("content", cutOff
                         ? "Your last reply was cut off: it reached the output limit of about " + outBudget + " tokens before the tool "
                           + "call was complete, so nothing happened. Do not repeat it. Write the file in PIECES: one write_file with the "
@@ -3354,6 +3447,7 @@ public final class FamiliarLoop {
                 continue;
             }
 
+            wordsWithoutAction = 0;
             int batchStart = history.size();
             for (var call : calls) {
                 String name = call.path("function").path("name").asText();

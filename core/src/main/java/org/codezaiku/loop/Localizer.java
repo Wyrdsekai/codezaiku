@@ -7,6 +7,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
 import org.codezaiku.Config;
+import org.codezaiku.drive.DriveClient;
 
 /**
  * Stall-localizer (battery49 follow-up). When the 9B drive STALLS on a recurring build/test failure it
@@ -86,7 +87,7 @@ public final class Localizer {
             HttpClient c = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
             HttpRequest r = HttpRequest.newBuilder(URI.create(url + "/v1/chat/completions"))
                     .timeout(Duration.ofSeconds(90)).header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                    .POST(HttpRequest.BodyPublishers.ofString(DriveClient.routed(url, body, model))).build();   // a router's list of providers to leave out, should this address be one
             HttpResponse<String> resp = c.send(r, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() / 100 != 2) return null;
             String content = extractContent(resp.body());

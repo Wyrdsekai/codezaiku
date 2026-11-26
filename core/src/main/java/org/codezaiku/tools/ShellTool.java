@@ -10,7 +10,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.codezaiku.Config;
-import org.codezaiku.exec.Shell;
+import org.codezaiku.exec.GitDirGuard;
+import org.codezaiku.exec.GitOutside;
+import org.codezaiku.exec.Sandbox;
 
 import java.util.List;
 import java.util.Map;
@@ -245,35 +247,17 @@ public final class ShellTool implements Tool {
         }
         // Container-exec mode (env-gated): route the command into a Docker container's workdir instead of
         // the host shell. Off by default — see ContainerExec. The drain/timeout logic below is unchanged.
-        ProcessBuilder pb = ContainerExec.active()
-                ? new ProcessBuilder("docker", "exec", "-w", ContainerExec.workdir(),
-                        ContainerExec.cid(), "bash", "-lc", cmd).redirectErrorStream(true)
-                : Shell.pb(ProjectEnv.prelude(scope.root()) + cmd)   // installs go to the project's own environment, not the user's
-                        .directory(scope.root().toFile())
-                        .redirectErrorStream(true);
-        // NON-INTERACTIVE env (field consensus / hang-class prevention): a 9B's command must never block
-        // on a TTY prompt — apt/pip "[Y/n]" confirmations, a pager (git log/diff piping to less), git asking
-        // for credentials or an editor. In a headless shell those wait forever until our timeout kills them,
-        // burning a turn and feeding the repeated-timeout/hang loop. Force every tool non-interactive.
-        var env = pb.environment();
-        nonInteractive(env);
-        // Self-provisioned mise toolchain ahead of /usr/bin (e.g. gradle 8.14.4, not /usr/bin/gradle 4.4.1).
-        // Prepend this FIRST so the JDK21 bin below lands ahead of it — `java`/`javac` → JDK21, while `gradle`
-        // (absent from the JDK bin) falls through to the mise shim. `bash -l` re-sources the profile but does
-        // not put the shims first reliably in a non-interactive shell, so we set it explicitly.
-        if (MISE_SHIMS != null) {
-            String path = env.get("PATH");
-            if (path == null) path = System.getenv("PATH");
-            env.put("PATH", MISE_SHIMS + ":" + (path == null ? "" : path));
-        }
-        // Pin the model's Java toolchain to JDK21 (see FIXTURE_JAVA_HOME) so ./gradlew + bare java/javac
-        // resolve to 21, not the box's JDK25. `bash -l` re-sources the profile but does not touch JAVA_HOME
-        // (it's unset there), so this survives; the bin-prepend keeps 21 ahead of /usr/bin for bare `java`.
-        if (FIXTURE_JAVA_HOME != null) {
-            env.put("JAVA_HOME", FIXTURE_JAVA_HOME);
-            String path = env.get("PATH");
-            if (path == null) path = System.getenv("PATH");
-            env.put("PATH", FIXTURE_JAVA_HOME + "/bin:" + (path == null ? "" : path));
+        ProcessBuilder pb;
+        if (ContainerExec.active()) {
+            pb = new ProcessBuilder("docker", "exec", "-w", ContainerExec.workdir(),
+                    ContainerExec.cid(), "bash", "-lc", cmd).redirectErrorStream(true);
+            commandEnv(pb.environment());
+        } else {
+            // Through the sandbox: the command reads and writes the project and the run's own folders, and the rest of the file
+            // system is closed to it. The environment is set before the rules are made, so what it puts on PATH can be read.
+            pb = Sandbox.in(scope.root()).env(ShellTool::commandEnv).named(cmd)
+                    .shell(ProjectEnv.prelude(scope.root()) + cmd)   // installs go to the project's own environment, not the user's
+                    .redirectErrorStream(true);
         }
         // The shell is unscoped, so a `sed -i` or `mv` here writes files the ledger never sees. Rather
         // than flag EVERY shell call (most only read, which would make the incompleteness signal noise),
@@ -281,6 +265,9 @@ public final class ShellTool implements Tool {
         // means the run's file list is a LOWER BOUND and the caller should reconcile against git.
         if (!readOnly && RO_WRITE.matcher(cmd).find()) scope.noteShellRan();
 
+        if (!ContainerExec.active()) Sandbox.firstCommand(scope.root());   // a closed network's first command: the Gradle fetch, once
+        long startedAt = System.currentTimeMillis();
+        if (!ContainerExec.active()) GitDirGuard.commandStarted(scope.root());
         Process proc = pb.start();
         // Drain stdout in a daemon thread — do NOT readAllBytes() on the main thread, or a process that
         // never exits and never closes stdout (e.g. `godot --headless`, a stray server) blocks the read
@@ -330,7 +317,8 @@ public final class ShellTool implements Tool {
                               + "and it may simply need longer. A command that needs more time gets it when you say "
                               + "so: run it as `timeout " + HEAVY_TIMEOUT_SEC + " <the same command>` and the harness waits "
                               + "the full " + HEAVY_TIMEOUT_SEC + "s (the most it allows) instead of " + timeoutSec + "s.")
-                        + "\n" + clamp(sink.toString());
+                        + "\n" + clamp(sink.toString())
+                        + (ContainerExec.active() ? "" : GitDirGuard.afterCommand(scope.root()));
             }
         }
         drain.join(2000);
@@ -344,7 +332,11 @@ public final class ShellTool implements Tool {
                     ? "  [ran in " + ContainerExec.workdir() + " inside the container — every command starts there; cd does not persist]\n"
                     : "  [ran in project root " + scope.root() + " — every command starts there; cd does not persist]\n";
             return "exit=" + proc.exitValue() + cwdNote
-                    + out + wrapperFallbackHint(cmd, proc.exitValue(), out);
+                    + out + wrapperFallbackHint(cmd, proc.exitValue(), out)
+                    + sandboxNote(!ContainerExec.active() && Sandbox.found().on(), proc.exitValue(), out)
+                    + (ContainerExec.active() ? "" : Sandbox.refusedNote(scope.root(), startedAt))
+                    + (ContainerExec.active() ? "" : GitOutside.shellNote(scope.root(), cmd))
+                    + (ContainerExec.active() ? "" : GitDirGuard.afterCommand(scope.root()));
         }
     }
 
@@ -437,6 +429,51 @@ public final class ShellTool implements Tool {
         int half = CAP / 2;
         return s.substring(0, half) + "\n...[trimmed " + (s.length() - CAP) + " chars]...\n"
                 + s.substring(s.length() - half);
+    }
+
+    /**
+     * What every command the model runs gets on top of the environment it starts from: nothing waits for a person, the
+     * toolchains this harness provisioned come first on PATH, and its Java is the one the fixtures build with.
+     */
+    static void commandEnv(Map<String, String> env) {
+        // NON-INTERACTIVE env (field consensus / hang-class prevention): a 9B's command must never block
+        // on a TTY prompt — apt/pip "[Y/n]" confirmations, a pager (git log/diff piping to less), git asking
+        // for credentials or an editor. In a headless shell those wait forever until our timeout kills them,
+        // burning a turn and feeding the repeated-timeout/hang loop. Force every tool non-interactive.
+        nonInteractive(env);
+        // Self-provisioned mise toolchain ahead of /usr/bin (e.g. gradle 8.14.4, not /usr/bin/gradle 4.4.1).
+        // Prepend this FIRST so the JDK21 bin below lands ahead of it — `java`/`javac` → JDK21, while `gradle`
+        // (absent from the JDK bin) falls through to the mise shim. `bash -l` re-sources the profile but does
+        // not put the shims first reliably in a non-interactive shell, so we set it explicitly.
+        if (MISE_SHIMS != null) {
+            String path = env.get("PATH");
+            if (path == null) path = System.getenv("PATH");
+            env.put("PATH", MISE_SHIMS + ":" + (path == null ? "" : path));
+        }
+        // Pin the model's Java toolchain to JDK21 (see FIXTURE_JAVA_HOME) so ./gradlew + bare java/javac
+        // resolve to 21, not the box's JDK25. `bash -l` re-sources the profile but does not touch JAVA_HOME
+        // (it's unset there), so this survives; the bin-prepend keeps 21 ahead of /usr/bin for bare `java`.
+        if (FIXTURE_JAVA_HOME != null) {
+            env.put("JAVA_HOME", FIXTURE_JAVA_HOME);
+            String path = env.get("PATH");
+            if (path == null) path = System.getenv("PATH");
+            env.put("PATH", FIXTURE_JAVA_HOME + "/bin:" + (path == null ? "" : path));
+        }
+    }
+
+    /**
+     * Said after a command that failed on a refusal, where commands are sandboxed: that the refusal is the sandbox's and
+     * stays, so the model works inside the project and does not try other ways around it for the rest of its turns.
+     */
+    static String sandboxNote(boolean sandboxed, int exit, String out) {
+        if (!sandboxed || exit == 0 || out == null) return "";
+        if (!(out.contains("ermission denied") || out.contains("peration not permitted") || out.contains("EACCES") || out.contains("EPERM")
+                || out.contains("mount -t proc"))) return "";
+        return "\n[note: commands here run in a sandbox. A command reads and writes the project folder and its own home and temp folders, and "
+                + "reads the system's and the toolchains' folders. Other folders, the list of this machine's processes and UNIX-domain "
+                + "sockets answer \"permission denied\", and will each time: work inside the project folder. If the task itself needs "
+                + "one of them, say so in your summary; the person can open a folder with the sandbox.read setting and sockets with "
+                + "sandbox.sockets.]";
     }
 
     /**

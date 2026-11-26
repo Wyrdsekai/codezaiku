@@ -33,7 +33,7 @@ class SavedModelsTest {
 
     @AfterEach void realHomeBack() throws Exception {
         System.setProperty("user.home", realHome);
-        Config.unset("CODEZAIKU_DRIVE");   // read from the real home now: nothing of the scratch stays loaded
+        Config.invalidate();   // the next read loads the real home's settings; nothing is changed there
     }
 
     @Test

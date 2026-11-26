@@ -5,7 +5,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import org.codezaiku.exec.GitDirGuard;
+import org.codezaiku.exec.GitOutside;
+import org.codezaiku.exec.NetProxy;
 import org.codezaiku.loop.FamiliarLoop;
 import org.codezaiku.verify.ProjectTests;
 
@@ -134,6 +139,11 @@ public final class ResultDocument {
     private String host;
     private long[] usage;
     private Double cost;
+    /** Through a router, who served the run's requests: provider → requests, as the router named them. Empty: no answer named one. */
+    private Map<String, Integer> servedBy = Map.of();
+    private List<NetProxy.Try> networkRefused = List.of();
+    private List<GitOutside.Act> git = List.of();
+    private List<GitDirGuard.PutBack> gitPutBack = List.of();
     private ProjectTests.Verdict verdict;
 
     public static ResultDocument of(Path workspace, String status) {
@@ -165,6 +175,31 @@ public final class ResultDocument {
     public ResultDocument usage(long[] v) { this.usage = v != null && v[0] + v[3] > 0 ? v : null; return this; }
     /** What the run cost at the saved model's prices; null when none are saved. */
     public ResultDocument cost(Double v) { this.cost = v; return this; }
+    /** Who served the run's requests through a router, provider → requests; null or empty when no answer named one. */
+    public ResultDocument servedBy(Map<String, Integer> v) { this.servedBy = v == null ? Map.of() : v; return this; }
+
+    /** The connections the run's commands tried that the closed network refused, oldest first; none when nothing was. */
+    public ResultDocument networkRefused(List<NetProxy.Try> tries) {
+        List<NetProxy.Try> out = new ArrayList<>();
+        if (tries != null) for (NetProxy.Try t : tries) if (!t.let()) out.add(t);
+        this.networkRefused = out;
+        return this;
+    }
+
+    /** What CodeZaiku pushed and the pull requests it opened for the run, outside the sandbox; none when nothing. */
+    public ResultDocument git(List<GitOutside.Act> acts) { this.git = acts == null ? List.of() : acts; return this; }
+
+    /** What CodeZaiku put back in the repository's own git settings, hooks and info after the run's commands; none when nothing. */
+    public ResultDocument gitPutBack(List<GitDirGuard.PutBack> v) { this.gitPutBack = v == null ? List.of() : v; return this; }
+
+    /** What was put back in a workspace since {@code sinceMillis}: what {@link #gitPutBack} is given. */
+    public static List<GitDirGuard.PutBack> putBackSince(Path workspace, long sinceMillis) { return GitDirGuard.since(workspace, sinceMillis); }
+
+    /** The pushes and pull requests of a workspace since {@code sinceMillis}: what {@link #git} is given. */
+    public static List<GitOutside.Act> gitSince(Path workspace, long sinceMillis) { return GitOutside.doneSince(workspace, sinceMillis); }
+
+    /** The refused tries of a workspace's commands since {@code sinceMillis}: what {@link #networkRefused} is given. */
+    public static List<NetProxy.Try> refusedSince(Path workspace, long sinceMillis) { return NetProxy.tries(workspace, sinceMillis); }
 
     /** The test-oracle verdict, which decides {@code status} and fills the counts. */
     public ResultDocument verdict(ProjectTests.Verdict v) { this.verdict = v; return this; }
@@ -219,6 +254,23 @@ public final class ResultDocument {
             u.put("prompt", usage[0]); u.put("cached", usage[1]); u.put("written", usage[2]); u.put("completion", usage[3]);
         }
         if (cost != null) d.put("cost", Math.round(cost * 10000) / 10000.0);
+        // Through a router, who served the run's requests: a field added beside the others, present only when the router named somebody
+        // (any other host, or an answer that names nobody, adds nothing), so every key a host already reads keeps its shape
+        if (!servedBy.isEmpty()) { ObjectNode s = d.putObject("servedBy"); servedBy.forEach(s::put); }
+        // Present only when a command of the run was refused a connection by the sandbox's closed network: added, nothing before it changed.
+        if (!networkRefused.isEmpty()) {
+            ArrayNode refused = d.putArray("networkRefused");
+            for (NetProxy.Try t : networkRefused) {
+                ObjectNode o = refused.addObject();
+                o.put("host", t.host()); o.put("port", t.port()); o.put("command", t.command()); o.put("rule", t.rule());
+            }
+        }
+        // Present only when CodeZaiku pushed a branch or opened a pull request for the run, outside the sandbox: added after every other field.
+        ObjectNode pushed = GitOutside.document(git);
+        if (pushed != null) d.set("git", pushed);
+        // Present only when a command of the run changed the repository's own settings, hooks or info and CodeZaiku put it back: added last.
+        var putBack = GitDirGuard.document(gitPutBack);
+        if (putBack != null) d.set("gitPutBack", putBack);
         return d;
     }
 }

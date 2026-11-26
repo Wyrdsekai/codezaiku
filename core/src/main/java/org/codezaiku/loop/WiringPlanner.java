@@ -6,6 +6,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import org.codezaiku.Config;
+import org.codezaiku.drive.DriveClient;
 
 /**
  * Per-spec WIRING SKELETON, generated ONCE at intake by the 30B (battery52 follow-up). The coder problem
@@ -77,7 +78,7 @@ public final class WiringPlanner {
             HttpClient c = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
             HttpRequest r = HttpRequest.newBuilder(URI.create(url + "/v1/chat/completions"))
                     .timeout(Duration.ofSeconds(120)).header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                    .POST(HttpRequest.BodyPublishers.ofString(DriveClient.routed(url, body, model))).build();   // a router's list of providers to leave out, should this address be one
             HttpResponse<String> resp = c.send(r, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() / 100 != 2) return null;
             String content = extractContent(resp.body());

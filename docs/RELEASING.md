@@ -28,6 +28,11 @@ scripts/verify-platform.sh                       # an installed build against a 
 cd npm && LAUNCHER_TEST_DIST=../dist npm test    # the npm launcher against the built release
 ```
 
+`release-build.sh` stops when `codezaiku model serve check` fails: each model row's file at its pinned revision must be
+the one the row records (Hugging Face's own sha256 and size for it), and each pinned build of llama-swap and llama.cpp must
+resolve. A row whose file on `main` has moved on is named in a line and does not stop the build: a new file is measured
+before a row is pinned to it.
+
 Install the tarball on a machine that is not the build machine and run `codezaiku --version` and
 `codezaiku doctor` from it; install the `.deb` the same way, since a package that builds is not a
 package that installs. Try a runtime build on a machine with no Java (a `debian:bookworm-slim`

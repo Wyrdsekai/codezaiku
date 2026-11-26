@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.codezaiku.SelfUpdate;
 import org.codezaiku.drive.SavedModels;
+import org.codezaiku.tools.Fetch;
 
 import java.io.IOException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -253,7 +254,12 @@ public final class WebChat {
                 } else send(x, 200, "text/html; charset=utf-8", loginPage(false));
                 return;
             }
-            if (path.equals("/logout")) { x.getResponseHeaders().add("Set-Cookie", "cz=; Path=/; HttpOnly; Max-Age=0"); redirect(x, "/login"); return; }
+            if (path.equals("/logout")) {   // a button of the chat's own pages: the same request from another site is refused (OwnPage), and a link leads only to the button
+                if ("POST".equals(method)) { x.getResponseHeaders().add("Set-Cookie", "cz=; Path=/; HttpOnly; Max-Age=0"); redirect(x, "/login"); }
+                else send(x, 200, "text/html; charset=utf-8", head("Sign out · CodeZaiku") + "<main><header><b>Sign out</b></header><div class=\"home\"><form method=\"post\" action=\"/logout\"><button>Sign out</button></form><p><a href=\"/\">Back</a></p></div></main>" + script("shell") + "</body></html>");
+                return;
+            }
+            if (path.startsWith("/static/")) { sendScript(x, path.substring("/static/".length())); return; }
             WebAccounts.Person me = path.equals("/health") ? new WebAccounts.Person("", "") : who(x);
             if (me == null) {
                 if (path.startsWith("/chat/") && !path.equals("/chat") || path.equals("/projects")) send(x, 401, "application/json", "{\"error\":\"sign in first\"}");
@@ -267,7 +273,7 @@ public final class WebChat {
                 return;
             }
             if (path.equals("/people") || path.startsWith("/people/")) {   // the owner names people
-                if (accounts == null || token == null) { send(x, 200, "text/html; charset=utf-8", head("People · CodeZaiku") + note() + side(null, me) + "<main><header><b>People</b></header><div class=\"home\"><p>This chat is on this machine only, with no token, so whoever reaches it is you. Start it with <code>--host 0.0.0.0</code> or <code>--token</code> to name other people.</p></div></main>" + SHELL_JS + "</body></html>"); return; }
+                if (accounts == null || token == null) { send(x, 200, "text/html; charset=utf-8", head("People · CodeZaiku") + note() + side(null, me) + "<main><header><b>People</b></header><div class=\"home\"><p>This chat is on this machine only, with no token, so whoever reaches it is you. Start it with <code>--host 0.0.0.0</code> or <code>--token</code> to name other people.</p></div></main>" + script("shell") + "</body></html>"); return; }
                 if (path.equals("/people/add") && "POST".equals(method)) {
                     try { accounts.put(form.getOrDefault("name", ""), form.getOrDefault("password", ""), form.getOrDefault("role", WebAccounts.VIEWER)); redirect(x, "/people"); }
                     catch (IllegalArgumentException e) { send(x, 400, "text/html; charset=utf-8", peoplePage(me, e.getMessage())); }
@@ -329,7 +335,7 @@ public final class WebChat {
             + ".say.me{align-self:flex-end;background:var(--me);border-color:transparent}.say.me b,.say.chat b{display:block;font-size:.78em;color:var(--k);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.2em;font-weight:normal}"
             + ".say.chat{align-self:flex-start;white-space:normal}.say.chat p{margin:.4em 0}.say.chat pre.diff{white-space:pre}.say.chat pre.diff .add{color:#5bb46a}.say.chat pre.diff .del{color:#e0654f}.say.chat pre.diff .hunk{color:var(--k)}"
             + ".say.chat table{border-collapse:collapse;margin:.4em 0;font-size:.95em}.say.chat td,.say.chat th{border:1px solid var(--line);padding:.2em .5em;text-align:left}.say.chat blockquote{margin:.4em 0;padding-left:.8em;border-left:3px solid var(--line);color:var(--k)}.say.chat hr{border:0;border-top:1px solid var(--line);margin:.6em 0}.say.chat ol{margin:.3em 0 .3em 1.4em;padding:0}.say.chat a{word-break:break-all}.say.chat p{margin:.4em 0}.say.chat code{font-family:ui-monospace,monospace;font-size:.9em;background:var(--bg);padding:0 .25em;border-radius:.25em}.say.chat pre{font-family:ui-monospace,monospace;font-size:.88em;background:var(--bg);padding:.6em .8em;border-radius:.4em;overflow:auto;margin:.4em 0}"
-            + ".say.chat ul{margin:.3em 0 .3em 1.2em;padding:0}.say.chat h3{margin:.5em 0 .2em;font-size:1em}"
+            + ".say.chat ul{margin:.3em 0 .3em 1.2em;padding:0}.say.chat h3{margin:.5em 0 .2em;font-size:1em}.say.chat .leads{color:var(--k);font-size:.85em}"
             + "details.steps{align-self:flex-start;max-width:52em;color:var(--k);font-size:.85em;font-family:ui-monospace,monospace;border-left:2px solid var(--line);padding-left:.8em}details.steps summary{cursor:pointer;font-family:Georgia,serif;color:var(--k)}details.steps div{white-space:pre-wrap;word-break:break-word}"
             + ".say.think{align-self:flex-start;color:var(--k);font-style:italic;font-size:.9em;border:0;background:transparent;padding:.2em .9em}.say.notify{align-self:flex-start;color:var(--k);font-size:.9em;border:0;background:transparent;padding:.2em .9em}.say.notify:before{content:'\\25C6  '}"
             + ".say.banner{align-self:stretch;max-width:none;color:var(--k);font-size:.85em;font-family:ui-monospace,monospace;border:0;background:transparent;padding:0 .9em}"
@@ -344,7 +350,7 @@ public final class WebChat {
             + "main{height:auto;min-height:0}#composer{padding:.5em .7em}#composer button{padding:.35em .6em}#log{padding:.7em .7em}#ask{margin:0 .7em}}</style>";
 
     /** The theme the browser remembers, as ResearchZosho does it, before the page paints. */
-    static final String THEME_JS = "<script>(function(){try{var t=localStorage.getItem('cz.theme');if(t==='light')document.documentElement.setAttribute('data-theme','light')}catch(e){}})();</script>";
+    static final String THEME_JS = "(function(){try{var t=localStorage.getItem('cz.theme');if(t==='light')document.documentElement.setAttribute('data-theme','light')}catch(e){}})();";
 
     static String dotClass(String state) { return state.startsWith("asking") ? "asking" : state.startsWith("working") ? "working" : state.startsWith("ready") ? "ready" : state.startsWith("ended") ? "ended" : ""; }
 
@@ -377,7 +383,7 @@ public final class WebChat {
         if (token != null) {
             b.append("<div class=\"nav-group\"><b>You</b><div class=\"row small\">").append(esc(me.name())).append(" · ").append(esc(me.role())).append("</div>");
             if (me.owner() && accounts != null) b.append("<a href=\"/people\"><span class=\"dot\"></span>people</a>");
-            b.append("<a href=\"/logout\"><span class=\"dot\"></span>sign out</a></div>");
+            b.append("<form method=\"post\" action=\"/logout\"><button class=\"lnk\"><span class=\"dot\"></span>sign out</button></form></div>");
         }
         return b.append("</div></nav>").toString();
     }
@@ -385,7 +391,7 @@ public final class WebChat {
     /** The update turn's note, on every page while it stands; "" when there is none. */
     private String note() { return updateNote.isEmpty() ? "" : "<p class=\"k\">" + esc(updateNote) + "</p>"; }
 
-    static String head(String title) { return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + esc(title) + "</title>" + THEME_JS + CSS + "</head><body>"; }
+    static String head(String title) { return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + esc(title) + "</title>" + script("theme") + CSS + "</head><body>"; }
 
     String home() throws IOException { return home(new WebAccounts.Person("you", WebAccounts.OWNER)); }
 
@@ -399,13 +405,13 @@ public final class WebChat {
             for (Loop l : all) {
                 String was = l.repl == null ? "" : l.repl.lastExchange(240);
                 b.append("<tr><td><a href=\"/chat?project=").append(enc(l.id)).append("\">").append(esc(l.name())).append("</a></td><td class=\"k\">").append(esc(l.root.toString())).append("</td><td><span class=\"dot ").append(dotClass(l.state())).append("\"></span> ").append(esc(l.state())).append("</td><td class=\"note\">").append(esc(was.replace("\n", " "))).append("</td>")
-                 .append(me.owner() ? "<td><form method=\"post\" action=\"/projects/remove\" onsubmit=\"return confirm('Take " + esc(l.name()).replace("'", "\\'") + " off the list? Its conversations stay on disk.')\"><input type=\"hidden\" name=\"project\" value=\"" + esc(l.id) + "\"><button class=\"lnk\" title=\"take it off the list; its conversations stay on disk\">remove</button></form></td></tr>" : "<td></td></tr>");
+                 .append(me.owner() ? "<td><form method=\"post\" action=\"/projects/remove\" data-confirm=\"Take " + esc(l.name()) + " off the list? Its conversations stay on disk.\"><input type=\"hidden\" name=\"project\" value=\"" + esc(l.id) + "\"><button class=\"lnk\" title=\"take it off the list; its conversations stay on disk\">remove</button></form></td></tr>" : "<td></td></tr>");
             }
             b.append("</table>");
             if (!skipped.isEmpty()) { b.append("<p class=\"note\">Left off the list, their folders being gone: "); for (String g : skipped) b.append(esc(g)).append(" "); b.append("</p>"); }
         }
         b.append("<p class=\"note\">Open a project to talk to its chat. It is the same chat as the terminal's: it asks before it writes or runs anything, and you answer on the page.").append(token == null ? " Listening on this machine only; no sign-in." : " Signed in with the token; it is kept by this browser for a month.").append("</p>");
-        return b.append("</div></main>").append(SHELL_JS).append("</body></html>").toString();
+        return b.append("</div></main>").append(script("shell")).append("</body></html>").toString();
     }
 
     String chatPage(Loop l) throws IOException { return chatPage(l, new WebAccounts.Person("you", WebAccounts.OWNER)); }
@@ -413,10 +419,10 @@ public final class WebChat {
     String chatPage(Loop l, WebAccounts.Person me) throws IOException {
         StringBuilder b = new StringBuilder(head(l.name() + note() + " · CodeZaiku")).append(side(l, me));
         b.append("<main><header><b>").append(esc(l.name())).append("</b><span class=\"k\">").append(esc(l.root.toString())).append("</span><span class=\"k\" id=\"state\"></span></header>");
-        b.append("<div id=\"log\" data-project=\"").append(esc(l.id)).append("\" data-who=\"").append(esc(me.name())).append("\"></div><button type=\"button\" id=\"news\" hidden>new messages \u2193</button><div id=\"ask\" hidden></div><div id=\"status\"></div>");
+        b.append("<div id=\"log\" data-project=\"").append(esc(l.id)).append("\" data-who=\"").append(esc(me.name())).append("\" data-own=\"").append(esc(String.join(" ", Fetch.ownServiceHosts()))).append("\"></div><button type=\"button\" id=\"news\" hidden>new messages \u2193</button><div id=\"ask\" hidden></div><div id=\"status\"></div>");
         if (me.owner()) b.append("<form id=\"composer\"><textarea name=\"say\" rows=\"1\" placeholder=\"Say something. Enter sends, Shift+Enter is a new line; @path attaches a file\" autofocus></textarea><button>Send</button><button type=\"button\" id=\"stop\" title=\"stop the running turn, as ctrl-C does\">Stop</button></form>");
         else b.append("<form id=\"composer\" data-viewer=\"1\"><textarea name=\"say\" rows=\"1\" disabled placeholder=\"You are watching this chat; an owner can type and answer.\"></textarea><button disabled>Send</button><button type=\"button\" id=\"stop\" disabled>Stop</button></form>");
-        b.append("</main>").append(SHELL_JS).append("<script>").append(JS).append("</script></body></html>");
+        b.append("</main>").append(script("shell")).append(script("chat")).append("</body></html>");
         return b.toString();
     }
 
@@ -425,29 +431,40 @@ public final class WebChat {
         b.append("<main><header><b>People</b><span class=\"k\">who may use this chat, and as what</span></header><div class=\"home\">");
         if (said != null) b.append("<p><b>").append(esc(said)).append("</b></p>");
         b.append("<table><tr><th>Name</th><th>Role</th><th></th></tr>");
-        for (WebAccounts.Person p : accounts.people()) b.append("<tr><td>").append(esc(p.name())).append("</td><td>").append(esc(p.role())).append("</td><td><form method=\"post\" action=\"/people/remove\" onsubmit=\"return confirm('Remove ").append(esc(p.name()).replace("'", "\\'")).append("?')\"><input type=\"hidden\" name=\"name\" value=\"").append(esc(p.name())).append("\"><button class=\"lnk\">remove</button></form></td></tr>");
+        for (WebAccounts.Person p : accounts.people()) b.append("<tr><td>").append(esc(p.name())).append("</td><td>").append(esc(p.role())).append("</td><td><form method=\"post\" action=\"/people/remove\" data-confirm=\"Remove ").append(esc(p.name())).append("?\"><input type=\"hidden\" name=\"name\" value=\"").append(esc(p.name())).append("\"><button class=\"lnk\">remove</button></form></td></tr>");
         b.append("</table>");
         String in = "style=\"font:inherit;padding:.4em .6em;border:1px solid var(--line);border-radius:.5em;background:var(--bg);color:var(--ink)\"";
         b.append("<h2>Add a person</h2><form method=\"post\" action=\"/people/add\" style=\"display:flex;gap:.6em;flex-wrap:wrap;align-items:center;max-width:50em\"><input name=\"name\" placeholder=\"name\" required ").append(in).append("><input name=\"password\" type=\"password\" placeholder=\"password, eight or more\" required ").append(in).append("><select name=\"role\" ").append(in).append("><option value=\"viewer\">viewer: reads and watches</option><option value=\"owner\">owner: types, answers, changes projects</option></select><button>Add</button></form>");
         b.append("<p class=\"note\">A viewer sees every page and every chat as it runs, and can type nothing. An owner can do all you can. The token the server printed stays the owner's master key. Passwords are kept salted and hashed in the web folder; a sign-in lasts a month in that browser.</p>");
-        return b.append("</div></main>").append(SHELL_JS).append("</body></html>").toString();
+        return b.append("</div></main>").append(script("shell")).append("</body></html>").toString();
     }
 
     /** The menu's own script: the theme toggle, the buttons that send a line, the dots refreshed from the server. */
-    static final String SHELL_JS = "<script>(function(){var t=document.getElementById('theme'),lb=document.getElementById('theme-label');function paint(){var light=document.documentElement.getAttribute('data-theme')==='light';if(lb)lb.textContent=light?'dark':'light'}paint();"
+    static final String SHELL_JS = "(function(){var t=document.getElementById('theme'),lb=document.getElementById('theme-label');function paint(){var light=document.documentElement.getAttribute('data-theme')==='light';if(lb)lb.textContent=light?'dark':'light'}paint();"
             + "if(t)t.addEventListener('click',function(){var light=document.documentElement.getAttribute('data-theme')==='light';if(light)document.documentElement.removeAttribute('data-theme');else document.documentElement.setAttribute('data-theme','light');try{localStorage.setItem('cz.theme',light?'dark':'light')}catch(e){}paint()});"
             + "var mb=document.getElementById('more');if(mb)mb.addEventListener('click',function(){document.getElementById('side').classList.toggle('open')});"
             + "function dots(){fetch('/projects').then(function(r){return r.json()}).then(function(ps){ps.forEach(function(p){var d=document.querySelector('.dot[data-project=\"'+p.id+'\"]');if(d)d.className='dot '+p.dot})}).catch(function(){})}setInterval(dots,5000);"
-            + "})();</script>";
+            // a form that asks first says what it asks in data-confirm: the page holds no handler of its own
+            + "document.addEventListener('submit',function(ev){var f=ev.target,m=f&&f.getAttribute&&f.getAttribute('data-confirm');if(m&&!confirm(m))ev.preventDefault()},true);"
+            + "})();";
 
     /** The chat page's script: poll the transcript, place each line by its kind, show a question with its buttons, send what is typed. */
     static final String JS = "(function(){var log=document.getElementById('log'),ask=document.getElementById('ask'),st=document.getElementById('status'),state=document.getElementById('state'),form=document.getElementById('composer'),inp=form.querySelector('textarea'),proj=log.dataset.project,last=0,shownPrompt=null,partialEl=null,bubble=null,steps=null,started=false,modeEl=document.getElementById('mode'),dkey='cz.draft.'+proj,news=document.getElementById('news'),loopId=null,wantBottom=true;"
             + "window.addEventListener('error',function(ev){st.textContent='the page hit an error: '+(ev.message||ev.type)+' — reload, and tell the developer';st.style.color='var(--accent)'});"
             + "news.addEventListener('click',function(){wantBottom=true;bottom();news.hidden=true});log.addEventListener('scroll',function(){if(atBottom())news.hidden=true});"
-            + "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}"
+            + "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;')}"
             + "function dedent(s){var ls=s.split('\\n'),m=null;ls.forEach(function(l){if(!l.trim())return;var n=l.match(/^ */)[0].length;if(m===null||n<m)m=n});return m?ls.map(function(l){return l.slice(m)}).join('\\n'):s}"
+            // a reply is the model's: every mark of it is escaped, quotes too (a quote in a link's address ended the attribute and began another);
+            // a picture of the web is a link to it, never loaded; a link shows the host it leads to unless its words show it; one that leads back
+            // to this machine, to the chat's own name or to a machine of the settings (data-own) stays the words it was written as (ResearchZosho 0.8.1)
+            + "var own=(log.dataset.own||'').toLowerCase().split(/\\s+/).filter(Boolean),here=location.host.toLowerCase();function bare(a){return a.replace(/:\\d{1,5}$/,'')}"
+            + "function hostOf(u){var m=/^https?:\\/\\/([^\\/?#\\s]*)/i.exec(u.replace(/&amp;/g,'&'));if(!m)return '';var a=m[1].toLowerCase(),at=a.lastIndexOf('@');return at>=0?a.slice(at+1):a}"
+            + "function thisMachine(a){var h=bare(a).replace(/\\.+$/,'');if(!h||a===here||h===bare(here))return true;if(h.charAt(0)==='['||h.indexOf(':')>=0)return true;if(h==='localhost'||/\\.localhost$/.test(h)||h==='0.0.0.0'||/^127\\./.test(h)||/^0x/.test(h))return true;if(/^[0-9.]+$/.test(h)&&(!/^(\\d{1,3}\\.){3}\\d{1,3}$/.test(h)||h.split('.').some(function(p){return +p>255||/^0\\d/.test(p)})))return true;return own.indexOf(h)>=0}"
+            + "function leadsTo(words,a){var h=bare(a);if(!h)return '';var q=h.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&');return new RegExp('(^|[^a-z0-9.@-])'+q+'(?![a-z0-9-]|\\\\.[a-z0-9])').test(words.toLowerCase())?'':' <span class=\"leads\">('+h+')</span>'}"
+            + "function link(words,u){var a=hostOf(u);if(!a||thisMachine(a))return null;return '<a href=\"'+u+'\" target=\"_blank\" rel=\"noopener noreferrer\">'+words+'</a>'+leadsTo(words,a)}function trimmed(u){for(;;){var n=u.replace(/(&quot;|&#39;|&gt;|[.,;:!?])$/,'');if(n===u)return u;u=n}}"
             + "function inline(h){h=h.replace(/`([^`\\n]+)`/g,function(m,c){return '<code>'+c+'</code>'});h=h.replace(/\\*\\*([^*\\n]+)\\*\\*/g,'<b>$1</b>').replace(/(^|[^*\\w])\\*([^*\\n]+)\\*(?!\\w)/g,'$1<i>$2</i>');"
-            + "h=h.replace(/\\[([^\\]\\n]+)\\]\\((https?:[^)\\s]+)\\)/g,'<a href=\"$2\" target=\"_blank\" rel=\"noopener\">$1</a>');h=h.replace(/(^|[\\s(])(https?:\\/\\/[^\\s<)]+)/g,'$1<a href=\"$2\" target=\"_blank\" rel=\"noopener\">$2</a>');return h}"
+            + "h=h.replace(/!\\[([^\\]\\n]*)\\]\\((https?:[^)\\s]+)\\)/g,function(m,alt,u){return '['+(alt||u)+']('+u+')'});h=h.replace(/\\[([^\\]\\n]+)\\]\\((https?:[^)\\s]+)\\)/g,function(m,w,u){return link(w,u)||m});"
+            + "h=h.replace(/(^|[\\s(])(https?:\\/\\/[^\\s<)]+)/g,function(m,p,u){var t=trimmed(u),l=link(t,t);return l?p+l+u.slice(t.length):m});return h}"
             + "function isDiff(l){return /^(\\+\\+\\+ |--- |@@ |[+-](?![+-\\s])|diff --git|index [0-9a-f]+\\.\\.)/.test(l)}function inDiff(l){return /^([+-]|@@ |diff --git|index [0-9a-f]+\\.\\.| )/.test(l)}"
             + "function md(src){var s=dedent(src),lines=s.split('\\n'),out=[],i=0;"
             + "function para(buf){if(buf.length)out.push('<p>'+inline(esc(buf.join(' ')))+'</p>');return[]}var buf=[];"
@@ -513,8 +530,36 @@ public final class WebChat {
     static void send(HttpExchange x, int status, String type, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         x.getResponseHeaders().set("Content-Type", type); x.getResponseHeaders().set("Cache-Control", "no-store");
+        x.getResponseHeaders().set("Content-Security-Policy", POLICY); x.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
         x.sendResponseHeaders(status, bytes.length);
         try (OutputStream os = x.getResponseBody()) { os.write(bytes); }
     }
-    static void redirect(HttpExchange x, String to) throws IOException { x.getResponseHeaders().set("Location", to); x.sendResponseHeaders(303, -1); x.close(); }
+    static void redirect(HttpExchange x, String to) throws IOException { x.getResponseHeaders().set("Location", to); x.getResponseHeaders().set("Content-Security-Policy", POLICY); x.sendResponseHeaders(303, -1); x.close(); }
+
+    /**
+     * The one policy of every page the web chat serves (ported from ResearchZosho 0.8.1). Nothing is loaded from anywhere but the chat
+     * itself: a script only as one of its own files (no script written into a page runs, and no handler written into a tag: a page
+     * holds none of either), a picture only from its own addresses (it serves none), a form posted and a request made only to itself,
+     * and no base address a tag could move. Styles are the page's own, written into it. A tag a model's reply got into a page could
+     * neither run nor call out.
+     */
+    static final String POLICY = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'";
+
+    /** The page's scripts, each a file of the chat's own: its name in {@code /static/cz-<name>.js} to its text. */
+    static final Map<String, String> SCRIPTS = Map.of("theme", THEME_JS, "shell", SHELL_JS, "chat", JS);
+
+    /** A script tag for one of the chat's own scripts. */
+    static String script(String name) { return "<script src=\"/static/cz-" + name + ".js\"></script>"; }
+
+    /** One of the chat's own scripts, served as a script; anything else under /static/ is not found. */
+    static void sendScript(HttpExchange x, String file) throws IOException {
+        String name = file.startsWith("cz-") && file.endsWith(".js") ? file.substring(3, file.length() - 3) : "";
+        String text = SCRIPTS.get(name);
+        if (text == null) { send(x, 404, "text/plain; charset=utf-8", "nothing here"); return; }
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        x.getResponseHeaders().set("Content-Type", "text/javascript; charset=utf-8"); x.getResponseHeaders().set("Cache-Control", "no-store");
+        x.getResponseHeaders().set("Content-Security-Policy", POLICY); x.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+        x.sendResponseHeaders(200, bytes.length);
+        try (OutputStream os = x.getResponseBody()) { os.write(bytes); }
+    }
 }

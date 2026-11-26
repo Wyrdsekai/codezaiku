@@ -17,7 +17,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.codezaiku.exec.Shell;
+import org.codezaiku.exec.Sandbox;
 
 /**
  * Minimal LSP (JSON-RPC over stdio) client — the type-and-scope-aware checker the field uses to kill
@@ -56,15 +56,15 @@ public final class LspClient implements AutoCloseable {
         if (language == null) return null;
         String lang = language.toLowerCase(Locale.ROOT);
         String[] cmd = switch (lang) {
-            case "rust" -> have("rust-analyzer") ? new String[]{"rust-analyzer"} : null;
-            case "python" -> have("pyright-langserver") ? new String[]{"pyright-langserver", "--stdio"}
-                    : have("pylsp") ? new String[]{"pylsp"} : null;
-            case "go" -> have("gopls") ? new String[]{"gopls"} : null;
+            case "rust" -> have(root, "rust-analyzer") ? new String[]{"rust-analyzer"} : null;
+            case "python" -> have(root, "pyright-langserver") ? new String[]{"pyright-langserver", "--stdio"}
+                    : have(root, "pylsp") ? new String[]{"pylsp"} : null;
+            case "go" -> have(root, "gopls") ? new String[]{"gopls"} : null;
             case "typescript", "javascript", "js", "ts", "jsx", "tsx" ->
-                    have("typescript-language-server") ? new String[]{"typescript-language-server", "--stdio"} : null;
-            case "java" -> have("jdtls") ? new String[]{"jdtls"} : null;
-            case "cpp", "c++", "c", "cxx" -> have("clangd") ? new String[]{"clangd"} : null;
-            case "kotlin", "kt" -> have("kotlin-language-server") ? new String[]{"kotlin-language-server"} : null;
+                    have(root, "typescript-language-server") ? new String[]{"typescript-language-server", "--stdio"} : null;
+            case "java" -> have(root, "jdtls") ? new String[]{"jdtls"} : null;
+            case "cpp", "c++", "c", "cxx" -> have(root, "clangd") ? new String[]{"clangd"} : null;
+            case "kotlin", "kt" -> have(root, "kotlin-language-server") ? new String[]{"kotlin-language-server"} : null;
             default -> null;
         };
         if (cmd == null) return null;
@@ -111,9 +111,11 @@ public final class LspClient implements AutoCloseable {
         }
     }
 
-    private static boolean have(String bin) {
+    /** Whether the server is on the PATH its process will have: the sandbox's where commands are sandboxed. */
+    private static boolean have(Path root, String bin) {
         try {
-            Process p = Shell.pb("command -v " + bin).start();
+            Process p = Sandbox.in(root).fixed().shell("command -v " + bin).redirectErrorStream(true)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
             return p.waitFor() == 0;
         } catch (Exception e) {
             return false;
@@ -124,7 +126,7 @@ public final class LspClient implements AutoCloseable {
     public synchronized void start() {
         if (started || dead) return;
         try {
-            proc = new ProcessBuilder(command).directory(root.toFile()).start();
+            proc = Sandbox.in(root).command(command).start();
             out = proc.getOutputStream();
             Thread reader = new Thread(() -> readLoop(proc.getInputStream()), "lsp-reader");
             reader.setDaemon(true);

@@ -8,6 +8,7 @@ import org.codezaiku.acp.AcpServer;
 import org.codezaiku.drive.DriveClient;
 import org.codezaiku.drive.Auto;
 import org.codezaiku.drive.SavedModels;
+import org.codezaiku.drive.Fallback;
 import org.codezaiku.drive.Spend;
 import org.codezaiku.gate.Gate;
 import org.codezaiku.gate.GateResult;
@@ -39,8 +40,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.codezaiku.library.CrateIndexer;
 import org.codezaiku.library.ErrorQuery;
@@ -89,10 +93,14 @@ import org.codezaiku.review.ReportFindingTool;
 import org.codezaiku.review.ReviewReport;
 import org.codezaiku.tools.AnswerDraftTool;
 import org.codezaiku.tools.EditFileTool;
+import org.codezaiku.tools.GivenAddresses;
 import org.codezaiku.tools.PathScope;
 import org.codezaiku.tools.ReadDepSourceTool;
 import org.codezaiku.tools.ReplaceSymbolTool;
 import org.codezaiku.tools.WebSearchTool;
+import org.codezaiku.exec.GitDirGuard;
+import org.codezaiku.exec.GitOutside;
+import org.codezaiku.exec.Sandbox;
 import org.codezaiku.exec.Shell;
 
 import com.sun.net.httpserver.HttpExchange;
@@ -132,7 +140,7 @@ public final class FamiliarMain {
     private static final String MODEL = Config.get("CODEZAIKU_MODEL", "local-model");
 
     /** Reported by `codezaiku --version` and by the MCP server handshake. */
-    public static final String VERSION = "0.3.19";
+    public static final String VERSION = "0.3.20";
 
     /**
      * Lucene announces on every start that the vector incubator module is not enabled. It is
@@ -606,7 +614,7 @@ public final class FamiliarMain {
             String scopeSpec = (args.length >= 3 && !args[2].isBlank()) ? args[2] : null;
             String baseUrl = driveArg(args, 3);
             int maxTurns = args.length >= 5 ? Integer.parseInt(args[4]) : 30;
-            chosenOrExit(baseUrl, modelFlag);
+            refusedAtCapOrExit(baseUrl, modelFlag, Auto.Job.of("review", "B", true, root));
             String summary = review(root, scopeSpec, baseUrl, maxTurns, modelFlag).summary();
             System.out.println("\n=== REVIEW ===\n" + anchorReview(root, scopeSpec, summary));
             writeSarif(lastReviewFindings);
@@ -624,13 +632,14 @@ public final class FamiliarMain {
         if (args.length >= 2 && args[0].equals("research")) {
             // research <question|@file> [broad|depth] [drive] [maxTurns]
             String question = resolveGoal(args[1]);
+            GivenAddresses.personSaid(question);   // the person's question: an address in it may be opened; a sub-question the model writes gives nothing
             String mode = args.length >= 3 ? args[2] : "broad";
             String baseUrl = driveArg(args, 3);
             int maxTurns = args.length >= 5 ? Integer.parseInt(args[4]) : 30;
             if ("fan".equalsIgnoreCase(mode)) {
                 System.out.println("\n=== RESEARCH ===\n" + researchFan(question, baseUrl, maxTurns).summary());
             } else {
-                chosenOrExit(baseUrl, modelFlag);
+                refusedAtCapOrExit(baseUrl, modelFlag, Auto.Job.of("research", "A", true, Path.of(System.getProperty("user.dir"))));
                 FamiliarLoop.Result res = research(question, mode, baseUrl, maxTurns, modelFlag);
                 System.out.println("\n=== RESEARCH ===\n" + res.summary());
             }
@@ -685,6 +694,7 @@ public final class FamiliarMain {
         "CODEZAIKU_OPS_AUTHORITY", "CODEZAIKU_OPS_AUDIT",
         "CODEZAIKU_OPS_ROLLBACK", "CODEZAIKU_SEARXNG", "CODEZAIKU_DISTILLER_URL",
         "CODEZAIKU_OPS_FALCO_ALERTS", "CODEZAIKU_OPS_LEARN", "CODEZAIKU_HOME",
+        Sandbox.SETTING, Sandbox.CACHE, Sandbox.ENV, Sandbox.READ, Sandbox.WRITE, Sandbox.SOCKETS, Sandbox.NETWORK, Sandbox.HOSTS, Sandbox.LISTEN,
     };
 
     /** Secret-shaped settings report only that they are set. `config list` output gets pasted into
@@ -1044,6 +1054,7 @@ public final class FamiliarMain {
             With a second model saved, auto is the default: best judgement picks by tier, wait and price, and says why.
             --wait <minutes> says how long you will wait for this job (0 = as long as it takes); auto.wait_minutes is the setting.
             --overseer <saved name> has a stronger model review the work; auto.overseer on makes auto pair one.
+            config set fallback <saved name>: a job whose model does not answer or is busy runs on that one, and says so.
             Configuration is by environment variable; see docs/CONFIGURATION.md.
             """.formatted(DEFAULT_DRIVE));
     }
@@ -1073,8 +1084,10 @@ public final class FamiliarMain {
      * lock-free, so always-on is safe under concurrent runs).
      */
     private static void decompose(Path root, String goal, String baseUrl, int maxTurns, String gateName, String model) {
+        GivenAddresses.personSaid(goal);   // the task is the person's words: an address in it may be opened
         SavedModels.Choice chosenModel = chosenOrExit(baseUrl, model, Auto.Job.of("decompose", Auto.tierForCoding(goal, false), true, root));
         System.out.println("model: " + chosenModel.entry().describe());
+        sandboxFor(root, chosenModel.drive(), System.out);
         var drive = new DriveClient(chosenModel.drive(), chosenModel.model()).effort(chosenModel.entry().effort());
         long[] usage = new long[4];
         DriveClient.countInto(usage);
@@ -2358,7 +2371,7 @@ public final class FamiliarMain {
     }
 
     private static void loop(Path root, String goal, String baseUrl, int maxTurns, String gateName, String model) {
-        chosenOrExit(baseUrl, model, Auto.Job.of("code", Auto.tierForCoding(goal, false), true, root));
+        refusedAtCapOrExit(baseUrl, model, Auto.Job.of("code", Auto.tierForCoding(goal, false), true, root));
         Tracked t = runLoopTracked(root, goal, baseUrl, maxTurns, gateName, null, model);
         FamiliarLoop.Result result = t.result();
         System.out.println("\n=== LOOP " + (result.done() ? "task_done" : "STOPPED")
@@ -2376,9 +2389,31 @@ public final class FamiliarMain {
 
     /**
      * {@code model} "auto", or nothing named while auto is the default (the setting on and a second model saved): best judgement
-     * picks for the job and says why. A named model is taken as it is; the settings' drive when auto is off.
+     * picks for the job and says why. A named model is taken as it is; the settings' drive when auto is off. Then the fallback: when
+     * one is set and the model picked does not answer or is busy, the job runs on the fallback, and a line says so ({@link Fallback}).
+     * Every job that chooses a model at its start comes through here: code, run, loop, decompose, review, research, the chat, the
+     * MCP and ACP jobs.
      */
     static SavedModels.Choice chosen(String driveArg, String model, Auto.Job job) {
+        Fallback.Outcome o = Fallback.decide(picked(driveArg, model, job), job);
+        if (o.line() != null) System.out.println(o.line());
+        return o.choice();
+    }
+
+    /**
+     * Says how this job's commands run, and holds the job to it: in a sandbox; or, on a machine that has none, not sandboxed for a
+     * local model and not at all for a hosted one ({@link Sandbox}). Called when the job knows its model and before its tools are
+     * made, since the tools that run a command are left off the table where commands do not run.
+     */
+    public static void sandboxFor(Path root, String drive, PrintStream out) {
+        boolean hosted = SavedModels.hosted(drive);
+        Sandbox.model(root, hosted);
+        if (out != null) for (String line : Sandbox.lines(root, hosted)) out.println(line);
+        if (out != null) Sandbox.say(root, out::println);    // the line of the job's first command: the Gradle fetch, when one is made
+    }
+
+    /** The pick alone: auto's or the one named, refused at a cap reached; no server is asked anything. */
+    static SavedModels.Choice picked(String driveArg, String model, Auto.Job job) {
         boolean auto = model != null && model.strip().equalsIgnoreCase(Auto.NAME);
         boolean settingsDrive = driveArg == null || driveArg.isBlank() || Config.driveBase(driveArg).equalsIgnoreCase(Config.driveBase(Config.get("CODEZAIKU_DRIVE", "http://localhost:8200")));
         if (auto || ((model == null || model.isBlank()) && settingsDrive && Auto.isDefault())) {
@@ -2420,11 +2455,18 @@ public final class FamiliarMain {
     }
 
     /** The same for the command line: the refusal is printed, and the command ends. */
-    static SavedModels.Choice chosenOrExit(String driveArg, String model) { return chosenOrExit(driveArg, model, Auto.Job.of("code", "B", true, null)); }
-
     static SavedModels.Choice chosenOrExit(String driveArg, String model, Auto.Job job) {
         try { return chosen(driveArg, model, job); }
         catch (IllegalStateException e) { System.err.println(e.getMessage()); System.exit(3); return null; }
+    }
+
+    /**
+     * The cap's refusal, for a command whose job chooses its model again when it starts (code, loop, review, research): the pick
+     * alone, so the job's own choice is the one that asks the servers, once.
+     */
+    static void refusedAtCapOrExit(String driveArg, String model, Auto.Job job) {
+        try { picked(driveArg, model, job); }
+        catch (IllegalStateException e) { System.err.println(e.getMessage()); System.exit(3); }
     }
 
     /** The job's tokens and cost on the ledger, and the line a person reads about them. */
@@ -2443,9 +2485,11 @@ public final class FamiliarMain {
     static ModelRun settle(String kind, Path where, SavedModels.Choice c, long[] usage, long secs, String status, String raised, String note) {
         double cost = c.model() != null && c.model().endsWith(":free") ? 0 : c.entry().cost(usage);   // the free twin is priced at nothing
         String onLine = raised == null ? note : note == null ? raised : raised + "; " + note;
-        ModelRun run = new ModelRun(c.entry().name() == null ? "" : c.entry().name(), c.model(), c.entry().host(), usage, cost, c.entry().prices() != null, onLine);
-        if (usage[0] + usage[3] > 0) {
-            try { Spend.record(kind, where, c.entry(), usage, cost, secs, status, raised, c.model(), note); }
+        Map<String, Integer> servedBy = DriveClient.servedBy(usage);   // through a router, who served the job's requests
+        int unreported = DriveClient.unreported(usage);                 // answers the server sent no token counts with: in no figure
+        ModelRun run = new ModelRun(c.entry().name() == null ? "" : c.entry().name(), c.model(), c.entry().host(), usage, cost, c.entry().prices() != null, onLine, servedBy);
+        if (usage[0] + usage[3] > 0 || unreported > 0) {
+            try { Spend.record(kind, where, c.entry(), usage, cost, secs, status, raised, c.model(), note, servedBy, unreported); }
             catch (IOException e) { System.err.println("the spend ledger could not be written: " + e.getMessage()); }
         }
         return run;
@@ -2482,10 +2526,18 @@ public final class FamiliarMain {
         public Tracked(FamiliarLoop.Result result, List<String> files, boolean filesComplete) { this(result, files, filesComplete, null); }
     }
 
-    /** What a job ran on and what it cost: the saved model's name (blank when none), the model id, the host, the tokens, the dollars. */
-    public record ModelRun(String name, String model, String host, long[] usage, double cost, boolean priced, String raised) {
+    /**
+     * What a job ran on and what it cost: the saved model's name (blank when none), the model id, the host, the tokens, the dollars;
+     * and through a router, who served its requests (provider → requests, as the router named them; empty for any other host).
+     */
+    public record ModelRun(String name, String model, String host, long[] usage, double cost, boolean priced, String raised, Map<String, Integer> servedBy) {
+        public ModelRun { servedBy = servedBy == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(servedBy)); }
+        public ModelRun(String name, String model, String host, long[] usage, double cost, boolean priced, String raised) { this(name, model, host, usage, cost, priced, raised, Map.of()); }
         public ModelRun(String name, String model, String host, long[] usage, double cost, boolean priced) { this(name, model, host, usage, cost, priced, null); }
-        public String line() { return "model: " + (name.isBlank() ? model + " via " + host : name + " (" + model + " via " + host + ")") + " — " + Spend.usageLine(usage, cost, priced) + (raised == null ? "" : " — " + raised); }
+        public String line() {
+            return "model: " + (name.isBlank() ? model + " via " + host : name + " (" + model + " via " + host + ")") + " — " + Spend.usageLine(usage, cost, priced)
+                    + (servedBy.isEmpty() ? "" : " — " + Spend.servedLine(servedBy)) + (raised == null ? "" : " — " + raised);
+        }
     }
 
     /** As {@link #runLoop}, also returning which files the run wrote. */
@@ -2524,6 +2576,9 @@ public final class FamiliarMain {
 
     public static Tracked runLoopTracked(Path root, String goal, String baseUrl, int maxTurns,
                                          String gateName, String modeOverride, String model, Hooks hooks) {
+        // The task is the person's words (or the host's, for a run another program asked for): an address in it may be opened. Only
+        // the task as it came: what the harness adds to it below, and what a pass of its own writes later, gives nothing.
+        GivenAddresses.personSaid(goal);
         // C/M/R task-shape (SPEC_CODEZAIKU_AS_FAMILIAR §6): resolve the mode, surface it with evidence, and
         // prepend its shaping guidance to the goal so the small model gets the right posture.
         CodeMode mode = CodeMode.resolve(root, goal, modeOverride);
@@ -2537,6 +2592,9 @@ public final class FamiliarMain {
         boolean autoPick = model != null && model.strip().equalsIgnoreCase(Auto.NAME) || ((model == null || model.isBlank()) && Auto.isDefault());
         SavedModels.Choice chosenModel = chosen(baseUrl, model, job);
         System.out.println("model: " + chosenModel.entry().describe());
+        sandboxFor(root, chosenModel.drive(), System.out);
+        // Where no command runs (a hosted model, no sandbox here) the model is told at the start, so it plans the work without them
+        if (!Sandbox.commandsRun(root)) goal = goal + "\n\nNOTE: " + Sandbox.whyNoCommands();
         var drive = new DriveClient(chosenModel.drive(), chosenModel.model()).effort(chosenModel.entry().effort());
         // The overseer seat: a stronger model that writes the plan and reviews the work, while the drive does it (2026-10-18)
         SavedModels.Choice overseerChoice = overseerFor(chosenModel, autoPick, job);
@@ -2547,6 +2605,7 @@ public final class FamiliarMain {
         DriveClient.countInto(usage);
         var lsp = LspClient.forProject(root, ProjectFacts.language(root));
         var tools = ToolRegistry.standard(root, lsp); // no gate; lsp powers edit_file fallback + replace_symbol
+        tools.withGit(root, false);                   // with git.push on only: push, fetch and pull requests by CodeZaiku (an ACP client is asked as well)
         if (hooks != null && hooks.listener() != null) tools.listener(hooks.listener());
         // Tools the host brought: the MCP servers an ACP client named in session/new, already started and listed.
         if (hooks != null && hooks.extraTools() != null) for (var extra : hooks.extraTools()) tools.add(extra);
@@ -2578,10 +2637,14 @@ public final class FamiliarMain {
             long[] ou = loop.overseerUsage();
             oversaw = settle("oversee", root, overseerChoice, ou, (System.currentTimeMillis() - startedAt) / 1000, result.done() ? "success" : "incomplete", null);
             raised = "overseer " + (overseerChoice.entry().name() == null ? overseerChoice.model() : overseerChoice.entry().name())
-                    + ": " + loop.overseerReviews() + " review" + (loop.overseerReviews() == 1 ? "" : "s") + ", " + Spend.usageLine(ou, oversaw.cost(), oversaw.priced());
+                    + ": " + loop.overseerReviews() + " review" + (loop.overseerReviews() == 1 ? "" : "s") + ", " + Spend.usageLine(ou, oversaw.cost(), oversaw.priced())
+                    + (oversaw.servedBy().isEmpty() ? "" : ", " + Spend.servedLine(oversaw.servedBy()));
         }
         ModelRun run = settle("code", root, chosenModel, usage, (System.currentTimeMillis() - startedAt) / 1000, result.done() ? "success" : "incomplete", raised);
         System.out.println(run.line());
+        for (String line : Sandbox.netLines(root, startedAt)) System.out.println(line);
+        for (String line : GitOutside.lines(root, startedAt)) System.out.println(line);
+        for (String line : GitDirGuard.ended(root, startedAt, true)) System.out.println(line);
         return new Tracked(result,
                 scope == null ? List.of() : scope.written(),
                 scope != null && !scope.mayBeIncomplete(), run, oversaw);
@@ -2594,6 +2657,7 @@ public final class FamiliarMain {
     /** {@code model}: a saved model's name, or a model id on the drive; null for the settings. The review's tokens go on the ledger. */
     public static FamiliarLoop.Result review(Path root, String scopeSpec, String baseUrl, int maxTurns, String model) {
         SavedModels.Choice c = chosen(baseUrl, model, Auto.Job.of("review", "B", true, root));
+        sandboxFor(root, c.drive(), System.out);
         long[] usage = new long[4];
         long startedAt = System.currentTimeMillis();
         DriveClient.countInto(usage);
@@ -2840,8 +2904,8 @@ public final class FamiliarMain {
             }
         }
         try {
-            Process p = new ProcessBuilder("git", "diff", "-U3", scopeSpec)
-                    .directory(root.toFile()).redirectErrorStream(false).start();
+            Process p = Sandbox.in(root).command("git", "diff", "-U3", scopeSpec)
+                    .redirectErrorStream(false).start();
             String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             p.waitFor();
             return Redactor.scrub(out);
@@ -3102,6 +3166,8 @@ public final class FamiliarMain {
                 + "written answer that (a) answers the question directly up front, (b) gives the supporting "
                 + "detail, and (c) ends with a SOURCES list of the URLs you actually used.";
         say(out, "research (" + (broad ? "broad" : "depth") + "): " + question);
+        // a run that may look at the project's files runs its read-only shell there: sandboxed, or left off (sandboxFor)
+        if (projectFiles) sandboxFor(cwd, drive.baseUrl(), out);
         say(out, "search backend: " + WebSearchTool.endpoint());
         var draft = new AnswerDraftTool();
         var tools = projectFiles ? ToolRegistry.research(cwd, question, draft) : ToolRegistry.researchWeb(question, draft);

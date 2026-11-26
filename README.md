@@ -116,6 +116,9 @@ latest release each time and replace the old install rather than writing over it
 left behind. Your config and data in `~/.codezaiku` are untouched. The `.deb` upgrades in place with
 `sudo apt install ./codezaiku_<new>_all.deb` and keeps `/var/lib/codezaiku`; if you enabled
 `codezaiku.service`, the upgrade does not restart it, it tells you to when it suits you.
+`doctor` and the chat say when a newer release is out: they ask GitHub at most once a day.
+`codezaiku config set update off` stops that; `CODEZAIKU_UPDATE` in
+[CONFIGURATION.md](docs/CONFIGURATION.md) says what each mode sends.
 
 <details>
 <summary>Other ways: tarball by hand, .deb, from source</summary>
@@ -147,7 +150,7 @@ codezaiku setup               # the first ten minutes: the model (found, served 
 codezaiku model serve install # this machine's memory, on demand: the measured model, llama.cpp behind a proxy that starts it when asked and stops it after 20 idle minutes (on Linux llama.cpp's container for the GPU it finds: NVIDIA, AMD or Intel; Metal on macOS, Vulkan on Windows)
 codezaiku model detect        # finds Ollama / llama.cpp / LM Studio / vLLM if running
 codezaiku model use http://localhost:8200
-codezaiku model add deepseek openrouter deepseek/deepseek-v4.1-flash --prices 0.032/0.144/0.002   # a hosted model under a name,
+codezaiku model add deepseek openrouter deepseek/deepseek-v4.1-flash --prices 0.14/0.42/0.0042   # a hosted model under a name,
 codezaiku model key openrouter --file ~/openrouter-key.txt                                        # its key kept for its host,
                               # chosen per job: codezaiku code . "…" --model deepseek; `codezaiku spend` says what the jobs cost
 
@@ -229,7 +232,9 @@ runs commands, or searches the web, then reports back. You steer it turn by turn
 By default it asks before changing or running anything, and shows you the exact change first.
 You answer once, or "always" for that command. `/undo` reverses what it did, step by step.
 Conversations are saved and can be resumed later, and `/remember` keeps a fact available in
-every future conversation in that project. `/switch <project>` moves the chat to another project in the same terminal and tells it where you
+every future conversation in that project. It can push a branch, bring in a remote's new commits,
+and read or open the project's pull requests on GitHub: CodeZaiku does these itself with your own
+git credentials and `gh`, after you say yes to a question that shows where, what and by whom. `/switch <project>` moves the chat to another project in the same terminal and tells it where you
 were. `/help` inside the chat lists everything else —
 background tasks, delegating work to a second agent, switching models, cost tracking.
 

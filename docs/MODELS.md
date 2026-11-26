@@ -10,7 +10,13 @@ checks it against a recorded sha256, and puts llama.cpp behind a small proxy tha
 something asks and stops it after twenty idle minutes. Linux uses llama.cpp's container for the GPU it finds:
 CUDA on an NVIDIA card, ROCm on an AMD Instinct card, Vulkan on a Radeon, a Ryzen AI chip or an Intel GPU (Docker
 with the kernel's render devices passed through; no NVIDIA runtime needed). macOS uses its Metal build as a
-launchd agent, Windows its Vulkan build as a logon task. `codezaiku setup` offers it when it finds no server. Everything else stays yours: the servers you already run, kept under names, switched between.
+launchd agent, Windows its Vulkan build as a logon task. On Linux the model's container has no way out to the network,
+and the install tries that before it finishes; the address the model is used at, `http://127.0.0.1:8211`, is the
+proxy's and stays the same ([SECURITY.md](../SECURITY.md), "A model on your own machine"). `codezaiku model serve status`
+says which way it is set up; one set up by an earlier version changes when you run `model serve install` again.
+Other programs, ResearchZosho among them, use the server by that address; CodeZaiku's model folder, `~/.codezaiku/model`, is
+CodeZaiku's alone, and `model serve uninstall` removes only what its install put there.
+`codezaiku setup` offers it when it finds no server. Everything else stays yours: the servers you already run, kept under names, switched between.
 
 ```bash
 codezaiku setup                   # the first ten minutes: finds a server, or serves one, or takes a key
@@ -18,7 +24,7 @@ codezaiku model serve install     # the model on this machine, on demand; status
 codezaiku model detect            # find what is running locally
 codezaiku model add big http://localhost:8201
 codezaiku model use big           # point the drive at it, and report what it serves
-codezaiku model add deepseek openrouter deepseek/deepseek-v4.1-flash --prices 0.032/0.144/0.002 --cap 20
+codezaiku model add deepseek openrouter deepseek/deepseek-v4.1-flash --prices 0.14/0.42/0.0042 --cap 20
 codezaiku model key openrouter --file ~/openrouter-key.txt
 codezaiku code . "add a --json flag" --model deepseek     # this job on that model; the default stays
 codezaiku model list
@@ -32,6 +38,10 @@ prints the two commands most likely to get you going.
 
 `model use` probes before switching, so a dead endpoint is reported now rather than becoming a confusing
 failure in your next command.
+
+A model on OpenRouter is served by the providers OpenRouter picks, less those based in, running in or owned from the
+countries on the avoid list ([SECURITY.md](../SECURITY.md), "The places CodeZaiku avoids"). `model add` and `model list` say how
+many providers serve the model and which are left out; when none is left, a job says so and sends nothing.
 
 ---
 
@@ -53,7 +63,10 @@ measured reading and writing, not coding; it calls tools cleanly, which is what 
 | 4 GB | Gemma 4 E4B at 4-bit | `gemma-4-E4B-it-Q4_K_M.gguf` | *research*: right, the best citation reader of the small models; 3.6 GB in use |
 | 2 GB | Gemma 4 E2B at 4-bit | `gemma-4-E2B-it-Q4_K_M.gguf` | *research*: facts right, write-ups thin. A hosted API is the better answer this small |
 
-The files are the ones Hugging Face lists under `unsloth/<model>-GGUF`. The full research list, with the
+The files are the ones Hugging Face lists under `unsloth/<model>-GGUF`, each taken at a fixed revision of its
+repository, the one it was measured at: a file made again upstream under the same name does not change what an
+install downloads. Each row also records the file's sha256 and size, so `doctor` and `setup` say how big the download is
+without asking anyone. The full research list, with the
 second and third choices per tier and the models measured and not recommended, is
 [ResearchZosho's models page](https://researchzosho.org/models/).
 
@@ -210,20 +223,24 @@ where it came from, but never prints it.
 
 ## Hosted models, measured (October 2026)
 
-**Every price and cost here is from the providers' lists as read on 16 and 17 October 2026**: OpenRouter's public model list,
-Anthropic's pricing page, OpenAI's through OpenRouter. They change often, so read the list before you count on a figure, and keep
-your own current with `codezaiku model set <name> --prices in/out/cache`; `codezaiku spend` reports at the prices you gave it.
+**The results, the minutes and the cost a job here were measured in October 2026, at the prices read on 16 and 17 October
+2026**: OpenRouter's public model list, Anthropic's pricing page, OpenAI's through OpenRouter. **The prices in the `model add`
+lines below were read again on 26 November 2026**, from OpenRouter's public model list. Three of them had moved a good deal in
+six weeks, so read the list before you count on a figure, and keep your own current with
+`codezaiku model set <name> --prices in/out/cache`; `codezaiku spend` reports at the prices you gave it. Through OpenRouter each
+provider that serves a model sets its own price, and the list shows one of them; a job's record names the providers that
+served it.
 
 The picks, from the two batteries below:
 
 - **Cheapest that is right: GLM-5.3 through OpenRouter.** 34 of 40 on the hard set, 17 of 18 on maintenance, about seven minutes
-  and eight cents a job. `codezaiku model add glm openrouter z-ai/glm-5.3 --prices 0.08/4.80/0.08`
+  and eight cents a job. `codezaiku model add glm openrouter z-ai/glm-5.3 --prices 0.07/1.40/0.069`
 - **The careful one: GPT-6.1 Sol through OpenAI.** 38 of 40 and 18 of 18, ten minutes and 77 cents a job; Kimi K3 through
   OpenRouter is one run behind at 43 cents. `codezaiku model add sol openai gpt-6.1-sol --prices 2/10/0.10` and
-  `codezaiku model add kimi openrouter moonshotai/kimi-k3 --prices 0.30/11.94/0.21`
+  `codezaiku model add kimi openrouter moonshotai/kimi-k3 --prices 0.192/16.00/0.182`
 - **Ordinary work at almost nothing: DeepSeek V4.1 Flash through OpenRouter.** 30 of 40 and 17 of 18, two cents a job; it misses
   most of the tasks that need ML judgement and often reaches the turn cap still verifying.
-  `codezaiku model add deepseek openrouter deepseek/deepseek-v4.1-flash --prices 0.032/0.144/0.002`
+  `codezaiku model add deepseek openrouter deepseek/deepseek-v4.1-flash --prices 0.14/0.42/0.0042`
 - **Free: the local Qwen3.8 27B** on one 24 GB card: 28 of 30 on the ordinary tasks of the hard set and 16 of 18 on maintenance, 1 of the ten that need ML judgement, at two to three times the minutes. Best judgement gives it every
   job it clears.
 - **Claude Sonnet 5.5** is 34 of 40 and 18 of 18 at 84 cents a job, and the one model that could not judge how many topics a mailbox
@@ -237,7 +254,7 @@ seeded topics, a forecast with two cycles, a level shift and missing months), fi
 where a model ran it, the maintenance battery's otherwise. The record, with every task, grader and defect found along the way, is
 `bench/CODING_MODELS_2026-10.md` in the source tree.
 
-| model, host | maintenance of 18 | hard set of 40 | minutes a job | cost a job |
+| model, host | maintenance of 18 | hard set of 40 | minutes a job | cost a job, at October's prices |
 |---|---|---|---|---|
 | GPT-6.1 Sol, OpenAI | 18 | 38 | 10 | $0.77 |
 | Kimi K3, OpenRouter | 18 | 37 | 8.5 | $0.43 |
@@ -257,6 +274,27 @@ separates them is the two tasks that need ML judgement, the clustering and the h
 eight cents, or on Sol when it has to be right. The limits in [LIMITATIONS.md](LIMITATIONS.md) were measured on a local 9B; this
 table is the 27B and the hosted models.
 
+### A second local model: Inkling 2 Mini (measured November 2026)
+
+Inkling 2 Mini (Thinking Machines Lab, open weights, 26B; `Inkling-2-Mini-UD-Q4_K_XL.gguf`, 17.6 GB; it needs llama.cpp build
+12611 or newer) against Qwen3.8-27B on the same two batteries: the same 48 GB card, the same CodeZaiku (0.3.19), the same
+llama.cpp, measured on 24 and 25 November 2026. We served it with llama.cpp's `--jinja`, its makers' sampling (temperature 1.0,
+nothing cut off) and its thinking effort set to low.
+
+| | Inkling 2 Mini | Qwen3.8-27B |
+|---|---|---|
+| maintenance of 18 | 18 | 18 |
+| hard set of 40 | 28 | 26 |
+| hard-set runs that reached the 60-turn limit | 0 | 7 |
+| minutes a hard-set job | 5.4 | 15.1 |
+| writing speed | 50 tokens a second | 35 tokens a second |
+
+The two are equal within what five runs a task can tell apart (the table above has the 27B's October figures, 16 and 29, on an
+older CodeZaiku), and Inkling gets through a job about three times faster, because it finishes in fewer turns. They fail on
+different tasks: Inkling passed the clustering task 4 times of 5 where the 27B passed none, and the 27B passed the two forecasts
+5 times of 10 where Inkling passed 1. On a 48 GB card it is a reasonable local model for coding. `model serve install` still
+installs the 27B; to try Inkling, serve it yourself (see "Running a server") and point `CODEZAIKU_DRIVE` at it.
+
 ## Saved models, chosen per job
 
 One machine often has several models within reach: the server on its own card, a cheap fast one through a router, a careful
@@ -265,7 +303,7 @@ settings every other job reads.
 
 ```bash
 codezaiku model add local-27b http://localhost:8200                              # the server on this machine
-codezaiku model add deepseek openrouter deepseek/deepseek-v4.1-flash --prices 0.032/0.144/0.002 --cap 20
+codezaiku model add deepseek openrouter deepseek/deepseek-v4.1-flash --prices 0.14/0.42/0.0042 --cap 20
 codezaiku model add fable anthropic claude-fable-5-1 --prices 5/25/0.5 --effort high --note "the careful one"
 codezaiku model add sol openai gpt-6.1-sol --prices 1.5/12/0.15
 codezaiku model key openrouter --file ~/openrouter-key.txt    # kept for openrouter.ai, sent there and nowhere else
@@ -346,6 +384,35 @@ not lift the local model on hard work (15 of 24 against 29 of 40 alone, and 5 of
 plan the stronger model wrote made a long task worse, so the worker keeps its own plan. `codezaiku config set auto.overseer on`
 makes auto pair one. For hard work, the lever is which model does the work, which auto's tier choice already decides.
 
+## A fallback for when the model is busy or off
+
+```bash
+codezaiku model add homebox http://homebox:8210 qwen3.8-27b    # the bigger card, on another machine
+codezaiku model add local http://127.0.0.1:8211 gpt-oss-20b     # this machine's own
+codezaiku model use homebox
+codezaiku config set fallback local
+```
+
+With a fallback set, a job asks the model it would run on two short questions before it starts: does it answer (its model list,
+within a few seconds), and is it busy. Busy means a llama.cpp server with every one of its slots working on a request. Behind a
+llama-swap proxy only a model the proxy already has loaded is asked, so the question never starts a model, and a model that is not
+loaded counts as free. A server that shows no slots is not busy, and a hosted API is not asked. When the model is off or busy and
+the fallback answers, the job runs on the fallback, and one line before the work says so:
+
+```
+homebox does not answer, so this job runs on local (gpt-oss-20b).
+homebox is busy (4 of 4 calls in use), so this job runs on local (gpt-oss-20b).
+```
+
+The fallback may be a weaker model than the one the job would have had. The line, the job's cost line and the result document of
+`codezaiku run` name the one that ran. When the model does not answer and the fallback is busy, the job goes to the fallback and
+waits there for a free call; when both are busy, or both are off, it stays where it was and the line says both were tried. The check
+is made at the start of a `code`, `run`, `review`, `research` or `decompose` job and of a chat (`/model` inside a chat is your own
+choice). With auto on, best judgement picks among the saved models first and the fallback stands behind its pick; to keep jobs on
+the default and use the fallback only when it is busy or off, `codezaiku config set auto off`. `codezaiku model list` shows the
+fallback beside the model it stands behind, and `codezaiku config unset fallback` turns it off. With no fallback set, nothing is
+asked.
+
 ## What a job cost
 
 Every job counts the tokens the server reports — prompt, read from the cache, completion — and prices them when the saved
@@ -354,6 +421,15 @@ model has prices. The line is printed when the job ends (`model: deepseek (deeps
 job adds a line to `~/.codezaiku/spend.jsonl`. `codezaiku spend` adds them up by host and by saved model, this month and in all.
 The figures are CodeZaiku's arithmetic at the prices you wrote down, not the host's bill: a token the Claude API writes to its
 cache costs a quarter more than the input price, which they leave out.
+
+A reply the chat streams (`CODEZAIKU_STREAM`) is counted the same way: the stream asks the server for its token counts
+(`stream_options.include_usage`), and they go into `/cost`, the ledger and a saved model's monthly cap. When a model server
+sends no counts with an answer, nothing is counted for it and nothing is guessed: `/cost` says how many answers came without
+counts, and the ledger line keeps the number under `unreported`.
+
+Through OpenRouter, every request asks OpenRouter to say which provider served it, and the job keeps the count. The line at the
+end names them (`… $0.04 — served by DeepInfra (7 requests), Fireworks (1 request)`), the chat's `/cost` names them for the model in
+use, and the job's line in `spend.jsonl` keeps them under `served`. Each call's line in the log names its provider too.
 
 ## When another system drives CodeZaiku
 

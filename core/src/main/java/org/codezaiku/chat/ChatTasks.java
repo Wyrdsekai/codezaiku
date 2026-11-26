@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import org.codezaiku.exec.Sandbox;
 
 /**
  * Background work for the chat: a registry of jobs that outlive the turn that started them.
@@ -54,11 +55,16 @@ public final class ChatTasks {
     private final AtomicInteger nextId = new AtomicInteger(1);
     private final Path workDir;
     private final Consumer<String> notify;
+    private final Path project;
 
     /** @param notify receives one console line per completion — ChatIo::notifyLine. */
-    public ChatTasks(Path workDir, Consumer<String> notify) {
+    public ChatTasks(Path workDir, Consumer<String> notify) { this(workDir, notify, null); }
+
+    /** {@code project}: the folder a background command starts in and is sandboxed to; null for the folder this program was started in. */
+    public ChatTasks(Path workDir, Consumer<String> notify, Path project) {
         this.workDir = workDir;
         this.notify = notify;
+        this.project = project;
     }
 
     /** Start a shell command in the background. Returns the job (id is what the model quotes). */
@@ -66,8 +72,10 @@ public final class ChatTasks {
         Files.createDirectories(workDir);
         int id = nextId.getAndIncrement();
         Path out = workDir.resolve("task-" + id + ".log");
-        ProcessBuilder pb = new ProcessBuilder("bash", "-lc", command)
+        // sandboxed like the shell tool's commands; its own log's folder is open to it, so /dev/stdout can be opened by name
+        ProcessBuilder pb = Sandbox.in(project).write(workDir).shell(command)
                 .redirectErrorStream(true).redirectOutput(out.toFile());
+        Sandbox.firstCommand(project);                   // a closed network's first command: the Gradle fetch, once
         Process p = pb.start();
         Thread t = new Thread(() -> {
             int rc;

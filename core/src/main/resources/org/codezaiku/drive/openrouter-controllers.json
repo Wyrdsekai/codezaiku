@@ -1,0 +1,155 @@
+{
+ "recorded_on": "2026-11-20",
+ "what": "A provider of OpenRouter's list whose controlling company is based in another country than the one the list states for the provider: slug, the controlling company's country, the company as its source names it, one public source (the company's own site, a filing or a public record) with the words of it, further sources under also, and a note that says what the row rests on. chain: true marks a row that rests on two documents read together. Rows only where the sources were read on the day recorded.",
+ "rows": [
+  {
+   "slug": "alibaba",
+   "country": "CN",
+   "company": "Alibaba Group Holding Limited",
+   "source": "https://www.sec.gov/Archives/edgar/data/1577552/000119312526231755/baba-20260331.htm",
+   "says": "The principal executive offices of major businesses within Alibaba Group are located at 960-1 West Wen Yi Road, Yu Hang District, Hangzhou 311121, People’s Republic of China.",
+   "also": [
+    {
+     "source": "https://www.sec.gov/Archives/edgar/data/1577552/000119312526231755/baba-20260331.htm",
+     "says": ", which includes Alibaba Cloud and other businesses."
+    },
+    {
+     "source": "https://www.alibabacloud.com/help/en/legal/latest/alibaba-cloud-international-website-terms-of-use",
+     "says": "The Alibaba Cloud legal entity that you are contracting with is Alibaba Cloud (Singapore) Private Limited"
+    }
+   ],
+   "note": "The annual report says the segment includes Alibaba Cloud; it does not name the Singapore company of the provider's terms. The router's list also states a datacenter in China for this provider."
+  },
+  {
+   "slug": "antdigital",
+   "country": "CN",
+   "company": "Ant Group Digital Technologies",
+   "source": "https://intl.antdigital.com/en/company/contact-us",
+   "says": "Building E, Huanglong Vanke Center, 77 Xueyuan Road, Xihu District, Hangzhou.",
+   "also": [
+    {
+     "source": "https://mdn.alipayobjects.com/huamei_5slekl/afts/file/A*WO8QR4e5c4YAAAAAAAAAAAAADuv4AQ/Privacy%20Policy.pdf",
+     "says": "“Ant Group Digital Technologies” or “we”, “our” “us” means Antchain Technology Pte. Ltd. and/or Zoloz Pte. Ltd., as the case may be."
+    },
+    {
+     "source": "https://maas-global.oss-ap-southeast-1.aliyuncs.com/Terms%20of%20Service.pdf",
+     "says": "provided by Antchain Technology Pte. Ltd."
+    }
+   ],
+   "note": "Three pages: the headquarters, the privacy policy that names the Singapore companies as Ant Group Digital Technologies, and the provider's terms."
+  },
+  {
+   "slug": "minimax",
+   "country": "CN",
+   "company": "MiniMax Group Inc.",
+   "source": "https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1231/2025123100025.pdf",
+   "says": "Our headquarters and principal places of business in the PRC are at 11th Floor, Building B, Xinyan Mansion, No. 65 Guiqing Road, Xuhui District, Shanghai, PRC.",
+   "also": [
+    {
+     "source": "https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1231/2025123100025.pdf",
+     "says": "our Company has 2 major subsidiaries, Subsup Pte. Ltd. and Nanonoble Pte. Ltd. (the “Singapore Subsidiaries”), which are incorporated in Singapore"
+    },
+    {
+     "source": "https://platform.minimax.io/protocol/terms-of-service",
+     "says": "This website is operated by Nanonoble Pte. Ltd."
+    }
+   ],
+   "note": "The listing document names the Singapore company that operates the provider's site as a subsidiary."
+  },
+  {
+   "slug": "moonshotai",
+   "country": "CN",
+   "company": "Moonshot AI",
+   "source": "https://www.moonshot.ai/about",
+   "says": "76 Zhichun Road, Haidian District, Beijing",
+   "also": [
+    {
+     "source": "https://platform.moonshot.ai/docs/agreement/modeluse (redirects to https://platform.kimi.ai/docs/agreement/modeluse)",
+     "says": "constitute a legal agreement between Moonshot AI PTE. LTD."
+    },
+    {
+     "source": "https://www.moonshot.cn/about",
+     "says": "北京月之暗面科技股份有限公司"
+    }
+   ],
+   "note": "The tie between the provider and the company rests on the company's own site, not on a sentence of ownership: its About page gives the Beijing address and links its platform, whose terms name Moonshot AI PTE. LTD."
+  },
+  {
+   "slug": "novita",
+   "country": "CN",
+   "company": "PPLabs Technology Limited (PPIO)",
+   "chain": true,
+   "source": "https://tsdr.uspto.gov/statusview/sn99255805",
+   "says": "Mark: NOVITA AI. Owner Name: Hivemind Labs, Inc.",
+   "also": [
+    {
+     "source": "https://www1.hkexnews.hk/app/sehk/2026/108628/documents/sehk26061000116.pdf",
+     "says": "Hivemind Labs, Inc., a company established in the State of Delaware of the United States on November 18, 2024 and a wholly-owned subsidiary of our Company"
+    },
+    {
+     "source": "https://www1.hkexnews.hk/app/sehk/2026/108628/documents/sehk26061000116.pdf",
+     "says": "we are headquartered in the PRC"
+    }
+   ],
+   "note": "A chain of two documents, and no page of Novita's or of PPIO's states the ownership in words: the United States trademark record names Hivemind Labs, Inc. as the owner of the mark NOVITA AI (the application was abandoned on 2026-05-20), and PPIO's application proof to the Hong Kong exchange of 2026-06-10 calls Hivemind Labs, Inc. its wholly-owned subsidiary and says the company is headquartered in the PRC (Shanghai). The application proof never uses the name Novita."
+  },
+  {
+   "slug": "seed",
+   "country": "CN",
+   "company": "ByteDance, Ltd.",
+   "source": "https://www.byteplus.com/en/",
+   "says": "The AI-native enterprise partner from [ByteDance]",
+   "also": [
+    {
+     "source": "https://www.govinfo.gov/content/pkg/PLAW-118publ50/html/PLAW-118publ50.htm",
+     "says": "Public Law 118-50, Division H, section 2(g)(3): the term \"foreign adversary controlled application\" means a website, desktop application, mobile application, or augmented or immersive technology application that is operated, directly or indirectly (including through a parent company, subsidiary, or affiliate), by  (A) any of  (i) ByteDance, Ltd.; and section 2(g)(4): The term \"foreign adversary country\" means a country specified in section 4872(d)(2) of title 10, United States Code."
+    },
+    {
+     "source": "https://www.bytedance.com/about?locale=en",
+     "says": "founded ByteDance in a small four-bedroom apartment in Beijing, China"
+    }
+   ],
+   "note": "Two documents: BytePlus's own page says whose it is (the words stand over a link to bytedance.com), and the United States statute names ByteDance, Ltd. among the operators of foreign adversary controlled applications. The statute defines the countries by reference to 10 U.S.C. 4872(d)(2) and names none; the country here is the one ByteDance's own page gives for its founding."
+  },
+  {
+   "slug": "siliconflow",
+   "country": "CN",
+   "company": "北京硅基流动科技股份有限公司",
+   "source": "https://www.siliconflow.cn/about",
+   "says": "© 北京硅基流动科技股份有限公司 2026 版权所有",
+   "also": [
+    {
+     "source": "https://www.siliconflow.cn/about",
+     "says": "北京市海淀区中关村东路 1 号院 8 号楼 D 座 23 层 2301"
+    },
+    {
+     "source": "https://www.siliconflow.cn/about",
+     "says": "SiliconFlow 国际站"
+    },
+    {
+     "source": "https://docs.siliconflow.com/en/legals/terms-of-service",
+     "says": "form a binding agreement between SILICONFLOW LABS PTE. LTD."
+    }
+   ],
+   "note": "The tie rests on the company's own site, not on a sentence of ownership: the page of the Beijing company links its international site, whose terms name SILICONFLOW LABS PTE. LTD."
+  },
+  {
+   "slug": "z-ai",
+   "country": "CN",
+   "company": "Knowledge Atlas Technology Joint Stock Company Limited",
+   "source": "https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000017.pdf",
+   "says": "Headquarters and registered office in the PRC 10th Floor, Building 9 Yard 1, Zhongguancun East Road Haidian District Beijing PRC",
+   "also": [
+    {
+     "source": "https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000017.pdf",
+     "says": "JINGSHENG HENGXING TECHNOLOGY PTE. LTD., a company incorporated under the laws of Singapore with limited liability on November 23, 2023, and an indirect wholly owned subsidiary of our Company"
+    },
+    {
+     "source": "https://docs.z.ai/legal-agreement/terms-of-use",
+     "says": "form an agreement between JINGSHENG HENGXING TECHNOLOGY PTE.LTD"
+    }
+   ],
+   "note": "The listing document names the Singapore company of the provider's terms as an indirect wholly owned subsidiary."
+  }
+ ]
+}

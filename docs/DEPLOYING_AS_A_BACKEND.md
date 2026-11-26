@@ -172,15 +172,19 @@ Two details worth having:
   "savedModel": "deepseek",
   "host": "openrouter.ai",
   "usage": { "prompt": 412300, "cached": 361000, "written": 0, "completion": 9800 },
-  "cost": 0.0412
+  "cost": 0.0412,
+  "servedBy": { "DeepInfra": 7, "Fireworks": 1 }
 }
 ```
 
 `--model <m>` names a saved model (`codezaiku model add deepseek openrouter … --prices …`), which brings its own address, id and
 prices, or a model id on the drive. `savedModel`, `host`, `usage` (the tokens the server reported: prompt, of which read from
 its cache and written to it, and completion) and `cost` (at the saved model's prices, dollars) are present only when there was
-one; `model` is always the id that answered. The same job adds a line to `~/.codezaiku/spend.jsonl`, which `codezaiku spend`
-adds up.
+one; `model` is always the id that answered. `servedBy` is present only for a model reached through OpenRouter: the providers
+OpenRouter says served the run's requests, by the names it gives them, each with its number of requests. Any other host leaves it
+out, and so does a run in which OpenRouter named no provider. `provider` is not this: it is the `--provider` word you passed,
+returned as it was. The same job adds a line to `~/.codezaiku/spend.jsonl`, which `codezaiku spend` adds up; for a model reached
+through OpenRouter that line names the providers too (`served`).
 
 **Exit code and `status` always agree**, so a caller can branch on the code alone:
 
@@ -197,6 +201,28 @@ which is why a caller reading only the exit code would conclude a completed task
 **`warning`** is present only when the run declared done on its last turn and the harness's check passed on what
 is on disk: the status is what the oracle says, `success` when it ran green, and the field says the finish came at the
 turn limit. A run that reached its last turn without a passing check stays `incomplete`.
+
+**`networkRefused`** is present only when a command of the run was refused a connection by the sandbox's closed network
+(a run on a hosted model on Linux or macOS, or `sandbox.network closed`): a list of `{"host", "port", "command", "rule"}`, oldest
+first, such as `{"host": "github.com", "port": 443, "command": "git push origin main", "rule": "not let in"}`, after every
+other field, `servedBy` included. The run
+went on without it; `codezaiku config set sandbox.hosts github.com` lets that host in for the next one. The same tries,
+and the ones let through, are in `~/.codezaiku/sandbox/network/`.
+
+**`gitPutBack`** is present only when a command of the run changed the repository's own git settings, hooks or info
+(`.git/config`, `.git/hooks/`, `.git/info/`, and the like in a submodule's or a new repository's folder) and CodeZaiku put
+it back, after every other field, `git` included: a list of `{"path", "change", "copy"}`, such as `{"path": ".git/config",
+"change": "core.hookspath = .githooks (added): git will run the hooks in .githooks …", "copy": "<the changed version, kept
+under ~/.codezaiku/git-put-back/>"}`. The run went on; nothing of the run's commits, branches or tags is touched. A host that
+wants such a change kept applies it itself; see "What a job can leave in a repository" in SECURITY.md.
+
+**`git`** is present only when CodeZaiku pushed a branch or opened a pull request for the run, after `networkRefused` and
+before `gitPutBack`: `{"pushed": [{"remote", "address", "branch", "from", "to", "commits", "force"}],
+"pullRequests": [{"remote", "repository", "branch", "url"}]}`, each list present only when it has an entry. `from` is the
+commit the remote's branch was at as CodeZaiku last saw it, `null` for a new branch; `to` is the commit pushed; `address` is
+the remote's address as the project held it when the run began, with any password in it shown as `***`. A run pushes only
+to the repositories the setting `git.push` lists (see "Controlling git writes"), so with that setting off this field never
+appears.
 
 **`status` is deliberately not flattering.** `success` requires that a real test oracle *ran and
 passed*, with genuine counts. `untested` means the agent finished and nothing verified its claim —
@@ -410,6 +436,16 @@ unanswered request refuses rather than proceeding — a gate nobody answered has
 
 **On the CLI subprocess there is no client to ask, so nothing is gated.** A task that asks for a commit
 gets one. Your control there is which tasks you route.
+
+**Pushes and pull requests are CodeZaiku's own, never a shell command's.** A command runs in the sandbox with no
+credentials, so `git push` there fails, and the model is told to use the `git_push` tool. CodeZaiku then pushes outside
+the sandbox with the credentials of the account it runs under, to the remote's address as it stood when the run began.
+On the CLI subprocess, over MCP and over ACP alike, a session gets the git tools only when `git.push` is set: `read` gives
+it `git_fetch` and pull-request reading; a list of repositories (`github.com/example-org/*`) lets it also push to them and
+open pull requests there, never with force. A project having a remote changes nothing in the tools a session gets. Over ACP
+each push and each pull request to a listed repository also goes to `session/request_permission` first, its title saying
+where; your client's yes is needed as well as the setting, never instead of it. If your client answers permission requests
+by itself, the setting is the only gate. See "Push, fetch and pull requests" in SECURITY.md.
 
 ### Concurrency
 

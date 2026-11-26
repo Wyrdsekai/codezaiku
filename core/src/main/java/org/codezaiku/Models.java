@@ -17,6 +17,9 @@ import java.util.Map;
 
 import org.codezaiku.drive.DriveClient;
 import org.codezaiku.drive.Auto;
+import org.codezaiku.drive.Fallback;
+import org.codezaiku.drive.ModelPlaces;
+import org.codezaiku.drive.OpenRouterProviders;
 import org.codezaiku.drive.SavedModels;
 import org.codezaiku.drive.Spend;
 import java.nio.file.Files;
@@ -180,25 +183,59 @@ public final class Models {
 
     // ── named endpoints ─────────────────────────────────────────────────────
 
+    /**
+     * The saved models as a person reads them, and the fallback beside the model it stands behind; under a model, where what a job sends
+     * it goes when that bears on the places CodeZaiku avoids ({@link ModelPlaces}). No model server is asked anything: for a model on
+     * OpenRouter its public list of who serves the model is read, without a key.
+     */
     private static int list() {
         SavedModels.Entry dflt = SavedModels.defaultEntry();
-        System.out.println("drive: " + dflt.drive() + "   model: " + dflt.model() + (SavedModels.hasKey(dflt) ? "" : "   (no key kept for this host)") + "\n");
+        String fbName = Fallback.named();
+        SavedModels.Entry fb = fbName == null ? null : SavedModels.get(fbName);
+        boolean defaultIsFallback = fb != null && fb.name().equals(SavedModels.DEFAULT);
         Map<String, SavedModels.Entry> s = SavedModels.all();
+        boolean defaultSaved = false;
+        for (SavedModels.Entry e : s.values()) if (!e.name().equals(SavedModels.DEFAULT) && sameModel(e, dflt)) defaultSaved = true;
+        // the default line carries the fallback when no saved line is the default's twin to carry it
+        String defaultBehind = fb == null || defaultSaved ? "" : defaultIsFallback ? "   <- the fallback" : sameModel(fb, dflt) ? "" : "   (falls back to " + fb.name() + ")";
+        System.out.println("drive: " + dflt.drive() + "   model: " + dflt.model() + (SavedModels.hasKey(dflt) ? "" : "   (no key kept for this host)") + defaultBehind);
+        String where = ModelPlaces.said(dflt);   // who serves it and who is left out, or where its host is run from
+        if (!where.isEmpty()) System.out.println("    " + where);
+        boolean router = DriveClient.openRouter(dflt.drive());
+        System.out.println();
         if (s.size() <= 1) {
             System.out.println("no saved models besides the default.");
             System.out.println("  codezaiku model detect              find what is running");
             System.out.println("  codezaiku model add big http://localhost:8201");
             System.out.println("  codezaiku model add deepseek openrouter deepseek/deepseek-v4.1-flash --prices 0.024/0.72/0.005 --cap 20");
+            if (fbName != null && fb == null) System.out.println("\n" + noSuchFallback(fbName));
+            if (router) System.out.println("\n" + OpenRouterProviders.listSaid());
             return 0;
         }
         System.out.println("saved:");
         for (SavedModels.Entry e : s.values()) {
             if (e.name().equals(SavedModels.DEFAULT)) continue;
-            boolean inUse = Config.driveBase(e.drive()).equalsIgnoreCase(Config.driveBase(dflt.drive())) && e.model().equals(dflt.model());
-            System.out.println("  " + e.line() + (SavedModels.hasKey(e) ? "" : "   [no key kept for " + e.host() + ": codezaiku model key " + e.name() + " --file <path>]") + (inUse ? "   <- in use" : ""));
+            boolean inUse = sameModel(e, dflt);
+            boolean isFallback = fb != null && (e.name().equals(fb.name()) || sameModel(e, fb));
+            String marks = inUse && isFallback ? "   <- in use, and the fallback" : inUse ? "   <- in use" + (fb == null ? "" : ", falls back to " + fb.name()) : isFallback ? "   <- the fallback" : "";
+            System.out.println("  " + e.line() + (SavedModels.hasKey(e) ? "" : "   [no key kept for " + e.host() + ": codezaiku model key " + e.name() + " --file <path>]") + marks);
+            String said = ModelPlaces.said(e);
+            if (!said.isEmpty()) System.out.println("      " + said);
+            router |= DriveClient.openRouter(e.drive());
         }
         System.out.println("\nA job picks one with --model <name>; `codezaiku model use <name>` makes it the default.");
+        if (fb != null) System.out.println("When the model a job would run on does not answer, or has every call in use, the job runs on " + fb.name() + " (" + fb.model() + ") and says so. `codezaiku config unset fallback` turns this off.");
+        else if (fbName != null) System.out.println(noSuchFallback(fbName));
+        if (router) System.out.println(OpenRouterProviders.listSaid());
         return 0;
+    }
+
+    private static boolean sameModel(SavedModels.Entry a, SavedModels.Entry b) {
+        return Config.driveBase(a.drive()).equalsIgnoreCase(Config.driveBase(b.drive())) && a.model().equals(b.model());
+    }
+
+    private static String noSuchFallback(String name) {
+        return "The fallback setting names " + name + ", and no saved model has that name: `codezaiku config set fallback <name>` with a name above.";
     }
 
     /** The value after a flag, or null; the flag and its value are taken out of {@code rest}. */
@@ -217,6 +254,8 @@ public final class Models {
         if (rest.size() < 2) { System.err.println("usage: codezaiku model add <name> <address|host word> [<model id>] [--prices in/out[/cache]] [--effort e] [--cap dollars] [--note text]"); return 2; }
         SavedModels.Entry e = SavedModels.put(rest.get(0), rest.get(1), rest.size() >= 3 ? rest.get(2) : null, prices, effort, cap, note);
         System.out.println("saved " + e.line());
+        String where = ModelPlaces.said(e);   // who serves it and who is left out, that Hugging Face's router cannot be told, or where its host is run from
+        if (!where.isEmpty()) System.out.println(where);
         if (!SavedModels.hasKey(e)) System.out.println("no key is kept for " + e.host() + " yet:  codezaiku model key " + e.name() + " --file <path to the key>");
         System.out.println("use it for one job:  codezaiku code <project> \"…\" --model " + e.name() + "      for every job:  codezaiku model use " + e.name());
         return 0;
@@ -281,7 +320,9 @@ public final class Models {
             msgs.addObject().put("role", "user").put("content", "Answer with the one word OK.");
             String said = d.chat(msgs, d.json().createArrayNode(), 64, "none").path("content").asText("").strip();
             System.out.println("it answered: " + (said.length() > 80 ? said.substring(0, 80) + "…" : said));
-            System.out.println("that call: " + Spend.usageLine(usage, e.cost(usage), e.prices() != null) + (e.prices() == null ? "   (no prices saved: codezaiku model set " + e.name() + " --prices in/out)" : ""));
+            String servedBy = Spend.servedLine(DriveClient.servedBy(usage));   // through a router, the provider that answered
+            System.out.println("that call: " + Spend.usageLine(usage, e.cost(usage), e.prices() != null) + (servedBy.isEmpty() ? "" : ", " + servedBy)
+                    + (e.prices() == null ? "   (no prices saved: codezaiku model set " + e.name() + " --prices in/out)" : ""));
             return 0;
         } catch (RuntimeException ex) {
             Throwable t = ex; while (t.getCause() != null && t.getMessage() != null && t.getMessage().startsWith("chat() failed")) t = t.getCause();

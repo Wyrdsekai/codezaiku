@@ -1,6 +1,9 @@
 package org.codezaiku;
 
 import org.junit.jupiter.api.Test;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.net.InetSocketAddress;
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
@@ -50,6 +53,27 @@ class ResearchZoshoInstallTest {
         Process p = new ProcessBuilder(launcher.toString()).redirectErrorStream(true).start();
         assertEquals("researchzosho 9.9.9", new String(p.getInputStream().readAllBytes()).strip());
         assertTrue(Files.isRegularFile(prefix.resolve("bin").resolve("zosho")), "the short form too");
+    }
+
+    @Test
+    void theReleaseIsDownloadedUnderCodezaikusOwnName(@TempDir Path tmp) throws Exception {
+        Assumptions.assumeFalse(ResearchZoshoInstall.windows());
+        Path rel = fakeRelease(tmp, "9.9.9", false);
+        List<String> asked = new CopyOnWriteArrayList<>();
+        HttpServer s = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        s.createContext("/", x -> {
+            asked.add(x.getRequestURI().getPath() + " " + x.getRequestHeaders().getFirst("User-Agent"));
+            Path f = rel.resolve(x.getRequestURI().getPath().substring(1));
+            byte[] b = Files.readAllBytes(f);
+            x.sendResponseHeaders(200, b.length);
+            try (var o = x.getResponseBody()) { o.write(b); }
+        });
+        s.start();
+        try {
+            ResearchZoshoInstall.install("9.9.9", tmp.resolve("prefix"), "http://127.0.0.1:" + s.getAddress().getPort(), false, new PrintStream(new ByteArrayOutputStream()));
+            String name = "CodeZaiku/" + FamiliarMain.VERSION;
+            assertEquals(List.of("/researchzosho-9.9.9.tar.gz " + name, "/SHA256SUMS " + name), asked, "as the update checks name themselves");
+        } finally { s.stop(0); }
     }
 
     @Test

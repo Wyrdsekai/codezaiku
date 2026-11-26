@@ -1,5 +1,6 @@
 package org.codezaiku.tools;
 
+import org.codezaiku.exec.Sandbox;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -177,8 +178,24 @@ public final class ReadDepSourceTool implements Tool {
         return locateNode(dep);
     }
 
+    /**
+     * Where cargo keeps the sources of the crates it fetched: under the project's own cargo home where its commands are
+     * sandboxed (they cannot write the person's {@code ~/.cargo}), else under the person's.
+     */
+    private Path cargoSources() {
+        if (Sandbox.found().on()) {
+            try {
+                Path own = Sandbox.folders(root).cache().resolve("cargo").resolve("registry").resolve("src");
+                if (Files.isDirectory(own)) return own;
+            } catch (IOException e) {
+                // the person's, below
+            }
+        }
+        return Path.of(System.getProperty("user.home"), ".cargo", "registry", "src");
+    }
+
     private Located locateRust(String dep) {
-        Path cargoSrc = Path.of(System.getProperty("user.home"), ".cargo", "registry", "src");
+        Path cargoSrc = cargoSources();
         if (!Files.isDirectory(cargoSrc)) return null;
         String pinned = pinnedCrateVersion(dep); // from Cargo.lock if present
         Path best = null;

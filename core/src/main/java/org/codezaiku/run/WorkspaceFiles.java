@@ -1,5 +1,6 @@
 package org.codezaiku.run;
 
+import org.codezaiku.exec.Sandbox;
 import java.nio.charset.StandardCharsets;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -242,8 +243,8 @@ public final class WorkspaceFiles {
         cmd.addAll(List.of(args));
         Process p = null;
         try {
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.directory(dir.toFile());
+            // sandboxed: a project's .git/config can name programs that git runs on a status or a diff
+            ProcessBuilder pb = Sandbox.in(dir).command(cmd);
             pb.redirectError(ProcessBuilder.Redirect.DISCARD);
             pb.redirectInput(ProcessBuilder.Redirect.from(new File(System.getProperty("os.name", "").toLowerCase().contains("win") ? "NUL" : "/dev/null")));
             var env = pb.environment();
